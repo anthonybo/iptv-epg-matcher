@@ -1,0 +1,1152 @@
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const fetch = require('node-fetch');
+const winston = require('winston');
+const { parseM3U, matchChannels, generateEPG } = require('./epgUtils');
+const crypto = require('crypto');
+const xml2js = require('xml2js');
+
+const logger = winston.createLogger({
+  level: 'debug',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.printf(({ timestamp, level, message, ...metadata }) => {
+      const metaString = Object.keys(metadata).length ? ' ' + JSON.stringify(metadata) : '';
+      return `${timestamp} [${level}]: ${message}${metaString}`;
+    })
+  ),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'app.log' })
+  ]
+});
+
+const app = express();
+const upload = multer({ dest: 'uploads/' });
+const storage = {};
+const CACHE_DIR = path.join(__dirname, 'cache');
+const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours in ms
+
+// Ensure cache directory exists and has correct permissions
+try {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    logger.info(`Created cache directory: ${CACHE_DIR}`);
+  }
+  const testFile = path.join(CACHE_DIR, 'test.txt');
+  fs.writeFileSync(testFile, 'test');
+  fs.unlinkSync(testFile);
+  logger.info(`Cache directory is writable: ${CACHE_DIR}`);
+} catch (e) {
+  logger.error(`Cache directory setup failed: ${e.message}`, { stack: e.stack });
+}
+
+async function fetchURL(url) {
+  logger.info(`Fetching URL: ${url}`);
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const buffer = await response.buffer();
+    logger.info(`Fetched ${buffer.length} bytes from ${url}`);
+    return buffer;
+  } catch (e) {
+    logger.error(`Fetch failed for ${url}: ${e.message}`);
+    throw e;
+  }
+}
+
+// Improved EPG parsing function
+function parseEPG(epgContent, logger) {
+  return new Promise((resolve, reject) => {
+    xml2js.parseString(epgContent, (err, result) => {
+      if (err) {
+        logger.error('Failed to parse EPG', { error: err.message });
+        return reject(err);
+      }
+
+      if (!result || !result.tv) {
+        logger.error('Invalid EPG XML structure, missing tv element');
+        return reject(new Error('Invalid EPG XML structure'));
+      }
+
+      const channels = result.tv.channel || [];
+      const programs = result.tv.programme || [];
+      
+      logger.info(`Parsed EPG: ${channels.length} channels, ${programs.length} programs`);
+      
+      // Log some sample data to help with debugging
+      if (channels.length > 0) {
+        logger.debug(`First channel sample: ${JSON.stringify(channels[0]).substring(0, 500)}`);
+      }
+      
+      if (programs.length > 0) {
+        logger.debug(`First program sample: ${JSON.stringify(programs[0]).substring(0, 500)}`);
+      }
+      
+      // Build the channel map for faster lookups
+      const channelMap = {};
+      
+      // Process channels for easier matching
+      channels.forEach(channel => {
+        if (!channel.$ || !channel.$.id) return;
+        
+        const originalId = channel.$.id;
+        
+        // Add the original ID
+        channelMap[originalId] = channel;
+        
+        // Add lowercase version
+        channelMap[originalId.toLowerCase()] = channel;
+        
+        // Add snake_case version
+        const snakeCase = originalId.toLowerCase().replace(/\s+/g, '_').replace(/[^\w_]/g, '');
+        channelMap[snakeCase] = channel;
+        
+        // Add version without 'hd' at the end
+        if (originalId.toLowerCase().endsWith('hd')) {
+          const noHdId = originalId.toLowerCase().slice(0, -2).trim();
+          channelMap[noHdId] = channel;
+          
+          // Also add snake_case without HD
+          const snakeCaseNoHd = snakeCase.replace(/_?hd$/, '');
+          channelMap[snakeCaseNoHd] = channel;
+        }
+        
+        // Add versions from display-name
+        if (channel['display-name']) {
+          channel['display-name'].forEach(name => {
+            if (typeof name === 'string') {
+              channelMap[name.toLowerCase()] = channel;
+              channelMap[name.toLowerCase().replace(/\s+/g, '_').replace(/[^\w_]/g, '')] = channel;
+            } else if (name._ && typeof name._ === 'string') {
+              channelMap[name._.toLowerCase()] = channel;
+              channelMap[name._.toLowerCase().replace(/\s+/g, '_').replace(/[^\w_]/g, '')] = channel;
+            }
+          });
+        }
+      });
+      
+      // Build a program map for faster lookup
+      const programMap = {};
+      programs.forEach(program => {
+        if (!program.$ || !program.$.channel) return;
+        
+        const channelId = program.$.channel;
+        if (!programMap[channelId]) {
+          programMap[channelId] = [];
+        }
+        programMap[channelId].push(program);
+      });
+      
+      // Generate additional channel mapping for US channels with common prefixes
+      const usChannelKeys = Object.keys(channelMap).filter(key => 
+        key.toLowerCase().includes('us') || 
+        key.toLowerCase().includes('travel') ||
+        key.toLowerCase().includes('history') ||
+        key.toLowerCase().includes('discovery') ||
+        key.toLowerCase().includes('national')
+      );
+      
+      usChannelKeys.forEach(key => {
+        // Create additional mappings without US prefix
+        if (key.startsWith('us')) {
+          const withoutPrefix = key.replace(/^us[|\s_-]*/, '');
+          if (withoutPrefix && withoutPrefix !== key) {
+            channelMap[withoutPrefix] = channelMap[key];
+            
+            // Also try without HD suffix if present
+            if (withoutPrefix.toLowerCase().endsWith('hd')) {
+              const withoutHd = withoutPrefix.slice(0, -2).trim();
+              channelMap[withoutHd] = channelMap[key];
+            }
+          }
+        }
+      });
+      
+      logger.debug(`Generated ${Object.keys(channelMap).length} channel ID mappings`);
+      logger.debug(`Generated ${Object.keys(programMap).length} program channel mappings`);
+      
+      resolve({ 
+        channels: channels, 
+        programs: programs,
+        channelMap: channelMap,
+        programMap: programMap
+      });
+    });
+  });
+}
+
+const EXTERNAL_EPG_URLS = [
+  'https://epgshare01.online/epgshare01/epg_ripper_US1.xml.gz',
+  'https://epg.pw/xmltv/epg_US.xml',
+  'https://www.open-epg.com/files/unitedstates1.xml.gz'
+];
+
+function generateCredentials() {
+  const username = crypto.randomBytes(8).toString('hex');
+  const password = crypto.randomBytes(8).toString('hex');
+  return { username, password };
+}
+
+function getCacheKey(xtreamUsername, xtreamPassword, xtreamServer) {
+  const normalizedUsername = (xtreamUsername || '').trim().toLowerCase();
+  const normalizedPassword = (xtreamPassword || '').trim().toLowerCase();
+  const normalizedServer = (xtreamServer || '').trim().toLowerCase();
+  const cacheKey = crypto.createHash('md5')
+    .update(`${normalizedUsername}-${normalizedPassword}-${normalizedServer}`)
+    .digest('hex');
+  logger.debug('Generated cache key', { cacheKey, normalizedUsername, normalizedPassword, normalizedServer });
+  return cacheKey;
+}
+
+app.use(cors());
+app.use(express.json());
+
+// Debug endpoint to check EPG data
+app.get('/api/debug/epg/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  if (!storage[sessionId]) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+  
+  const { epgSources } = storage[sessionId];
+  const sourcesInfo = {};
+  
+  // Get info about each EPG source
+  Object.keys(epgSources).forEach(sourceKey => {
+    const source = epgSources[sourceKey];
+    const channelCount = source.channels ? source.channels.length : 0;
+    const programCount = source.programs ? source.programs.length : 0;
+    
+    // Get sample channel IDs and structure
+    const channelSamples = source.channels 
+      ? source.channels.slice(0, 5).map(ch => ({
+          id: ch.$ ? ch.$.id : 'unknown',
+          name: ch['display-name'] ? ch['display-name'][0] : 'unknown',
+          alternativeIds: ch.alternativeIds || []
+        }))
+      : [];
+      
+    // Get sample program channel references
+    const programSamples = source.programs
+      ? source.programs.slice(0, 5).map(p => ({
+          channel: p.$ ? p.$.channel : 'unknown',
+          title: p.title ? p.title[0] : 'unknown',
+          start: p.$ ? p.$.start : 'unknown'
+        }))
+      : [];
+      
+    sourcesInfo[sourceKey] = {
+      channelCount,
+      programCount,
+      channelSamples,
+      programSamples
+    };
+  });
+  
+  res.json(sourcesInfo);
+});
+
+// New debug endpoint to search for channels across EPG sources
+app.get('/api/debug/epg-search/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const { query } = req.query;
+  
+  if (!storage[sessionId] || !query) {
+    return res.status(400).json({ error: 'Missing session ID or search query' });
+  }
+  
+  const { epgSources } = storage[sessionId];
+  const results = {};
+  
+  // Search for channels matching the query
+  Object.keys(epgSources).forEach(sourceKey => {
+    const source = epgSources[sourceKey];
+    results[sourceKey] = {
+      channelMatches: [],
+      programMatches: []
+    };
+    
+    // Search in channel map if available
+    if (source.channelMap) {
+      const matchingKeys = Object.keys(source.channelMap).filter(key => 
+        key.toLowerCase().includes(query.toLowerCase())
+      );
+      
+      // Get unique channel IDs
+      const uniqueChannelIds = [...new Set(matchingKeys.map(key => source.channelMap[key].$.id))];
+      
+      results[sourceKey].channelMatches = uniqueChannelIds.map(id => {
+        const channel = source.channels.find(ch => ch.$ && ch.$.id === id);
+        return {
+          id: id,
+          displayName: channel && channel['display-name'] ? 
+            (typeof channel['display-name'][0] === 'string' ? 
+              channel['display-name'][0] : 
+              channel['display-name'][0]._ || id) : 
+            id
+        };
+      });
+    }
+    
+    // Search for programs with matching channel IDs
+    if (source.programMap) {
+      results[sourceKey].channelMatches.forEach(channel => {
+        const programs = source.programMap[channel.id] || [];
+        if (programs.length > 0) {
+          results[sourceKey].programMatches.push({
+            channelId: channel.id,
+            programCount: programs.length,
+            sample: programs.slice(0, 3).map(p => ({
+              title: p.title ? (typeof p.title[0] === 'string' ? p.title[0] : p.title[0]._ || 'Unknown') : 'Unknown',
+              start: p.$.start,
+              stop: p.$.stop
+            }))
+          });
+        }
+      });
+    }
+  });
+  
+  res.json(results);
+});
+
+// EPG sources endpoint
+app.get('/api/epg/:sessionId/sources', (req, res) => {
+  const { sessionId } = req.params;
+  if (!storage[sessionId]) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  const epgSources = storage[sessionId].epgSources || {};
+  const sourceNames = Object.keys(epgSources);
+  
+  res.json({
+    sources: sourceNames,
+    count: sourceNames.length
+  });
+});
+
+app.post('/api/load', upload.fields([{ name: 'm3u' }, { name: 'epg' }]), async (req, res) => {
+  try {
+    logger.info('Loading channels and EPG sources', { body: req.body, files: req.files });
+    const { m3uUrl, epgUrl, xtreamUsername, xtreamPassword, xtreamServer, forceUpdate } = req.body;
+    logger.debug('Force update flag', { forceUpdate });
+    const cacheKey = getCacheKey(xtreamUsername, xtreamPassword, xtreamServer);
+    const cacheChannelsFile = path.join(CACHE_DIR, `${cacheKey}_channels.json`);
+    const cacheEpgSourcesFile = path.join(CACHE_DIR, `${cacheKey}_epgSources.json`);
+    let channels, epgSources = {}, m3uContent;
+
+    logger.debug('Checking for existing cache', { cacheChannelsFile, cacheEpgSourcesFile });
+    if (!forceUpdate && fs.existsSync(cacheChannelsFile) && fs.existsSync(cacheEpgSourcesFile)) {
+      const stats = fs.statSync(cacheChannelsFile);
+      const cacheAge = Date.now() - stats.mtimeMs;
+      logger.debug('Cache age check', { cacheAge, CACHE_TTL });
+      if (cacheAge < CACHE_TTL) {
+        try {
+          channels = JSON.parse(fs.readFileSync(cacheChannelsFile, 'utf8'));
+          epgSources = JSON.parse(fs.readFileSync(cacheEpgSourcesFile, 'utf8'));
+          logger.info('Loaded from cache', { cacheKey, channelCount: channels.length, epgSourceCount: Object.keys(epgSources).length });
+        } catch (e) {
+          logger.error('Failed to read or parse cache files', { error: e.message, stack: e.stack });
+          channels = null; // Force fetching new data
+        }
+      } else {
+        logger.info('Cache expired', { cacheAge, CACHE_TTL });
+      }
+    } else {
+      logger.info('Cache files missing or forceUpdate enabled', { cacheChannelsExists: fs.existsSync(cacheChannelsFile), cacheEpgSourcesExists: fs.existsSync(cacheEpgSourcesFile), forceUpdate });
+    }
+
+    if (!channels) {
+      logger.info('Fetching new data');
+      if (xtreamUsername && xtreamPassword && xtreamServer) {
+        const baseUrl = xtreamServer.endsWith('/') ? xtreamServer : `${xtreamServer}/`;
+        const xtreamM3uUrl = `${baseUrl}get.php?username=${xtreamUsername}&password=${xtreamPassword}&type=m3u_plus&output=ts`;
+        m3uContent = (await fetchURL(xtreamM3uUrl)).toString('utf8');
+
+        const xtreamEpgUrl = `${baseUrl}xmltv.php?username=${xtreamUsername}&password=${xtreamPassword}`;
+        try {
+          const epgContent = (await fetchURL(xtreamEpgUrl)).toString('utf8');
+          const xtreamEPG = await parseEPG(epgContent, logger);
+          if (xtreamEPG.channels.length > 0) {
+            epgSources['XTREAM'] = xtreamEPG;
+            logger.info(`Loaded ${xtreamEPG.channels.length} channels and ${xtreamEPG.programs.length} programs from XTREAM EPG`);
+          }
+        } catch (e) {
+          logger.warn('No EPG from XTREAM, proceeding without it', { error: e.message });
+        }
+      } else if (m3uUrl) {
+        m3uContent = (await fetchURL(m3uUrl)).toString('utf8');
+      } else if (req.files && req.files.m3u) {
+        m3uContent = fs.readFileSync(req.files.m3u[0].path, 'utf8');
+        logger.info('Loaded M3U from file');
+      } else {
+        throw new Error('No M3U source provided');
+      }
+
+      channels = parseM3U(m3uContent, logger);
+      logger.info('M3U parsed successfully', { channelCount: channels.length });
+
+      const sampleGroupTitles = channels.slice(0, 10).map(ch => ch.groupTitle);
+      logger.debug('Sample groupTitles', { sampleGroupTitles });
+
+      // Try to load EPG from external sources
+      for (const url of EXTERNAL_EPG_URLS) {
+        try {
+          const epgBuffer = await fetchURL(url);
+          const epgData = url.endsWith('.gz') 
+            ? (await require('zlib').gunzipSync(epgBuffer)).toString('utf8') 
+            : epgBuffer.toString('utf8');
+          
+          const parsedEPG = await parseEPG(epgData, logger);
+          if (parsedEPG.channels.length > 0) {
+            epgSources[url] = parsedEPG;
+            logger.info(`Loaded ${parsedEPG.channels.length} channels and ${parsedEPG.programs.length} programs from ${url}`);
+            
+            // Log channel ID samples for matching
+            if (parsedEPG.channels.length > 0) {
+              const channelIdSamples = parsedEPG.channels.slice(0, 5).map(ch => ch.$ ? ch.$.id : 'unknown');
+              logger.info(`Sample channel IDs from ${url}: ${channelIdSamples.join(', ')}`);
+            }
+            
+            // Log program channel reference samples
+            if (parsedEPG.programs.length > 0) {
+              const programRefSamples = parsedEPG.programs.slice(0, 5).map(p => p.$ ? p.$.channel : 'unknown');
+              logger.info(`Sample program channel refs from ${url}: ${programRefSamples.join(', ')}`);
+            }
+          }
+        } catch (e) {
+          logger.warn(`Failed to load EPG from ${url}`, { error: e.message });
+        }
+      }
+
+      // Cache channels and EPG sources separately
+      try {
+        fs.writeFileSync(cacheChannelsFile, JSON.stringify(channels.map(ch => ({
+          tvgId: ch.tvgId,
+          name: ch.name,
+          groupTitle: ch.groupTitle,
+          url: ch.url
+        })), null, 2));
+        logger.info('Cached channels', { cacheKey, file: cacheChannelsFile });
+      } catch (e) {
+        logger.error(`Failed to write channels cache: ${e.message}`, { stack: e.stack });
+      }
+
+      try {
+        fs.writeFileSync(cacheEpgSourcesFile, JSON.stringify(epgSources, null, 2));
+        logger.info('Cached EPG sources', { cacheKey, file: cacheEpgSourcesFile });
+      } catch (e) {
+        logger.error(`Failed to write EPG sources cache: ${e.message}`, { stack: e.stack });
+      }
+    }
+
+    if (!channels.length) {
+      logger.error('No channels parsed from M3U');
+      return res.status(500).json({ error: 'Failed to parse M3U channels' });
+    }
+
+    const sessionId = crypto.randomBytes(4).toString('hex');
+    storage[sessionId] = { channels, epgSources, m3uContent, xtreamUsername, xtreamPassword, xtreamServer };
+    logger.info('Session created', { sessionId });
+
+    const categoryCounts = channels.reduce((acc, ch) => {
+      const groupTitle = ch.groupTitle || 'Uncategorized';
+      acc[groupTitle] = (acc[groupTitle] || 0) + 1;
+      return acc;
+    }, {});
+    const categories = Object.entries(categoryCounts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    logger.debug('Extracted categories', { categoryCount: categories.length, categories: categories.slice(0, 10) });
+
+    const limitedChannels = channels.slice(0, 1000);
+    const response = {
+      sessionId,
+      channels: limitedChannels,
+      totalChannels: channels.length,
+      categories,
+      epgSources: Object.keys(epgSources),
+      status: Object.keys(epgSources).length === (EXTERNAL_EPG_URLS.length + (m3uContent ? 1 : 0)) ? 'success' : 'partial',
+      message: Object.keys(epgSources).length > 0 ? 'Channels loaded, some EPG sources may have failed' : 'Channels loaded, no EPG sources available'
+    };
+
+    const responseSize = Buffer.byteLength(JSON.stringify(response), 'utf8');
+    logger.info(`Sending response: ${responseSize} bytes`, { sessionId, channelCount: limitedChannels.length, categoryCount: categories.length, epgSourceCount: response.epgSources.length });
+
+    if (req.files && req.files.m3u) fs.unlinkSync(req.files.m3u[0].path);
+    if (req.files && req.files.epg) fs.unlinkSync(req.files.epg[0].path);
+
+    res.json(response);
+  } catch (error) {
+    logger.error('Load failed', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/channels/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const { page = 1, limit = 1000, category } = req.query;
+  const start = (page - 1) * limit;
+  const end = start + parseInt(limit);
+
+  if (!storage[sessionId]) {
+    logger.error('Session not found', { sessionId });
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  let channels = storage[sessionId].channels;
+  if (category) channels = channels.filter(ch => ch.groupTitle === category);
+  const paginatedChannels = channels.slice(start, end);
+  logger.debug('Sending paginated channels', { sessionId, page, limit, category, channelCount: paginatedChannels.length });
+  res.json({
+    channels: paginatedChannels,
+    totalChannels: channels.length,
+    page: parseInt(page),
+    limit: parseInt(limit)
+  });
+});
+
+// Updated EPG endpoint with better channel matching
+app.get('/api/epg/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const { channelId } = req.query;
+
+  if (!storage[sessionId]) {
+    logger.error('Session not found', { sessionId });
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  const { epgSources } = storage[sessionId];
+  const programs = [];
+  const now = new Date();
+  let currentProgram = null;
+  
+  // Create various forms of the channel ID to improve matching
+  const channelIdVariations = [
+    channelId, 
+    channelId.toLowerCase(),
+    channelId.toLowerCase().replace(/\s+/g, '_'),
+    channelId.toLowerCase().replace(/[^\w]/g, ''),
+    channelId.toLowerCase().replace(/hd$/, ''),
+    channelId.toLowerCase().replace(/\s+hd$/, ''),
+    channelId.toUpperCase(),
+    // Additional variations for US channels
+    channelId.toLowerCase().replace(/^us[|\s_-]*/, ''),
+    channelId.toLowerCase().replace(/^us[|\s_-]*/, '').replace(/hd$/, ''),
+    // Try "channel" variations
+    channelId.toLowerCase().replace('channel', 'ch'),
+    channelId.toLowerCase().replace('ch', 'channel'),
+  ];
+  
+  // Special case for travel channel which is commonly problematic
+  if (channelId.toLowerCase().includes('travel')) {
+    channelIdVariations.push('travel');
+    channelIdVariations.push('travel_channel');
+    channelIdVariations.push('travelchannel');
+    channelIdVariations.push('travel_channel_hd');
+    channelIdVariations.push('travelchannelhd');
+    channelIdVariations.push('travelhd');
+  }
+  
+  logger.info(`Checking ${Object.keys(epgSources).length} EPG sources for channel ID: ${channelId}`);
+  logger.debug(`Trying variations: ${channelIdVariations.join(', ')}`);
+
+  // Check each EPG source
+  for (const sourceKey of Object.keys(epgSources)) {
+    const source = epgSources[sourceKey];
+    let matchFound = false;
+    let matchedChannelId = null;
+    
+    // Check if the source has the channelMap
+    if (source.channelMap) {
+      // Try each channel ID variation to find a match
+      for (const idVariation of channelIdVariations) {
+        if (source.channelMap[idVariation]) {
+          matchedChannelId = source.channelMap[idVariation].$.id;
+          logger.info(`Found channel match in ${sourceKey}: ${idVariation} -> ${matchedChannelId}`);
+          matchFound = true;
+          break;
+        }
+      }
+      
+      // If we found a match and source has programMap, use it for faster lookups
+      if (matchFound && matchedChannelId && source.programMap && source.programMap[matchedChannelId]) {
+        const matchedPrograms = source.programMap[matchedChannelId];
+        logger.info(`Found ${matchedPrograms.length} programs for ${matchedChannelId} in source ${sourceKey}`);
+        
+        if (matchedPrograms.length > 0) {
+          matchedPrograms.forEach(p => {
+            try {
+              // Parse the start and stop times
+              let start, stop;
+              
+              if (p.$.start && p.$.start.match(/\d{14} [+-]\d{4}/)) {
+                // Format: 20231225220000 +0000
+                start = new Date(p.$.start.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}) ([+-]\d{4})/, 
+                  '$1-$2-$3T$4:$5:$6$7'));
+              } else if (p.$.start) {
+                // Try as ISO format
+                start = new Date(p.$.start);
+              }
+              
+              if (p.$.stop && p.$.stop.match(/\d{14} [+-]\d{4}/)) {
+                stop = new Date(p.$.stop.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}) ([+-]\d{4})/, 
+                  '$1-$2-$3T$4:$5:$6$7'));
+              } else if (p.$.stop) {
+                stop = new Date(p.$.stop);
+              }
+              
+              // Skip invalid dates
+              if (!start || !stop || isNaN(start.getTime()) || isNaN(stop.getTime())) {
+                logger.warn(`Invalid date format: start=${p.$.start}, stop=${p.$.stop}`);
+                return;
+              }
+              
+              const programInfo = { 
+                start, 
+                stop, 
+                title: p.title ? (typeof p.title[0] === 'string' ? p.title[0] : p.title[0]._ || 'Unknown') : 'Unknown',
+                desc: p.desc ? (typeof p.desc[0] === 'string' ? p.desc[0] : p.desc[0]._ || '') : ''
+              };
+              
+              programs.push(programInfo);
+              
+              // Check if this is the current program
+              if (start <= now && stop >= now) {
+                currentProgram = programInfo;
+              }
+            } catch (e) {
+              logger.error(`Error processing program date: ${e.message}`, { error: e });
+            }
+          });
+        }
+      }
+    }
+    
+    // If we haven't found a match with channelMap or don't have a programMap, try direct matching
+    if (!matchFound) {
+      logger.debug(`Source ${sourceKey} has no channelMap or no match found, trying direct match`);
+      
+      for (const idVariation of channelIdVariations) {
+        // Check if we have programs for this channel
+        const matchedPrograms = (source.programs || []).filter(p => p.$ && p.$.channel === idVariation);
+        
+        if (matchedPrograms.length > 0) {
+          logger.info(`Found ${matchedPrograms.length} programs for ${idVariation} in source ${sourceKey}`);
+          
+          matchedPrograms.forEach(p => {
+            try {
+              // Parse the start and stop times
+              let start, stop;
+              
+              if (p.$.start && p.$.start.match(/\d{14} [+-]\d{4}/)) {
+                // Format: 20231225220000 +0000
+                start = new Date(p.$.start.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}) ([+-]\d{4})/, 
+                  '$1-$2-$3T$4:$5:$6$7'));
+              } else if (p.$.start) {
+                // Try as ISO format
+                start = new Date(p.$.start);
+              }
+              
+              if (p.$.stop && p.$.stop.match(/\d{14} [+-]\d{4}/)) {
+                stop = new Date(p.$.stop.replace(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2}) ([+-]\d{4})/, 
+                  '$1-$2-$3T$4:$5:$6$7'));
+              } else if (p.$.stop) {
+                stop = new Date(p.$.stop);
+              }
+              
+              // Skip invalid dates
+              if (!start || !stop || isNaN(start.getTime()) || isNaN(stop.getTime())) {
+                logger.warn(`Invalid date format: start=${p.$.start}, stop=${p.$.stop}`);
+                return;
+              }
+              
+              const programInfo = { 
+                start, 
+                stop, 
+                title: p.title ? (typeof p.title[0] === 'string' ? p.title[0] : p.title[0]._ || 'Unknown') : 'Unknown',
+                desc: p.desc ? (typeof p.desc[0] === 'string' ? p.desc[0] : p.desc[0]._ || '') : ''
+              };
+              
+              programs.push(programInfo);
+              
+              // Check if this is the current program
+              if (start <= now && stop >= now) {
+                currentProgram = programInfo;
+              }
+            } catch (e) {
+              logger.error(`Error processing program date: ${e.message}`, { error: e });
+            }
+          });
+        }
+      }
+    }
+  }
+
+  // Sort programs by start time
+  programs.sort((a, b) => a.start - b.start);
+  
+  // If no current program found, try to find the next upcoming program
+  if (!currentProgram && programs.length > 0) {
+    const upcomingPrograms = programs.filter(p => p.start > now);
+    if (upcomingPrograms.length > 0) {
+      // Get the soonest upcoming program
+      upcomingPrograms.sort((a, b) => a.start - b.start);
+      logger.info(`No current program found, but found upcoming program: ${upcomingPrograms[0].title}`);
+    }
+  }
+  
+  logger.debug('Sending EPG data', { 
+    sessionId, 
+    channelId, 
+    programCount: programs.length, 
+    hasCurrentProgram: !!currentProgram 
+  });
+  
+  res.json({ currentProgram, programs: programs.slice(0, 10) });
+});
+
+// Import EPG endpoint
+app.post('/api/import-epg/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  const { epgUrl } = req.body;
+  
+  if (!storage[sessionId]) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+  
+  if (!epgUrl) {
+    return res.status(400).json({ error: 'EPG URL is required' });
+  }
+  
+  try {
+    logger.info(`Importing EPG data from ${epgUrl}`);
+    
+    // Fetch EPG data from URL
+    const response = await fetch(epgUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch EPG: ${response.status} ${response.statusText}`);
+    }
+    
+    const epgContent = await response.text();
+    
+    // Parse EPG data
+    const epgData = await parseEPG(epgContent, logger);
+    
+    // Add this EPG source to the session
+    storage[sessionId].epgSources = storage[sessionId].epgSources || {};
+    storage[sessionId].epgSources['imported'] = epgData;
+    
+    // Log success
+    logger.info(`Imported EPG data`, {
+      channelCount: epgData.channels.length,
+      programCount: epgData.programs.length
+    });
+    
+    res.json({
+      status: 'success',
+      message: 'EPG data imported successfully',
+      stats: {
+        channelCount: epgData.channels.length,
+        programCount: epgData.programs.length
+      }
+    });
+  } catch (error) {
+    logger.error(`Error importing EPG data: ${error.message}`, { stack: error.stack });
+    res.status(500).json({ error: `Failed to import EPG data: ${error.message}` });
+  }
+});
+
+app.get('/api/stream/:sessionId/:channelId', async (req, res) => {
+  const { sessionId, channelId } = req.params;
+  const forceFormat = req.query.format;
+  
+  // Enhanced colored logging
+  const logWithColor = (level, message, data = {}) => {
+    const colorCodes = {
+      info: '\x1b[36m%s\x1b[0m', // Cyan
+      success: '\x1b[32m%s\x1b[0m', // Green
+      warn: '\x1b[33m%s\x1b[0m', // Yellow
+      error: '\x1b[31m%s\x1b[0m', // Red
+      debug: '\x1b[35m%s\x1b[0m', // Magenta
+    };
+    
+    const color = colorCodes[level] || colorCodes.info;
+    const fullMessage = `[STREAM] ${message}`;
+    console.log(color, fullMessage, data);
+    
+    // Also log to winston with appropriate level
+    logger[level === 'success' ? 'info' : level](message, data);
+  };
+  
+  logWithColor('info', `Stream request received for ${channelId}`, { 
+    sessionId, 
+    channelId, 
+    forceFormat,
+    timestamp: new Date().toISOString(),
+    clientIp: req.ip || req.headers['x-forwarded-for']
+  });
+
+  // Validate session
+  if (!storage[sessionId]) {
+    logWithColor('error', 'Session not found', { sessionId });
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  try {
+    // Find the channel
+    const decodedChannelId = decodeURIComponent(channelId);
+    logWithColor('debug', `Looking for channel ${decodedChannelId}`, { sessionId });
+    
+    const channel = storage[sessionId].channels.find(ch => ch.tvgId === decodedChannelId);
+    if (!channel) {
+      logWithColor('error', `Channel not found: ${decodedChannelId}`, { sessionId });
+      return res.status(404).json({ error: 'Channel not found' });
+    }
+
+    logWithColor('success', `Channel found: ${channel.name}`, { 
+      channelName: channel.name, 
+      groupTitle: channel.groupTitle,
+      url: channel.url
+    });
+
+    // When explicitly requesting TS format
+    if (forceFormat === 'ts') {
+      logWithColor('info', 'Providing TS stream', { channelId: decodedChannelId });
+      
+      // Construct proper stream URL from the channel
+      let streamUrl = channel.url;
+      const { xtreamUsername, xtreamPassword, xtreamServer } = storage[sessionId];
+      
+      // Handle Xtream provider URLs
+      if (xtreamUsername && xtreamPassword && xtreamServer) {
+        const baseUrl = xtreamServer.endsWith('/') ? xtreamServer : `${xtreamServer}/`;
+        
+        if (streamUrl.startsWith('http')) {
+          if (streamUrl.includes(baseUrl)) {
+            const channelPath = streamUrl.split(baseUrl)[1];
+            streamUrl = `${baseUrl}${xtreamUsername}/${xtreamPassword}/${channelPath}`;
+          }
+        } else {
+          streamUrl = `${baseUrl}${xtreamUsername}/${xtreamPassword}/${streamUrl}`;
+        }
+        
+        logWithColor('debug', 'Constructed Xtream URL', { 
+          originalUrl: channel.url,
+          constructedUrl: streamUrl
+        });
+      }
+      
+      // Prepare headers for the IPTV service request - critical for many providers
+      const headers = {
+        'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16', // Using VLC user agent often helps
+        'Referer': xtreamServer || 'http://localhost:5001/',
+        'Accept': '*/*',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      };
+
+      logWithColor('debug', 'Fetching stream from provider', { 
+        streamUrl,
+        headers: JSON.stringify(headers)
+      });
+
+      try {
+        // Fetch the stream with timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        
+        const response = await fetch(streamUrl, { 
+          headers,
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          logWithColor('error', 'Stream fetch failed', { 
+            status: response.status, 
+            statusText: response.statusText, 
+            url: streamUrl 
+          });
+          return res.status(response.status).json({ 
+            error: `Stream fetch failed: ${response.status} ${response.statusText}` 
+          });
+        }
+
+        // Set appropriate CORS headers - vital for browser playback
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Range');
+        
+        // Determine the content type - critical for browser playback
+        let contentType = response.headers.get('Content-Type');
+        if (!contentType || contentType === 'application/octet-stream') {
+          // If undefined or generic, set to video/mp2t for TS streams
+          contentType = 'video/mp2t';
+        }
+        
+        logWithColor('success', 'Stream fetch successful', { 
+          contentType,
+          contentLength: response.headers.get('Content-Length') || 'unknown',
+          streamUrl
+        });
+        
+        // Set appropriate headers for the browser
+        res.set('Content-Type', contentType);
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.set('Pragma', 'no-cache');
+        res.set('Expires', '0');
+        
+        // Pipe the stream to the client
+        response.body.pipe(res);
+        
+        // Handle client disconnect
+        req.on('close', () => {
+          logWithColor('debug', 'Client closed stream connection', { channelId });
+        });
+        
+        // Handle stream errors
+        response.body.on('error', (err) => {
+          logWithColor('error', 'Error in stream', { 
+            error: err.message,
+            channelId
+          });
+          
+          if (!res.headersSent) {
+            res.status(500).json({ error: `Stream error: ${err.message}` });
+          }
+        });
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          logWithColor('error', 'Stream fetch timed out', { url: streamUrl });
+          return res.status(504).json({ error: 'Stream fetch timed out' });
+        }
+        
+        logWithColor('error', 'Stream fetch error', { 
+          error: e.message, 
+          stack: e.stack, 
+          url: streamUrl 
+        });
+        
+        return res.status(500).json({ error: `Error fetching stream: ${e.message}` });
+      }
+    } 
+    // For M3U8/HLS format (default)
+    else {
+      logWithColor('info', 'Generating HLS playlist', { channelId: decodedChannelId });
+      
+      // Create a proper M3U8 playlist for VideoJS
+      const tsStreamUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channelId)}?format=ts`;
+      
+      // Create a standard, simple HLS playlist
+      const m3u8Content = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:10.0,
+${tsStreamUrl}
+#EXT-X-ENDLIST`;
+      
+      // Set proper HLS headers
+      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Range');
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+      
+      logWithColor('success', 'Returning HLS playlist', { 
+        contentLength: m3u8Content.length
+      });
+      
+      return res.send(m3u8Content);
+    }
+  } catch (e) {
+    logWithColor('error', 'Unexpected error processing stream', { 
+      error: e.message, 
+      stack: e.stack,
+      sessionId,
+      channelId 
+    });
+    
+    return res.status(500).json({ error: `Server error: ${e.message}` });
+  }
+});
+
+// Add this to your server.js file to create a stream test endpoint
+// This will help diagnose stream issues
+
+app.get('/api/stream-test/:sessionId/:channelId', async (req, res) => {
+  const { sessionId, channelId } = req.params;
+  logger.info('Stream test request', { sessionId, channelId });
+
+  if (!storage[sessionId]) {
+    return res.json({ error: 'Session not found' });
+  }
+
+  try {
+    const decodedChannelId = decodeURIComponent(channelId);
+    const channel = storage[sessionId].channels.find(ch => ch.tvgId === decodedChannelId);
+    
+    if (!channel) {
+      return res.json({ 
+        error: 'Channel not found', 
+        message: `Channel ID ${decodedChannelId} not found in session ${sessionId}` 
+      });
+    }
+
+    // Get original URL
+    let originalUrl = channel.url;
+    
+    // Construct Xtream URL if needed
+    let xtreamUrl = originalUrl;
+    const { xtreamUsername, xtreamPassword, xtreamServer } = storage[sessionId];
+    
+    if (xtreamUsername && xtreamPassword && xtreamServer) {
+      const baseUrl = xtreamServer.endsWith('/') ? xtreamServer : `${xtreamServer}/`;
+      
+      if (originalUrl.startsWith('http')) {
+        if (originalUrl.includes(baseUrl)) {
+          const channelPath = originalUrl.split(baseUrl)[1];
+          xtreamUrl = `${baseUrl}${xtreamUsername}/${xtreamPassword}/${channelPath}`;
+        }
+      } else {
+        xtreamUrl = `${baseUrl}${xtreamUsername}/${xtreamPassword}/${originalUrl}`;
+      }
+    }
+
+    // Test URL accessibility
+    let urlTestResult;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      
+      const response = await fetch(xtreamUrl, { 
+        method: 'HEAD',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      urlTestResult = {
+        accessible: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        contentType: response.headers.get('Content-Type'),
+        contentLength: response.headers.get('Content-Length')
+      };
+    } catch (error) {
+      urlTestResult = {
+        accessible: false,
+        error: error.message
+      };
+    }
+
+    // Return all gathered information
+    res.json({
+      channelInfo: {
+        name: channel.name,
+        tvgId: channel.tvgId,
+        groupTitle: channel.groupTitle
+      },
+      urls: {
+        original: originalUrl,
+        xtream: xtreamUrl,
+        streamEndpoint: `http://localhost:5001/api/stream/${sessionId}/${channelId}`
+      },
+      urlTest: urlTestResult,
+      xtreamConfig: {
+        server: xtreamServer,
+        hasCredentials: !!(xtreamUsername && xtreamPassword)
+      }
+    });
+  } catch (error) {
+    res.json({ error: error.message, stack: error.stack });
+  }
+});
+
+app.post('/api/generate', async (req, res) => {
+  const { sessionId, matchedChannels } = req.body;
+  if (!storage[sessionId]) {
+    logger.error('Session not found', { sessionId });
+    return res.status(404).send('Session not found');
+  }
+
+  const { channels, epgSources, m3uContent } = storage[sessionId];
+  const updatedEPG = matchChannels(channels, epgSources['XTREAM'] || {}, epgSources[Object.keys(epgSources)[0]] || {}, logger, matchedChannels);
+  const newEPG = generateEPG(updatedEPG);
+  const newM3uContent = `#EXTM3U\n${channels.map(ch => `#EXTINF:-1 tvg-id="${ch.tvgId}" tvg-name="${ch.name}" group-title="${ch.groupTitle}",${ch.name}\n${ch.url}`).join('\n')}`;
+
+  const { username, password } = generateCredentials();
+  storage[sessionId] = { m3u: newM3uContent, epg: newEPG };
+
+  const newXtreamUrl = `http://localhost:5001/api/xtream/${sessionId}/get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`;
+  const newXtreamEpgUrl = `http://localhost:5001/api/xtream/${sessionId}/xmltv.php?username=${username}&password=${password}`;
+  const filePath = path.join(__dirname, 'uploads', `${sessionId}-epg.xml`);
+  fs.writeFileSync(filePath, newEPG);
+
+  logger.debug('Generated new XTREAM credentials', { sessionId, username });
+  res.json({
+    xtreamUrl: newXtreamUrl,
+    xtreamEpgUrl: newXtreamEpgUrl,
+    username,
+    password,
+    downloadUrl: `/api/download/${sessionId}`
+  });
+});
+
+app.get('/api/xtream/:sessionId/get.php', (req, res) => {
+  const { sessionId } = req.params;
+  const { username, password } = req.query;
+  if (storage[sessionId] && username && password) {
+    logger.debug('Serving XTREAM M3U', { sessionId, username });
+    res.set('Content-Type', 'text/plain');
+    res.send(storage[sessionId].m3u);
+  } else {
+    logger.error('Invalid credentials or session for XTREAM M3U', { sessionId, username });
+    res.status(403).send('Invalid credentials or session');
+  }
+});
+
+app.get('/api/xtream/:sessionId/xmltv.php', (req, res) => {
+  const { sessionId } = req.params;
+  const { username, password } = req.query;
+  if (storage[sessionId] && username && password) {
+    logger.debug('Serving XTREAM EPG', { sessionId, username });
+    res.set('Content-Type', 'application/xml');
+    res.send(storage[sessionId].epg);
+  } else {
+    logger.error('Invalid credentials or session for XTREAM EPG', { sessionId, username });
+    res.status(403).send('Invalid credentials or session');
+  }
+});
+
+app.get('/api/download/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const filePath = path.join(__dirname, 'uploads', `${sessionId}-epg.xml`);
+  if (fs.existsSync(filePath)) {
+    logger.debug('Serving EPG download', { sessionId, filePath });
+    res.download(filePath, 'updated-epg.xml', (err) => {
+      if (!err) {
+        fs.unlinkSync(filePath);
+        logger.debug('Deleted EPG file after download', { filePath });
+      } else {
+        logger.error('Download failed', { error: err.message, stack: err.stack });
+      }
+    });
+  } else {
+    logger.error('EPG file not found for download', { sessionId, filePath });
+    res.status(404).send('File not found');
+  }
+});
+
+app.listen(5001, () => logger.info('Backend running on http://localhost:5001'));
