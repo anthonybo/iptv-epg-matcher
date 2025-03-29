@@ -4,7 +4,8 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../config/logger');
-const { getSession } = require('../utils/storageUtils');
+// const { getSession } = require('../utils/storageUtils');
+const { getSession, updateSession } = require('../utils/storageUtils');
 // const { parseEPG, findProgramsForChannel, loadExternalEPG } = require('../services/epgService');
 // const { parseEPG, findProgramsForChannel, findProgramsForSpecificChannel, loadExternalEPG } = require('../services/epgService');
 const { parseEPG, findProgramsForChannel, findProgramsForSpecificChannel, searchChannelsAcrossSources, loadExternalEPG } = require('../services/epgService');

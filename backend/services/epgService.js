@@ -1253,90 +1253,44 @@ async function loadExternalEPG(url) {
 }
 
 /**
- * Loads EPG data more efficiently with source prioritization
- * Modified to ensure at least some sources are loaded
+ * Enhanced version of loadAllExternalEPGs with better error handling and large source detection
  * 
  * @returns {Promise<Object>} Object with EPG sources keyed by URL
  */
 async function loadAllExternalEPGs() {
     const epgSources = {};
     const failedSources = [];
-    const prioritySources = ['strongepg', 'epgshare01']; // Add your critical sources here
+    const prioritySources = ['strongepg', 'epgshare01']; // Critical sources
 
     logger.info(`Starting to load ${EXTERNAL_EPG_URLS.length} EPG sources`);
 
-    // First pass: Try to load priority sources
+    // First try to load the priority sources
     for (const url of EXTERNAL_EPG_URLS) {
         // Check if this is a priority source
         const isPriority = prioritySources.some(name => url.includes(name));
-        if (!isPriority) continue; // Skip non-priority sources on first pass
+        if (!isPriority) continue; // Skip non-priority sources initially
 
         logger.info(`Loading priority EPG source: ${url}`);
         try {
-            // Add detailed timing logging
-            const startTime = Date.now();
-            logger.info(`Fetching EPG data from ${url}`);
+            const source = await loadSingleEpgSource(url);
 
-            const epgBuffer = await fetchURL(url);
-
-            if (!epgBuffer || epgBuffer.length === 0) {
-                logger.error(`Received empty buffer from ${url}`);
-                failedSources.push({ url, reason: 'Empty buffer' });
-                continue;
-            }
-
-            logger.info(`Fetched ${epgBuffer.length} bytes from ${url} in ${Date.now() - startTime}ms`);
-
-            // Handle gzipped content
-            let epgContent;
-            try {
-                if (url.endsWith('.gz')) {
-                    logger.info(`Unzipping EPG data from ${url}`);
-                    epgContent = zlib.gunzipSync(epgBuffer).toString('utf8');
-                    logger.info(`Unzipped to ${epgContent.length} bytes`);
-                } else {
-                    epgContent = epgBuffer.toString('utf8');
+            if (source) {
+                // Mark very large sources for special handling during caching
+                if (source.channels && source.channels.length > 10000 ||
+                    source.programs && source.programs.length > 500000) {
+                    source.isLargeSource = true;
+                    logger.info(`Source ${url} is very large (${source.channels?.length || 0} channels, ${source.programs?.length || 0} programs)`);
                 }
-            } catch (e) {
-                logger.error(`Failed to process EPG data from ${url}`, { error: e.message, stack: e.stack });
-                failedSources.push({ url, reason: `Unzip error: ${e.message}` });
-                continue;
+
+                epgSources[url] = source;
+                logger.info(`Successfully loaded priority source: ${url}`);
+            } else {
+                failedSources.push({ url, reason: 'Failed to load' });
+                logger.warn(`Failed to load priority source: ${url}`);
             }
-
-            // Basic XML validation
-            if (!epgContent.includes('<?xml') || !epgContent.includes('<tv')) {
-                logger.error(`Invalid XML structure in EPG from ${url}`);
-                failedSources.push({ url, reason: 'Invalid XML structure' });
-                continue;
-            }
-
-            // Parse EPG
-            logger.info(`Parsing EPG data from ${url}`);
-            const parseStartTime = Date.now();
-
-            try {
-                const parsedEPG = await parseEPG(epgContent);
-                logger.info(`Parsed EPG in ${Date.now() - parseStartTime}ms`);
-
-                if (parsedEPG.channels.length > 0) {
-                    epgSources[url] = parsedEPG;
-                    logger.info(`Successfully loaded EPG from ${url}:`, {
-                        channelCount: parsedEPG.channels.length,
-                        programCount: parsedEPG.programs.length,
-                        channelMapSize: Object.keys(parsedEPG.channelMap).length,
-                        programMapSize: Object.keys(parsedEPG.programMap).length
-                    });
-                } else {
-                    logger.warn(`No channels found in EPG from ${url}`);
-                    failedSources.push({ url, reason: 'No channels found' });
-                }
-            } catch (e) {
-                logger.error(`Failed to parse EPG from ${url}`, { error: e.message, stack: e.stack });
-                failedSources.push({ url, reason: `Parse error: ${e.message}` });
-            }
-        } catch (e) {
-            logger.error(`Failed to load EPG from ${url}`, { error: e.message, stack: e.stack });
-            failedSources.push({ url, reason: `Fetch error: ${e.message}` });
+        } catch (error) {
+            failedSources.push({ url, reason: error.message });
+            logger.error(`Error loading priority source ${url}: ${error.message}`, { error });
         }
     }
 
@@ -1362,69 +1316,25 @@ async function loadAllExternalEPGs() {
 
             logger.info(`Loading additional EPG source: ${url}`);
             try {
-                const startTime = Date.now();
-                logger.info(`Fetching EPG data from ${url}`);
+                const source = await loadSingleEpgSource(url);
 
-                const epgBuffer = await fetchURL(url);
-
-                if (!epgBuffer || epgBuffer.length === 0) {
-                    logger.error(`Received empty buffer from ${url}`);
-                    failedSources.push({ url, reason: 'Empty buffer' });
-                    continue;
-                }
-
-                logger.info(`Fetched ${epgBuffer.length} bytes from ${url} in ${Date.now() - startTime}ms`);
-
-                // Handle gzipped content
-                let epgContent;
-                try {
-                    if (url.endsWith('.gz')) {
-                        logger.info(`Unzipping EPG data from ${url}`);
-                        epgContent = zlib.gunzipSync(epgBuffer).toString('utf8');
-                        logger.info(`Unzipped to ${epgContent.length} bytes`);
-                    } else {
-                        epgContent = epgBuffer.toString('utf8');
+                if (source) {
+                    // Mark very large sources for special handling during caching
+                    if (source.channels && source.channels.length > 10000 ||
+                        source.programs && source.programs.length > 500000) {
+                        source.isLargeSource = true;
+                        logger.info(`Source ${url} is very large (${source.channels?.length || 0} channels, ${source.programs?.length || 0} programs)`);
                     }
-                } catch (e) {
-                    logger.error(`Failed to process EPG data from ${url}`, { error: e.message, stack: e.stack });
-                    failedSources.push({ url, reason: `Unzip error: ${e.message}` });
-                    continue;
+
+                    epgSources[url] = source;
+                    logger.info(`Successfully loaded additional source: ${url}`);
+                } else {
+                    failedSources.push({ url, reason: 'Failed to load' });
+                    logger.warn(`Failed to load additional source: ${url}`);
                 }
-
-                // Basic XML validation
-                if (!epgContent.includes('<?xml') || !epgContent.includes('<tv')) {
-                    logger.error(`Invalid XML structure in EPG from ${url}`);
-                    failedSources.push({ url, reason: 'Invalid XML structure' });
-                    continue;
-                }
-
-                // Parse EPG
-                logger.info(`Parsing EPG data from ${url}`);
-                const parseStartTime = Date.now();
-
-                try {
-                    const parsedEPG = await parseEPG(epgContent);
-                    logger.info(`Parsed EPG in ${Date.now() - parseStartTime}ms`);
-
-                    if (parsedEPG.channels.length > 0) {
-                        epgSources[url] = parsedEPG;
-                        logger.info(`Successfully loaded EPG from ${url}:`, {
-                            channelCount: parsedEPG.channels.length,
-                            programCount: parsedEPG.programs.length,
-                            channelMapSize: Object.keys(parsedEPG.channelMap).length,
-                            programMapSize: Object.keys(parsedEPG.programMap).length
-                        });
-                    } else {
-                        logger.warn(`No channels found in EPG from ${url}`);
-                        failedSources.push({ url, reason: 'No channels found' });
-                    }
-                } catch (e) {
-                    logger.error(`Failed to parse EPG from ${url}`, { error: e.message, stack: e.stack });
-                    failedSources.push({ url, reason: `Parse error: ${e.message}` });
-                }
-            } catch (e) {
-                logger.error(`Failed to load EPG from ${url}`, { error: e.message, stack: e.stack });
-                failedSources.push({ url, reason: `Fetch error: ${e.message}` });
+            } catch (error) {
+                failedSources.push({ url, reason: error.message });
+                logger.error(`Error loading additional source ${url}: ${error.message}`, { error });
             }
         }
     }

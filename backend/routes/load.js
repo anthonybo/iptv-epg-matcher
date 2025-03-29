@@ -16,7 +16,7 @@ const {
     isCacheValid,
     readCache,
     writeCache,
-    readEpgSourcesCache,  // Import the new function
+    readEpgSourcesCache,  
     getChannelsCachePath,
     getEpgSourcesCachePath
 } = require('../services/cacheService');
@@ -69,24 +69,36 @@ router.post('/', upload.fields([{ name: 'm3u' }, { name: 'epg' }]), async (req, 
           // Try to load EPG sources from cache
           const cachedEpgSources = readEpgSourcesCache(cacheEpgSourcesFile);
           
-          // Check if we got valid EPG sources with required sources
+          // Check if we got valid EPG sources
           if (cachedEpgSources && 
               typeof cachedEpgSources === 'object' && 
               Object.keys(cachedEpgSources).length > 0) {
             
-            // Check for critical sources
-            const criticalSources = ['strongepg', 'epgshare01'];
-            const hasCriticalSources = criticalSources.some(critical => 
+            // Improved critical source handling
+            const criticalSources = ['epgshare01']; // Only require one critical source
+            const hasCriticalSource = criticalSources.some(critical => 
               Object.keys(cachedEpgSources).some(key => key.toLowerCase().includes(critical))
             );
             
-            if (hasCriticalSources) {
+            // Determine if we have enough sources
+            const hasEnoughSources = Object.keys(cachedEpgSources).length >= 2;
+            
+            if (hasCriticalSource && hasEnoughSources) {
               // We have valid EPG sources with critical sources included
               epgSources = cachedEpgSources;
               logger.info(`Successfully loaded ${Object.keys(epgSources).length} EPG sources from cache, including critical sources`);
+              
+              // If strongepg was expected but not loaded, log a note but don't force a reload
+              const hasStrongEpg = Object.keys(cachedEpgSources).some(key => 
+                key.toLowerCase().includes('strongepg')
+              );
+              
+              if (!hasStrongEpg) {
+                logger.info(`Note: strongepg source not loaded from cache, but continuing with available sources`);
+              }
             } else {
-              // Missing critical sources, need to reload
-              logger.warn('EPG cache is missing critical sources, will reload EPG data');
+              // Missing critical sources or not enough sources, need to reload
+              logger.warn(`EPG cache has insufficient sources (critical source: ${hasCriticalSource}, source count: ${Object.keys(cachedEpgSources).length}), will reload EPG data`);
               loadFreshEpgSources = true;
             }
           } else {
