@@ -2,21 +2,28 @@ import React, { useEffect, useRef, useState } from 'react';
 
 /**
  * Enhanced IPTVPlayer - Browser-compatible player for IPTV streams
- * With improved UI and toggleable channel info overlay
+ * With improved UI and toggleable info overlays for channel info and EPG data
  * 
  * @param {Object} props Component properties
  * @param {string} props.sessionId The current session ID
  * @param {Object} props.selectedChannel The selected channel object
+ * @param {string} props.playbackMethod Which playback method to use
+ * @param {Object} props.matchedChannels Object mapping channel IDs to matched EPG IDs
  * @returns {JSX.Element} IPTVPlayer component
  */
-const IPTVPlayer = ({ sessionId, selectedChannel }) => {
+const IPTVPlayer = ({ 
+  sessionId, 
+  selectedChannel, 
+  playbackMethod = 'mpegts-player',
+  matchedChannels = {}
+}) => {
   // State
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [playbackMethod, setPlaybackMethod] = useState('mpegts-player'); // Default to TS player
   const [logs, setLogs] = useState([]);
   const [showDebug, setShowDebug] = useState(false);
   const [showChannelInfo, setShowChannelInfo] = useState(true);
+  const [showEpgInfo, setShowEpgInfo] = useState(true); // New state for EPG toggle
   const [epgData, setEpgData] = useState(null);
   
   // Refs
@@ -57,20 +64,36 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
   // Try to load EPG data when channel changes
   useEffect(() => {
     if (sessionId && selectedChannel && selectedChannel.tvgId) {
-      fetchEpgData(selectedChannel.tvgId);
+      // Get the correct EPG ID - use the matched ID if available
+      const epgId = matchedChannels[selectedChannel.tvgId] || selectedChannel.tvgId;
+      log('info', 'Fetching EPG data', { 
+        channelId: selectedChannel.tvgId, 
+        matchedEpgId: epgId,
+        isMatched: !!matchedChannels[selectedChannel.tvgId]
+      });
+      
+      fetchEpgData(epgId);
     }
-  }, [sessionId, selectedChannel]);
+  }, [sessionId, selectedChannel, matchedChannels]);
   
-  // Fetch EPG data for the current channel
-  const fetchEpgData = async (channelId) => {
-    if (!sessionId || !channelId) return;
+  // Fetch EPG data for the current channel using proper ID
+  const fetchEpgData = async (epgId) => {
+    if (!sessionId || !epgId) return;
     
     try {
-      const response = await fetch(`http://localhost:5001/api/epg/${sessionId}?channelId=${encodeURIComponent(channelId)}`);
+      log('info', `Fetching EPG data for ID: ${epgId}`);
+      const response = await fetch(`http://localhost:5001/api/epg/${sessionId}?channelId=${encodeURIComponent(epgId)}`);
       if (response.ok) {
         const data = await response.json();
+        log('info', 'EPG data received', { 
+          hasCurrentProgram: !!data.currentProgram,
+          programCount: data.programs?.length || 0,
+          sourceKey: data.sourceKey || 'unknown'
+        });
         setEpgData(data);
-        log('info', 'Loaded EPG data for channel', { channelId });
+      } else {
+        log('error', `Failed to load EPG data: ${response.status} ${response.statusText}`);
+        setEpgData(null);
       }
     } catch (error) {
       log('error', 'Failed to load EPG data', { error: error.message });
@@ -491,6 +514,11 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
   const toggleChannelInfo = () => {
     setShowChannelInfo(prev => !prev);
   };
+  
+  // Toggle EPG info overlay
+  const toggleEpgInfo = () => {
+    setShowEpgInfo(prev => !prev);
+  };
 
   // Format time for display
   const formatTime = (date) => {
@@ -506,6 +534,22 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
     }
   };
 
+  // Format date for display (e.g., "Sun, 11 Sep")
+  const formatDate = (date) => {
+    if (!date) return '';
+    
+    try {
+      const d = new Date(date);
+      return d.toLocaleDateString('en-US', { 
+        weekday: 'short', 
+        day: 'numeric', 
+        month: 'short' 
+      });
+    } catch (e) {
+      return '';
+    }
+  };
+
   return (
     <div style={{ 
       position: 'relative', 
@@ -516,87 +560,6 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
       overflow: 'hidden',
       boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
     }}>
-      {/* Player method selector */}
-      <div style={{
-        position: 'absolute',
-        top: '10px',
-        left: '10px',
-        zIndex: 50,
-        display: 'flex',
-        gap: '5px',
-        background: 'rgba(0, 0, 0, 0.5)',
-        padding: '5px',
-        borderRadius: '8px'
-      }}>
-        <button
-          onClick={() => setPlaybackMethod('mpegts-player')}
-          style={{
-            padding: '5px 10px',
-            fontSize: '12px',
-            backgroundColor: playbackMethod === 'mpegts-player' ? '#4CAF50' : 'rgba(60, 60, 60, 0.8)',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontWeight: playbackMethod === 'mpegts-player' ? 'bold' : 'normal',
-            transition: 'background-color 0.2s ease'
-          }}
-        >
-          TS Player
-        </button>
-        
-        <button
-          onClick={() => setPlaybackMethod('hls-player')}
-          style={{
-            padding: '5px 10px',
-            fontSize: '12px',
-            backgroundColor: playbackMethod === 'hls-player' ? '#4CAF50' : 'rgba(60, 60, 60, 0.8)',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontWeight: playbackMethod === 'hls-player' ? 'bold' : 'normal',
-            transition: 'background-color 0.2s ease'
-          }}
-        >
-          HLS Player
-        </button>
-        
-        <button
-          onClick={() => setPlaybackMethod('test-video')}
-          style={{
-            padding: '5px 10px',
-            fontSize: '12px',
-            backgroundColor: playbackMethod === 'test-video' ? '#4CAF50' : 'rgba(60, 60, 60, 0.8)',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontWeight: playbackMethod === 'test-video' ? 'bold' : 'normal',
-            transition: 'background-color 0.2s ease'
-          }}
-        >
-          Test Video
-        </button>
-        
-        <button
-          onClick={() => setPlaybackMethod('vlc-link')}
-          style={{
-            padding: '5px 10px',
-            fontSize: '12px',
-            backgroundColor: playbackMethod === 'vlc-link' ? '#4CAF50' : 'rgba(60, 60, 60, 0.8)',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontWeight: playbackMethod === 'vlc-link' ? 'bold' : 'normal',
-            transition: 'background-color 0.2s ease'
-          }}
-        >
-          VLC Link
-        </button>
-      </div>
-      
       {/* Control buttons section */}
       <div style={{
         position: 'absolute',
@@ -639,16 +602,71 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
             strokeLinejoin="round"
           >
             {showChannelInfo ? (
-              // Eye-off icon
+              // Info icon
               <>
-                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
-                <line x1="1" y1="1" x2="23" y2="23"></line>
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
               </>
             ) : (
-              // Eye icon
+              // Info icon (alternative)
               <>
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </>
+            )}
+          </svg>
+        </button>
+        
+        {/* EPG toggle button - new */}
+        <button
+          onClick={toggleEpgInfo}
+          title={showEpgInfo ? "Hide guide information" : "Show guide information"}
+          style={{
+            padding: '5px',
+            width: '30px',
+            height: '30px',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            color: 'white',
+            border: 'none',
+            borderRadius: '50%',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'background-color 0.2s ease'
+          }}
+          onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(30, 30, 30, 0.8)'}
+          onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'}
+        >
+          <svg 
+            xmlns="http://www.w3.org/2000/svg" 
+            width="16" 
+            height="16" 
+            viewBox="0 0 24 24" 
+            fill="none" 
+            stroke="currentColor" 
+            strokeWidth="2" 
+            strokeLinecap="round" 
+            strokeLinejoin="round"
+          >
+            {showEpgInfo ? (
+              // Calendar icon
+              <>
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </>
+            ) : (
+              // Calendar with slash icon (to indicate hidden)
+              <>
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+                <line x1="21" y1="3" x2="3" y2="21"></line>
               </>
             )}
           </svg>
@@ -730,8 +748,16 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
                 <strong>Channel:</strong> {selectedChannel.name}
               </div>
               <div style={{ marginBottom: '5px' }}>
+                <strong>Channel ID:</strong> {selectedChannel.tvgId}
+              </div>
+              <div style={{ marginBottom: '5px' }}>
                 <strong>Group:</strong> {selectedChannel.groupTitle}
               </div>
+              {matchedChannels[selectedChannel.tvgId] && (
+                <div style={{ marginBottom: '5px', color: '#81c784' }}>
+                  <strong>Matched EPG ID:</strong> {matchedChannels[selectedChannel.tvgId]}
+                </div>
+              )}
               <div>
                 <strong>URL:</strong> {selectedChannel.url || 'N/A'}
               </div>
@@ -935,73 +961,152 @@ const IPTVPlayer = ({ sessionId, selectedChannel }) => {
               </svg>
               {selectedChannel.groupTitle}
             </div>
-            
-            {/* Current program if available */}
-            {epgData && epgData.currentProgram && (
-              <div style={{
-                marginTop: '5px',
-                backgroundColor: 'rgba(0, 0, 0, 0.5)',
-                padding: '8px 12px',
-                borderRadius: '6px',
-                backdropFilter: 'blur(5px)'
-              }}>
-                <div style={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: '3px'
-                }}>
-                  <div style={{ 
-                    fontWeight: '500',
-                    fontSize: '14px',
-                    color: 'white',
-                    textShadow: '0 1px 2px rgba(0,0,0,0.6)'
-                  }}>
-                    {epgData.currentProgram.title}
-                  </div>
-                  
-                  <div style={{ 
-                    fontSize: '12px', 
-                    color: '#ccc',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px'
-                  }}>
-                    <svg 
-                      xmlns="http://www.w3.org/2000/svg" 
-                      width="12" 
-                      height="12" 
-                      viewBox="0 0 24 24" 
-                      fill="none" 
-                      stroke="currentColor" 
-                      strokeWidth="2" 
-                      strokeLinecap="round" 
-                      strokeLinejoin="round"
-                    >
-                      <circle cx="12" cy="12" r="10"></circle>
-                      <polyline points="12 6 12 12 16 14"></polyline>
-                    </svg>
-                    {formatTime(epgData.currentProgram.start)} - {formatTime(epgData.currentProgram.stop)}
-                  </div>
-                </div>
-                
-                {epgData.currentProgram.desc && (
-                  <div style={{ 
-                    fontSize: '12px',
-                    color: '#ddd',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical'
-                  }}>
-                    {epgData.currentProgram.desc}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </>
+      )}
+      
+      {/* EPG info overlay (toggleable) - Separate from channel info */}
+      {selectedChannel && showEpgInfo && epgData && epgData.currentProgram && (
+        <div style={{
+          position: 'absolute',
+          top: '40px',
+          left: '15px',
+          right: showDebug ? '270px' : '15px',
+          padding: '12px 15px',
+          backgroundColor: 'rgba(0, 0, 0, 0.75)',
+          borderRadius: '8px',
+          zIndex: 25,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px',
+          backdropFilter: 'blur(4px)'
+        }}>
+          <div style={{ 
+            display: 'flex', 
+            justifyContent: 'space-between',
+            alignItems: 'flex-start'
+          }}>
+            <div style={{ 
+              fontWeight: '600',
+              fontSize: '16px',
+              color: 'white',
+              marginBottom: '3px'
+            }}>
+              {epgData.currentProgram.title}
+            </div>
+            
+            <div style={{ 
+              fontSize: '13px', 
+              color: '#ccc',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              backgroundColor: 'rgba(0, 0, 0, 0.3)',
+              padding: '4px 8px',
+              borderRadius: '4px',
+              marginLeft: '8px'
+            }}>
+              <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width="12" 
+                height="12" 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+              {formatTime(epgData.currentProgram.start)} - {formatTime(epgData.currentProgram.stop)}
+            </div>
+          </div>
+          
+          {epgData.currentProgram.desc && (
+            <div style={{ 
+              fontSize: '13px',
+              color: '#e0e0e0',
+              lineHeight: '1.4'
+            }}>
+              {epgData.currentProgram.desc}
+            </div>
+          )}
+          
+          {/* Display upcoming programs if available */}
+          {epgData.programs && epgData.programs.length > 1 && (
+            <div style={{ marginTop: '5px' }}>
+              <div style={{ 
+                fontSize: '12px', 
+                color: '#aaa', 
+                marginBottom: '5px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px'
+              }}>
+                <svg 
+                  xmlns="http://www.w3.org/2000/svg" 
+                  width="12" 
+                  height="12" 
+                  viewBox="0 0 24 24" 
+                  fill="none" 
+                  stroke="currentColor" 
+                  strokeWidth="2" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round"
+                >
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                  <line x1="16" y1="2" x2="16" y2="6"></line>
+                  <line x1="8" y1="2" x2="8" y2="6"></line>
+                  <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+                Coming up:
+              </div>
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                {/* Only show next 2 programs */}
+                {epgData.programs.slice(0, 3).map((program, index) => {
+                  // Skip current program (usually first one)
+                  if (epgData.currentProgram && 
+                      program.start === epgData.currentProgram.start &&
+                      program.title === epgData.currentProgram.title) {
+                    return null;
+                  }
+                  
+                  return (
+                    <div key={index} style={{ 
+                      display: 'flex', 
+                      justifyContent: 'space-between',
+                      fontSize: '12px',
+                      color: '#ddd'
+                    }}>
+                      <div style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '5px'
+                      }}>
+                        <div style={{ 
+                          backgroundColor: 'rgba(255, 255, 255, 0.2)',
+                          color: 'white',
+                          padding: '2px 6px',
+                          borderRadius: '3px',
+                          fontSize: '11px'
+                        }}>
+                          {formatTime(program.start)}
+                        </div>
+                        <div style={{ fontWeight: '500' }}>{program.title}</div>
+                      </div>
+                      <div style={{ color: '#aaa' }}>
+                        {formatDate(program.start)}
+                      </div>
+                    </div>
+                  );
+                }).filter(Boolean).slice(0, 2)}
+              </div>
+            </div>
+          )}
+        </div>
       )}
       
       {/* CSS Animation */}

@@ -151,12 +151,13 @@ const PlayerView = ({
             </button>
           </div>
           
-          {/* Video Player */}
+          {/* Video Player - Now passing matchedChannels prop */}
           {selectedChannel && sessionId ? (
             <IPTVPlayer 
               sessionId={sessionId} 
               selectedChannel={selectedChannel} 
               playbackMethod={playerType}
+              matchedChannels={matchedChannels} // Pass the matched channels
             />
           ) : (
             <div style={{ 
