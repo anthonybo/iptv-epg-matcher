@@ -55,6 +55,10 @@ const IPTVPlayer = ({
     // Load required scripts
     loadScripts();
     
+    // Show channel info by default, but only show EPG info if there's a match
+    setShowChannelInfo(true);
+    setShowEpgInfo(true);
+    
     return () => {
       log('info', 'IPTVPlayer component unmounting');
       cleanupPlayer();
@@ -64,15 +68,22 @@ const IPTVPlayer = ({
   // Try to load EPG data when channel changes
   useEffect(() => {
     if (sessionId && selectedChannel && selectedChannel.tvgId) {
-      // Get the correct EPG ID - use the matched ID if available
-      const epgId = matchedChannels[selectedChannel.tvgId] || selectedChannel.tvgId;
-      log('info', 'Fetching EPG data', { 
-        channelId: selectedChannel.tvgId, 
-        matchedEpgId: epgId,
-        isMatched: !!matchedChannels[selectedChannel.tvgId]
-      });
-      
-      fetchEpgData(epgId);
+      // Only fetch EPG data if the channel has a matched EPG ID
+      if (matchedChannels[selectedChannel.tvgId]) {
+        const epgId = matchedChannels[selectedChannel.tvgId];
+        log('info', 'Fetching EPG data for matched channel', { 
+          channelId: selectedChannel.tvgId, 
+          matchedEpgId: epgId
+        });
+        
+        fetchEpgData(epgId);
+      } else {
+        // Clear EPG data when there's no match
+        setEpgData(null);
+        log('info', 'No EPG match for channel, clearing EPG data', { 
+          channelId: selectedChannel.tvgId
+        });
+      }
     }
   }, [sessionId, selectedChannel, matchedChannels]);
   
@@ -619,7 +630,7 @@ const IPTVPlayer = ({
           </svg>
         </button>
         
-        {/* EPG toggle button - new */}
+        {/* Toggle EPG info overlay with indicator for matched channels */}
         <button
           onClick={toggleEpgInfo}
           title={showEpgInfo ? "Hide guide information" : "Show guide information"}
@@ -627,18 +638,19 @@ const IPTVPlayer = ({
             padding: '5px',
             width: '30px',
             height: '30px',
-            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            backgroundColor: selectedChannel && matchedChannels[selectedChannel.tvgId] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)',
             color: 'white',
-            border: 'none',
+            border: selectedChannel && matchedChannels[selectedChannel.tvgId] ? '2px solid rgba(0, 255, 100, 0.5)' : 'none',
             borderRadius: '50%',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            transition: 'background-color 0.2s ease'
+            transition: 'all 0.2s ease',
+            position: 'relative'
           }}
-          onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(30, 30, 30, 0.8)'}
-          onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'}
+          onMouseOver={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[selectedChannel.tvgId] ? 'rgba(0, 180, 60, 0.8)' : 'rgba(30, 30, 30, 0.8)'}
+          onMouseOut={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[selectedChannel.tvgId] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)'}
         >
           <svg 
             xmlns="http://www.w3.org/2000/svg" 
@@ -708,6 +720,34 @@ const IPTVPlayer = ({
           </svg>
         </button>
       </div>
+      
+      {/* EPG Status notification */}
+      {selectedChannel && !matchedChannels[selectedChannel.tvgId] && (
+        <div style={{
+          position: 'absolute',
+          top: '50px',
+          left: '10px',
+          padding: '8px 12px',
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          color: '#f8f8f8',
+          borderRadius: '6px',
+          zIndex: 35,
+          fontSize: '12px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          backdropFilter: 'blur(3px)',
+          border: '1px solid rgba(255, 255, 255, 0.15)',
+          maxWidth: '300px'
+        }}>
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          <span>Match this channel with EPG data to see program information.</span>
+        </div>
+      )}
       
       {/* Debug panel */}
       {showDebug && (
@@ -910,8 +950,8 @@ const IPTVPlayer = ({
             bottom: '0',
             left: '0',
             right: '0',
-            height: '100px',
-            background: 'linear-gradient(transparent, rgba(0,0,0,0.8))',
+            height: '120px',
+            background: 'linear-gradient(transparent, rgba(0,0,0,0.9))',
             pointerEvents: 'none',
             zIndex: 20
           }}/>
@@ -921,7 +961,7 @@ const IPTVPlayer = ({
             bottom: '15px',
             left: '15px',
             right: showDebug ? '270px' : '15px',
-            padding: '12px 15px',
+            padding: '10px 15px',
             borderRadius: '8px',
             zIndex: 30,
             display: 'flex',
@@ -965,21 +1005,23 @@ const IPTVPlayer = ({
         </>
       )}
       
-      {/* EPG info overlay (toggleable) - Separate from channel info */}
-      {selectedChannel && showEpgInfo && epgData && epgData.currentProgram && (
+      {/* EPG info overlay (toggleable) - Only shown when there's a matched EPG ID */}
+      {selectedChannel && showEpgInfo && epgData && epgData.currentProgram && matchedChannels[selectedChannel.tvgId] && (
         <div style={{
           position: 'absolute',
-          top: '40px',
+          bottom: '80px',
           left: '15px',
           right: showDebug ? '270px' : '15px',
-          padding: '12px 15px',
-          backgroundColor: 'rgba(0, 0, 0, 0.75)',
+          padding: '15px',
+          backgroundColor: 'rgba(0, 0, 0, 0.85)',
           borderRadius: '8px',
           zIndex: 25,
           display: 'flex',
           flexDirection: 'column',
-          gap: '8px',
-          backdropFilter: 'blur(4px)'
+          gap: '10px',
+          backdropFilter: 'blur(5px)',
+          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.4)',
+          border: '1px solid rgba(255, 255, 255, 0.15)'
         }}>
           <div style={{ 
             display: 'flex', 
@@ -988,23 +1030,25 @@ const IPTVPlayer = ({
           }}>
             <div style={{ 
               fontWeight: '600',
-              fontSize: '16px',
+              fontSize: '18px',
               color: 'white',
-              marginBottom: '3px'
+              marginBottom: '3px',
+              textShadow: '0 1px 3px rgba(0,0,0,0.9)'
             }}>
               {epgData.currentProgram.title}
             </div>
             
             <div style={{ 
               fontSize: '13px', 
-              color: '#ccc',
+              color: 'white',
               display: 'flex',
               alignItems: 'center',
               gap: '5px',
-              backgroundColor: 'rgba(0, 0, 0, 0.3)',
+              backgroundColor: 'rgba(255, 255, 255, 0.15)',
               padding: '4px 8px',
               borderRadius: '4px',
-              marginLeft: '8px'
+              marginLeft: '8px',
+              fontWeight: '500'
             }}>
               <svg 
                 xmlns="http://www.w3.org/2000/svg" 
@@ -1026,9 +1070,14 @@ const IPTVPlayer = ({
           
           {epgData.currentProgram.desc && (
             <div style={{ 
-              fontSize: '13px',
-              color: '#e0e0e0',
-              lineHeight: '1.4'
+              fontSize: '14px',
+              color: 'rgba(255, 255, 255, 0.95)',
+              lineHeight: '1.5',
+              textShadow: '0 1px 2px rgba(0,0,0,0.8)',
+              backgroundColor: 'rgba(0, 0, 0, 0.25)',
+              padding: '8px 10px',
+              borderRadius: '6px',
+              border: '1px solid rgba(255, 255, 255, 0.1)'
             }}>
               {epgData.currentProgram.desc}
             </div>
@@ -1036,14 +1085,18 @@ const IPTVPlayer = ({
           
           {/* Display upcoming programs if available */}
           {epgData.programs && epgData.programs.length > 1 && (
-            <div style={{ marginTop: '5px' }}>
+            <div style={{ marginTop: '8px' }}>
               <div style={{ 
-                fontSize: '12px', 
-                color: '#aaa', 
-                marginBottom: '5px',
+                fontSize: '13px', 
+                color: 'rgba(255, 255, 255, 0.9)', 
+                marginBottom: '8px',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '5px'
+                gap: '5px',
+                fontWeight: '600',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                textShadow: '0 1px 2px rgba(0,0,0,0.8)'
               }}>
                 <svg 
                   xmlns="http://www.w3.org/2000/svg" 
@@ -1064,7 +1117,15 @@ const IPTVPlayer = ({
                 Coming up:
               </div>
               
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <div style={{ 
+                display: 'flex', 
+                flexDirection: 'column', 
+                gap: '8px',
+                backgroundColor: 'rgba(0, 0, 0, 0.25)',
+                borderRadius: '6px',
+                padding: '8px',
+                border: '1px solid rgba(255, 255, 255, 0.1)'
+              }}>
                 {/* Only show next 2 programs */}
                 {epgData.programs.slice(0, 3).map((program, index) => {
                   // Skip current program (usually first one)
@@ -1078,31 +1139,69 @@ const IPTVPlayer = ({
                     <div key={index} style={{ 
                       display: 'flex', 
                       justifyContent: 'space-between',
-                      fontSize: '12px',
-                      color: '#ddd'
+                      fontSize: '13px',
+                      color: 'rgba(255, 255, 255, 0.9)',
+                      textShadow: '0 1px 2px rgba(0,0,0,0.8)',
+                      padding: '4px 6px',
+                      borderRadius: '4px',
+                      backgroundColor: index % 2 === 0 ? 'rgba(255, 255, 255, 0.05)' : 'transparent'
                     }}>
                       <div style={{ 
                         display: 'flex', 
                         alignItems: 'center', 
-                        gap: '5px'
+                        gap: '8px'
                       }}>
                         <div style={{ 
-                          backgroundColor: 'rgba(255, 255, 255, 0.2)',
+                          backgroundColor: 'rgba(255, 255, 255, 0.15)',
                           color: 'white',
-                          padding: '2px 6px',
-                          borderRadius: '3px',
-                          fontSize: '11px'
+                          padding: '3px 8px',
+                          borderRadius: '4px',
+                          fontSize: '12px',
+                          fontWeight: '600'
                         }}>
                           {formatTime(program.start)}
                         </div>
-                        <div style={{ fontWeight: '500' }}>{program.title}</div>
+                        <div style={{ 
+                          fontWeight: '500',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          maxWidth: '250px'
+                        }}>{program.title}</div>
                       </div>
-                      <div style={{ color: '#aaa' }}>
+                      <div style={{ color: 'rgba(255, 255, 255, 0.7)' }}>
                         {formatDate(program.start)}
                       </div>
                     </div>
                   );
                 }).filter(Boolean).slice(0, 2)}
+                
+                {/* Show a message if no upcoming programs are available */}
+                {epgData.programs.filter(program => 
+                  !(epgData.currentProgram && 
+                    program.start === epgData.currentProgram.start && 
+                    program.title === epgData.currentProgram.title)
+                ).length === 0 && (
+                  <div style={{ 
+                    display: 'flex', 
+                    justifyContent: 'space-between',
+                    fontSize: '13px',
+                    color: 'rgba(255, 255, 255, 0.7)',
+                    textAlign: 'center'
+                  }}>
+                    <div style={{ 
+                      backgroundColor: 'rgba(0, 0, 0, 0.4)',
+                      padding: '10px',
+                      textAlign: 'center',
+                      width: '100%',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
+                      fontStyle: 'italic'
+                    }}>
+                      No upcoming programs available.
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1114,6 +1213,11 @@ const IPTVPlayer = ({
         __html: `
           @keyframes spin {
             to { transform: rotate(360deg); }
+          }
+          
+          @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
           }
         `
       }} />
