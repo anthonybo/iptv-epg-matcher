@@ -12,7 +12,8 @@ module.exports = {
   // External EPG sources
   EXTERNAL_EPG_URLS: [
     'https://strongepg.ip-ddns.com/8k-epg.xml.gz',
-    'https://epgshare01.online/epgshare01/epg_ripper_US1.xml.gz',
+    'https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz',
+    // 'https://epgshare01.online/epgshare01/epg_ripper_US1.xml.gz',
     'https://epg.pw/xmltv/epg_US.xml',
     'https://www.open-epg.com/files/unitedstates1.xml.gz',
     'https://open-epg.com/files/sports1.xml',
