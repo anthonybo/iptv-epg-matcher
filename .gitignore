@@ -34,3 +34,24 @@ logs
 uploads/
 cache/
 .aider*
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+
+# Cache directories
+backend/cache/
+backend/temp/
+backend/cache/*
+**/temp/**
+**/__pycache__/**
+
+# Large data files
+*.gz
+*.zip
+*.xml.gz
+*.m3u
