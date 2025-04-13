@@ -29,6 +29,10 @@ yarn-debug.log*
 yarn-error.log*
 logs
 *.log
+backend/*.log
+backend/logs/
+backend/logs/*.log
+backend/epg_parser.log
 
 # Runtime data
 uploads/
@@ -48,6 +52,9 @@ backend/cache/
 backend/temp/
 backend/cache/*
 **/temp/**
+backend/cache/temp/
+backend/cache/temp/*
+**/temp/*
 **/__pycache__/**
 
 # Large data files
@@ -55,3 +62,12 @@ backend/cache/*
 *.zip
 *.xml.gz
 *.m3u
+*.json
+backend/uploads/*
+backend/uploads/*.xml
+backend/cache/*/*
+backend/uploads/*.xml
+**/*.json.gz
+
+# Specific large files
+backend/data/epg.db
