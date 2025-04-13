@@ -39,13 +39,13 @@ const ChannelList = ({
     const isVisible = !hiddenCategories.includes(ch.groupTitle);
     
     // Debug logging for all channels to diagnose our filtering issue
-    console.log(`Channel filtering for "${ch.name}":`, {
-      category: ch.groupTitle,
-      matchesSearch,
-      isVisible,
-      isHidden: hiddenCategories.includes(ch.groupTitle),
-      hiddenCategoriesCount: hiddenCategories.length
-    });
+    // console.log(`Channel filtering for "${ch.name}":`, {
+    //   category: ch.groupTitle,
+    //   matchesSearch,
+    //   isVisible,
+    //   isHidden: hiddenCategories.includes(ch.groupTitle),
+    //   hiddenCategoriesCount: hiddenCategories.length
+    // });
     
     return matchesSearch && isVisible;
   });

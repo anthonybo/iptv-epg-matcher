@@ -33,3 +33,4 @@ logs
 # Runtime data
 uploads/
 cache/
+.aider*

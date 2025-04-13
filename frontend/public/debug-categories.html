@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Direct Categories Debug</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 960px;
+            margin: 0 auto;
+        }
+        .card {
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            background-color: #f8f9fa;
+        }
+        .debug {
+            background-color: #f0f0f0;
+            border-left: 4px solid #007bff;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .error {
+            color: red;
+            border-left: 4px solid red;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .category-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .category-item {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #fff;
+        }
+        #sessionPanel input {
+            padding: 8px;
+            margin-right: 10px;
+            width: 300px;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Direct Categories Debug</h1>
+    
+    <div class="card">
+        <h2>Session ID</h2>
+        <div id="sessionPanel">
+            <div>
+                <input type="text" id="sessionIdInput" placeholder="Enter session ID manually">
+                <button onclick="fetchWithSessionId()">Use this Session ID</button>
+            </div>
+            <div style="margin-top: 10px;">
+                <button onclick="findSessionId()">Find Session ID in localStorage</button>
+                <button onclick="goToHomepage()">Go to Homepage</button>
+            </div>
+        </div>
+        <div id="currentSession" class="debug">No session loaded</div>
+    </div>
+
+    <div class="card">
+        <h2>Categories</h2>
+        <div id="categoryStats">Loading...</div>
+        <select id="categorySelect" onchange="filterByCategory(this.value)">
+            <option value="all">All Categories</option>
+        </select>
+        <div id="categoriesContainer" class="category-list"></div>
+    </div>
+
+    <div class="card">
+        <h2>API Response</h2>
+        <button onclick="refreshCategories()">Refresh Data</button>
+        <div id="apiResponse" class="debug">Waiting for API call...</div>
+    </div>
+
+    <script>
+        // Track current state
+        const state = {
+            sessionId: null,
+            categories: [],
+            selectedCategory: 'all'
+        };
+
+        // Initialize on load
+        window.onload = function() {
+            findSessionId();
+        };
+
+        // Try to find a session ID in localStorage
+        function findSessionId() {
+            const storageKeys = Object.keys(localStorage);
+            let sessionId = null;
+            
+            // Check for common session ID keys
+            const sessionKeys = ['sessionId', 'currentSession', 'session', 'iptv-session-id'];
+            for (const key of sessionKeys) {
+                if (localStorage.getItem(key)) {
+                    sessionId = localStorage.getItem(key);
+                    document.getElementById('currentSession').textContent = `Found session ID in localStorage["${key}"]: ${sessionId}`;
+                    document.getElementById('sessionIdInput').value = sessionId;
+                    state.sessionId = sessionId;
+                    fetchCategories(sessionId);
+                    return;
+                }
+            }
+            
+            // Look for any key with 'session' in the name
+            for (const key of storageKeys) {
+                if (key.toLowerCase().includes('session')) {
+                    sessionId = localStorage.getItem(key);
+                    document.getElementById('currentSession').textContent = `Found possible session ID in localStorage["${key}"]: ${sessionId}`;
+                    document.getElementById('sessionIdInput').value = sessionId;
+                    state.sessionId = sessionId;
+                    fetchCategories(sessionId);
+                    return;
+                }
+            }
+            
+            // No session found
+            document.getElementById('currentSession').textContent = `No session ID found in localStorage. Please enter one manually.`;
+            document.getElementById('currentSession').classList.add('error');
+        }
+
+        // Use manually entered session ID
+        function fetchWithSessionId() {
+            const sessionId = document.getElementById('sessionIdInput').value.trim();
+            if (!sessionId) {
+                alert('Please enter a session ID');
+                return;
+            }
+            
+            document.getElementById('currentSession').textContent = `Using manually entered session ID: ${sessionId}`;
+            document.getElementById('currentSession').classList.remove('error');
+            state.sessionId = sessionId;
+            fetchCategories(sessionId);
+        }
+
+        // Fetch categories for the given session ID
+        function fetchCategories(sessionId) {
+            if (!sessionId) {
+                document.getElementById('apiResponse').textContent = 'No session ID provided';
+                document.getElementById('apiResponse').classList.add('error');
+                return;
+            }
+            
+            document.getElementById('categoryStats').textContent = 'Loading...';
+            document.getElementById('apiResponse').textContent = `Fetching categories for session ${sessionId}...`;
+            document.getElementById('apiResponse').classList.remove('error');
+            
+            // Make the API request
+            fetch(`/api/channels/${sessionId}/categories`)
+                .then(response => {
+                    const statusInfo = `Response status: ${response.status} ${response.statusText}`;
+                    document.getElementById('apiResponse').textContent = statusInfo;
+                    
+                    if (!response.ok) {
+                        throw new Error(`API returned status ${response.status}`);
+                    }
+                    
+                    return response.text();
+                })
+                .then(text => {
+                    // Display the raw text response
+                    document.getElementById('apiResponse').textContent = `Raw response: ${text.substring(0, 500)}...\n\nFull length: ${text.length} characters`;
+                    
+                    // Parse the JSON
+                    const data = JSON.parse(text);
+                    handleCategoriesResponse(data);
+                })
+                .catch(error => {
+                    document.getElementById('apiResponse').textContent = `Error: ${error.message}`;
+                    document.getElementById('apiResponse').classList.add('error');
+                    document.getElementById('categoryStats').textContent = 'Failed to load categories';
+                });
+        }
+
+        // Handle API response
+        function handleCategoriesResponse(data) {
+            if (!data) {
+                document.getElementById('categoryStats').textContent = 'Empty response received';
+                return;
+            }
+            
+            const isArray = Array.isArray(data);
+            const count = isArray ? data.length : 'not an array';
+            const typeInfo = `Data type: ${typeof data}, Is array: ${isArray}, Count: ${count}`;
+            
+            document.getElementById('categoryStats').textContent = typeInfo;
+            
+            if (isArray) {
+                state.categories = data;
+                displayCategories(data);
+                populateCategoryDropdown(data);
+            } else {
+                document.getElementById('categoriesContainer').innerHTML = '<div class="error">Response is not an array</div>';
+            }
+        }
+
+        // Display categories in the UI
+        function displayCategories(categories) {
+            const container = document.getElementById('categoriesContainer');
+            
+            if (!categories || categories.length === 0) {
+                container.innerHTML = '<div class="error">No categories found</div>';
+                return;
+            }
+            
+            let html = '';
+            
+            categories.forEach((category, index) => {
+                const name = typeof category === 'string' ? category : (category.name || 'Unknown');
+                const count = typeof category === 'object' && category.count ? category.count : '?';
+                
+                if (state.selectedCategory === 'all' || state.selectedCategory === name) {
+                    html += `
+                        <div class="category-item">
+                            <strong>${name}</strong>
+                            <div>${count} channels</div>
+                        </div>
+                    `;
+                }
+            });
+            
+            container.innerHTML = html;
+        }
+
+        // Populate the category dropdown
+        function populateCategoryDropdown(categories) {
+            const select = document.getElementById('categorySelect');
+            
+            // Clear existing options except first one
+            while (select.options.length > 1) {
+                select.remove(1);
+            }
+            
+            categories.forEach((category, index) => {
+                const name = typeof category === 'string' ? category : (category.name || 'Unknown');
+                const count = typeof category === 'object' && category.count ? category.count : '?';
+                
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = `${name} (${count})`;
+                select.appendChild(option);
+            });
+        }
+
+        // Filter categories
+        function filterByCategory(category) {
+            state.selectedCategory = category;
+            displayCategories(state.categories);
+        }
+
+        // Refresh categories
+        function refreshCategories() {
+            if (state.sessionId) {
+                fetchCategories(state.sessionId);
+            } else {
+                alert('No session ID set');
+            }
+        }
+
+        // Go to homepage
+        function goToHomepage() {
+            window.location.href = '/';
+        }
+    </script>
+</body>
+</html> 

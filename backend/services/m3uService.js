@@ -72,7 +72,24 @@ function parseM3U(m3uContent) {
  */
 async function loadXtreamM3U(baseUrl, username, password) {
   const xtreamM3uUrl = `${baseUrl}get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`;
-  return (await fetchURL(xtreamM3uUrl)).toString('utf8');
+  
+  try {
+    const response = await fetchURL(xtreamM3uUrl);
+    const buffer = await response.arrayBuffer();
+    const content = Buffer.from(buffer).toString('utf8');
+    
+    // Basic validation - check that it contains #EXTM3U
+    if (!content || !content.includes('#EXTM3U')) {
+      logger.error(`Invalid M3U content received from ${baseUrl}. First 100 chars: ${content.substring(0, 100)}`);
+      throw new Error('Invalid M3U content received from Xtream provider');
+    }
+    
+    logger.info(`Successfully loaded M3U content from Xtream: ${Math.round(content.length / 1024)} KB`);
+    return content;
+  } catch (error) {
+    logger.error(`Error loading M3U from Xtream: ${error.message}`);
+    throw error;
+  }
 }
 
 /**

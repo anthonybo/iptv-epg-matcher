@@ -2,10 +2,33 @@
  * EPG Service - handles parsing and processing of EPG data
  */
 const xml2js = require('xml2js');
-const zlib = require('zlib');
-const logger = require('../config/logger');
+const sax = require('sax');
+const logger = require('../utils/logger');
+const fetch = require('node-fetch');
 const { fetchURL } = require('../utils/fetchUtils');
-const { EXTERNAL_EPG_URLS } = require('../config/constants');
+const cacheService = require('../services/cacheService');
+const { 
+  getEpgSourceCachePath,
+  isCacheValid,
+  getCacheRemainingHours,
+  readJsonFromFile
+} = require('../services/cacheService');
+const { 
+  EXTERNAL_EPG_URLS, 
+  PRIORITY_EPG_SOURCES, 
+  MAX_EPG_SOURCES, 
+  CACHE_DIR,
+  EPG_CACHE_TTL_HOURS = 24
+} = require('../config/constants');
+const path = require('path');
+const fs = require('fs');
+const { Readable } = require('stream');
+const zlib = require('zlib');
+const crypto = require('crypto');
+const configService = require('../services/configService');
+const { PassThrough } = require('stream');
+const util = require('util');
+const epgStreamParser = require('../utils/epgStreamParser');
 
 /**
  * Parses EPG XML content into structured data
@@ -70,7 +93,7 @@ function parseEPG(epgContent) {
                 }
 
                 // Add versions from display-name
-                if (channel['display-name']) {
+                if (channel['display-name'] && Array.isArray(channel['display-name'])) {
                     channel['display-name'].forEach(name => {
                         let displayName;
 
@@ -1212,576 +1235,2355 @@ function findProgramsForChannel(epgSources, channelId) {
 }
 
 /**
- * Loads EPG data from an external URL
+ * Loads an external EPG source with efficient caching
  * 
- * @param {string} url - URL to load EPG from
- * @returns {Promise<Object>} Parsed EPG data
+ * @param {string} url - URL of the EPG source
+ * @returns {Promise<Object|null>} Parsed EPG data or null if failed
  */
 async function loadExternalEPG(url) {
     try {
-        const epgBuffer = await fetchURL(url);
-        const epgData = url.endsWith('.gz')
-            ? zlib.gunzipSync(epgBuffer).toString('utf8')
-            : epgBuffer.toString('utf8');
-
-        const parsedEPG = await parseEPG(epgData);
-
-        if (parsedEPG.channels.length > 0) {
-            logger.info(`Loaded ${parsedEPG.channels.length} channels and ${parsedEPG.programs.length} programs from ${url}`);
-
-            // Log channel ID samples for matching
-            if (parsedEPG.channels.length > 0) {
-                const channelIdSamples = parsedEPG.channels.slice(0, 5).map(ch => ch.$ ? ch.$.id : 'unknown');
-                logger.info(`Sample channel IDs from ${url}: ${channelIdSamples.join(', ')}`);
-            }
-
-            // Log program channel reference samples
-            if (parsedEPG.programs.length > 0) {
-                const programRefSamples = parsedEPG.programs.slice(0, 5).map(p => p.$ ? p.$.channel : 'unknown');
-                logger.info(`Sample program channel refs from ${url}: ${programRefSamples.join(', ')}`);
-            }
-
-            return parsedEPG;
+        // Check cache directly first using cacheService
+        const cachedData = cacheService.readEpgSourceCache(url);
+        
+        if (cachedData) {
+            logger.info(`Using cached EPG data for ${url}`);
+            return cachedData;
         }
-
-        logger.warn(`No channels found in EPG from ${url}`);
-        return null;
-    } catch (e) {
-        logger.warn(`Failed to load EPG from ${url}`, { error: e.message });
+        
+        // Use loadSingleEpgSource but with a special flag to avoid recursion
+        return await loadSingleEpgSource(url, { forceRefresh: true, _internal: true });
+    } catch (error) {
+        logger.error(`Error loading external EPG from ${url}`, { error: error.message, stack: error.stack });
         return null;
     }
 }
 
 /**
- * Enhanced version of loadAllExternalEPGs with better error handling and large source detection
- * 
- * @returns {Promise<Object>} Object with EPG sources keyed by URL
+ * Load EPG data from a single source URL with improved error handling
+ * @param {string} url - Source URL
+ * @param {Object} options - Additional options
+ * @param {boolean} [options.forceRefresh=false] - Force fresh load even if cached
+ * @param {number} [options.maxChannelsToProcess=0] - Maximum channels to process (0 = unlimited)
+ * @param {Function} [options.onProgress] - Progress callback
+ * @param {AbortSignal} [options.signal] - AbortSignal for cancellation
+ * @returns {Promise<Object>} The loaded EPG data
  */
-async function loadAllExternalEPGs() {
-    const epgSources = {};
-    const failedSources = [];
-    const prioritySources = ['strongepg', 'epgshare01']; // Critical sources
+async function loadSingleEpgSource(url, options = {}) {
+    const context = { source: url };
+    try {
+        logger.info(`Loading EPG from source: ${url}`, context);
+        logger.debug(`EPG load options: ${JSON.stringify({
+            forceRefresh: options.forceRefresh,
+            maxChannelsToProcess: options.maxChannelsPerSource
+        })}`, context);
 
-    logger.info(`Starting to load ${EXTERNAL_EPG_URLS.length} EPG sources`);
+        // Generate a unique ID for this source
+        const sourceId = createSourceId(url);
+        context.sourceId = sourceId;
+        
+        // Ensure cache directories exist
+        const cachePath = getCachePath();
+        const sourceDir = path.join(cachePath, sourceId);
+        
+        if (!fs.existsSync(sourceDir)) {
+            logger.debug(`Creating cache directory for source: ${sourceDir}`, context);
+            fs.mkdirSync(sourceDir, { recursive: true });
+        }
+        
+        // Also ensure the chunks directory exists
+        const chunksDir = path.join(sourceDir, 'chunks');
+        if (!fs.existsSync(chunksDir)) {
+            logger.debug(`Creating chunks directory: ${chunksDir}`, context);
+            fs.mkdirSync(chunksDir, { recursive: true });
+        }
 
-    // First try to load the priority sources
-    for (const url of EXTERNAL_EPG_URLS) {
-        // Check if this is a priority source
-        const isPriority = prioritySources.some(name => url.includes(name));
-        if (!isPriority) continue; // Skip non-priority sources initially
+        // Use streaming parse for EPG loads to handle large files better
+        logger.info(`Starting streaming parse of EPG source: ${url}`, context);
+        const result = await streamingParseEPG(url, sourceId, options);
+        
+        if (!result) {
+            logger.error(`Failed to load EPG from source: ${url} - No result returned`, context);
+            throw new Error(`Failed to load EPG from source: ${url}`);
+        }
+        
+        logger.info(`Successfully loaded EPG from source: ${url}`, {
+            ...context,
+            channelCount: result.channels ? result.channels.length : 0,
+            programCount: result.totalPrograms || 0
+        });
+        
+        return result;
+    } catch (error) {
+        logger.error(`Error loading EPG from source: ${url} - ${error.message}`, {
+            ...context,
+            error: error.stack
+        });
+        throw error;
+    }
+}
 
-        logger.info(`Loading priority EPG source: ${url}`);
-        try {
-            const source = await loadSingleEpgSource(url);
-
-            if (source) {
-                // Mark very large sources for special handling during caching
-                if (source.channels && source.channels.length > 10000 ||
-                    source.programs && source.programs.length > 500000) {
-                    source.isLargeSource = true;
-                    logger.info(`Source ${url} is very large (${source.channels?.length || 0} channels, ${source.programs?.length || 0} programs)`);
+/**
+ * Invalidate cache file if it's in the wrong format
+ * @param {string} url - URL of the EPG source
+ * @param {string} cacheFile - Path to the cache file
+ */
+function invalidateCache(url, cacheFile) {
+    try {
+        if (fs.existsSync(cacheFile)) {
+            logger.info(`Invalidating cache file for ${url} due to format issues: ${cacheFile}`);
+            fs.unlinkSync(cacheFile);
+            
+            // Also try to remove any associated directory in the chunked cache
+            const urlHash = crypto.createHash('md5').update(url).digest('hex');
+            const cacheDir = path.join(path.dirname(cacheFile), urlHash.replace(/[^a-z0-9]/gi, '_').toLowerCase());
+            if (fs.existsSync(cacheDir) && fs.statSync(cacheDir).isDirectory()) {
+                try {
+                    // Remove directory and all contents
+                    fs.rmSync(cacheDir, { recursive: true, force: true });
+                    logger.info(`Removed associated cache directory: ${cacheDir}`);
+                } catch (dirErr) {
+                    logger.warn(`Could not remove cache directory ${cacheDir}: ${dirErr.message}`);
                 }
-
-                epgSources[url] = source;
-                logger.info(`Successfully loaded priority source: ${url}`);
-            } else {
-                failedSources.push({ url, reason: 'Failed to load' });
-                logger.warn(`Failed to load priority source: ${url}`);
             }
-        } catch (error) {
-            failedSources.push({ url, reason: error.message });
-            logger.error(`Error loading priority source ${url}: ${error.message}`, { error });
+        }
+    } catch (err) {
+        logger.warn(`Error invalidating cache for ${url}: ${err.message}`);
+    }
+}
+
+/**
+ * Load EPG data from all configured external URLs
+ * @param {Object} options - Options for loading EPG data
+ * @param {boolean} [options.forceRefresh=false] - Force refresh of EPG data
+ * @param {number} [options.maxChannelsPerSource=0] - Maximum channels to load per source (0 = unlimited)
+ * @returns {Promise<Array>} - Array of EPG sources with data
+ */
+async function loadAllExternalEPGs(session = null, options = {}) {
+    // Default options
+    const defaultOptions = {
+        forceRefresh: false,
+        maxChannelsPerSource: 0 // 0 means no limit
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    logger.info(`Loading all external EPGs with options: ${JSON.stringify(mergedOptions)}`);
+    
+    // Get list of EPG sources from config
+    let epgSources = [];
+    try {
+        const config = await configService.getConfig();
+        epgSources = config.epgSources || [];
+        
+        // If no sources in config, use constants
+        if (!epgSources || epgSources.length === 0) {
+            const constants = require('../config/constants');
+            if (constants && constants.EXTERNAL_EPG_URLS && constants.EXTERNAL_EPG_URLS.length > 0) {
+                logger.info(`No EPG sources in config, using ${constants.EXTERNAL_EPG_URLS.length} sources from constants`);
+                epgSources = constants.EXTERNAL_EPG_URLS;
+            }
+        }
+    } catch (error) {
+        logger.error(`Error loading EPG sources from config: ${error.message}`);
+        
+        // Fallback to constants
+        try {
+            const constants = require('../config/constants');
+            if (constants && constants.EXTERNAL_EPG_URLS) {
+                logger.info(`Using ${constants.EXTERNAL_EPG_URLS.length} sources from constants as fallback`);
+                epgSources = constants.EXTERNAL_EPG_URLS;
+            }
+        } catch (fallbackError) {
+            logger.error(`Failed to load fallback EPG sources: ${fallbackError.message}`);
         }
     }
+    
+    if (!epgSources || epgSources.length === 0) {
+        logger.warn('No EPG sources configured');
+        return [];
+    }
+    
+    logger.info(`Found ${epgSources.length} EPG sources to load`);
+    
+    // Load each source in parallel
+    const results = await Promise.all(
+        epgSources.map(async (sourceUrl) => {
+            try {
+                logger.info(`Loading EPG data from ${sourceUrl}`);
+                return await loadSingleEpgSource(sourceUrl, mergedOptions);
+            } catch (error) {
+                logger.error(`Failed to load EPG from ${sourceUrl}: ${error.message}`);
+                return {
+                    url: sourceUrl,
+                    error: error.message,
+                    success: false
+                };
+            }
+        })
+    );
+    
+    logger.info(`Completed loading all external EPGs, got ${results.length} results`);
+    return results;
+}
 
-    // Check if we need to load more sources
-    const maxSources = 3; // Maximum number of sources to load
+/**
+ * Enhanced version of loadAllExternalEPGs with progress reporting
+ * @param {Object} session - Session object for progress reporting
+ * @param {Object} options - Options for loading EPG data
+ * @returns {Promise<Array>} - Array of EPG sources with data
+ */
+async function loadAllExternalEPGsEnhanced(session = null, options = {}) {
+    // Default options
+    const defaultOptions = {
+        forceRefresh: false,
+        maxChannelsPerSource: 0, // No limit by default
+        onProgress: (progress) => {
+            // Default progress handler does nothing
+            logger.debug(`Progress update (no handler): ${JSON.stringify(progress)}`);
+        }
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    logger.info(`Loading all external EPGs (enhanced) with options: ${JSON.stringify({
+        ...mergedOptions,
+        onProgress: mergedOptions.onProgress ? 'Function defined' : 'No function'
+    })}`);
+    
+    // Get list of EPG sources from config
+    const { epgSources = [] } = await configService.getConfig();
+    
+    if (!epgSources || epgSources.length === 0) {
+        logger.warn('No EPG sources configured');
+        mergedOptions.onProgress({
+            stage: 'complete',
+            percent: 100,
+            message: 'No EPG sources configured',
+            details: { sources: 0 }
+        });
+        return [];
+    }
+    
+    logger.info(`Found ${epgSources.length} EPG sources to load`);
+    
+    // Report initial progress
+    mergedOptions.onProgress({
+        stage: 'start',
+        percent: 0,
+        message: `Starting EPG load process for ${epgSources.length} sources`,
+        details: {
+            totalSources: epgSources.length,
+            currentSource: 0
+        }
+    });
+    
+    // Load sources sequentially to avoid overwhelming the system
+    const results = [];
+    for (let i = 0; i < epgSources.length; i++) {
+        const sourceUrl = epgSources[i];
+        try {
+            // Report progress for this source
+            mergedOptions.onProgress({
+                stage: 'loading',
+                percent: Math.floor((i / epgSources.length) * 100),
+                message: `Loading EPG source ${i + 1} of ${epgSources.length}: ${sourceUrl}`,
+                details: {
+                    totalSources: epgSources.length,
+                    currentSource: i + 1,
+                    sourceUrl
+                }
+            });
+            
+            logger.info(`Loading EPG data from ${sourceUrl} (${i + 1}/${epgSources.length})`);
+            
+            // Create a progress handler for this specific source
+            const sourceProgressHandler = (progress) => {
+                // Adjust the overall percent to fit within this source's allotment
+                const sourcePercent = progress.percent || 0;
+                const overallPercent = Math.floor((i + sourcePercent / 100) / epgSources.length * 100);
+                
+                mergedOptions.onProgress({
+                    stage: progress.stage || 'loading',
+                    percent: overallPercent,
+                    message: progress.message || `Processing source ${i + 1}/${epgSources.length}`,
+                    details: {
+                        ...progress.details,
+                        currentSource: i + 1,
+                        totalSources: epgSources.length,
+                        sourceUrl,
+                        sourcePercent
+                    }
+                });
+            };
+            
+            // Load this source with progress reporting
+            const result = await loadSingleEpgSource(sourceUrl, {
+                ...mergedOptions,
+                onProgress: sourceProgressHandler
+            });
+            
+            results.push(result);
+        } catch (error) {
+            logger.error(`Failed to load EPG from ${sourceUrl}: ${error.message}`);
+            results.push({
+                url: sourceUrl,
+                error: error.message,
+                success: false
+            });
+            
+            // Report error but continue with other sources
+            mergedOptions.onProgress({
+                stage: 'error',
+                percent: Math.floor((i / epgSources.length) * 100),
+                message: `Error loading source ${i + 1}/${epgSources.length}: ${error.message}`,
+                details: {
+                    error: error.message,
+                    sourceUrl,
+                    currentSource: i + 1,
+                    totalSources: epgSources.length
+                }
+            });
+        }
+    }
+    
+    // Report final progress
+    mergedOptions.onProgress({
+        stage: 'complete',
+        percent: 100,
+        message: `Completed loading ${results.length} EPG sources`,
+        details: {
+            totalSources: epgSources.length,
+            completedSources: results.length,
+            successCount: results.filter(r => r.success).length
+        }
+    });
+    
+    logger.info(`Completed loading all external EPGs (enhanced), got ${results.length} results`);
+    return results;
+}
 
-    // Second pass: Load additional sources if needed
-    if (Object.keys(epgSources).length < maxSources) {
-        // How many more sources we need
-        const remainingSlots = maxSources - Object.keys(epgSources).length;
-        logger.info(`Loaded ${Object.keys(epgSources).length} priority sources, loading up to ${remainingSlots} more`);
+/**
+ * Load EPG data from an Xtream API source
+ * @param {string} baseUrl - Base URL of the Xtream API
+ * @param {string} username - Xtream API username
+ * @param {string} password - Xtream API password
+ * @param {Object} options - Options for loading EPG data
+ * @returns {Promise<Object>} - Object containing EPG data
+ */
+async function loadXtreamEPG(baseUrl, username, password, options = {}) {
+    const defaultOptions = {
+        forceRefresh: false,
+        maxChannelsToProcess: 0, // No limit by default
+        onProgress: (progress) => {
+            logger.debug(`XtreamEPG Progress: ${JSON.stringify(progress)}`);
+        }
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    logger.info(`Loading Xtream EPG from ${baseUrl} with options: ${JSON.stringify({
+        ...mergedOptions,
+        onProgress: mergedOptions.onProgress ? 'Function defined' : 'No function',
+        password: '********' // Don't log the actual password
+    })}`);
+    
+    try {
+        // Normalize the base URL to ensure it has a trailing slash
+        const normalizedUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+        
+        // Create a unique identifier for this Xtream source for caching
+        const sourceId = `xtream_${Buffer.from(`${normalizedUrl}_${username}_${password}`).toString('base64')}`;
+        
+        // Check for existing cache
+        const cacheFile = path.join(__dirname, '../cache', `${sourceId.replace(/[\/\\?%*:|"<>]/g, '_')}_channels.json`);
+        
+        if (!mergedOptions.forceRefresh && fs.existsSync(cacheFile)) {
+            try {
+                const cacheStats = fs.statSync(cacheFile);
+                const cacheAge = Date.now() - cacheStats.mtimeMs;
+                const cacheTtlMs = 24 * 60 * 60 * 1000; // 24 hours
+                
+                if (cacheAge < cacheTtlMs) {
+                    logger.info(`Using cached Xtream data from ${cacheFile}, age: ${Math.round(cacheAge / 1000 / 60)} minutes`);
+                    
+                    mergedOptions.onProgress({
+                        stage: 'cache',
+                        percent: 10,
+                        message: 'Found cached Xtream data',
+                        details: {
+                            cacheFile,
+                            cacheAge: Math.round(cacheAge / 1000 / 60)
+                        }
+                    });
+                    
+                    // Read cached data
+                    const cachedData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+                    
+                    mergedOptions.onProgress({
+                        stage: 'complete',
+                        percent: 100,
+                        message: `Loaded ${cachedData.length} channels from Xtream cache`,
+                        details: {
+                            channelCount: cachedData.length,
+                            fromCache: true
+                        }
+                    });
+                    
+                    return {
+                        url: `${normalizedUrl}`,
+                        channels: cachedData,
+                        lastUpdated: new Date(cacheStats.mtimeMs).toISOString(),
+                        fromCache: true,
+                        success: true
+                    };
+                }
+                
+                logger.info(`Cached Xtream data expired (${Math.round(cacheAge / 1000 / 60)} minutes old)`);
+            } catch (cacheError) {
+                logger.warn(`Error reading Xtream cache: ${cacheError.message}, will fetch fresh data`);
+            }
+        }
+        
+        // Report progress
+        mergedOptions.onProgress({
+            stage: 'connecting',
+            percent: 15,
+            message: 'Connecting to Xtream API',
+            details: {
+                baseUrl: normalizedUrl
+            }
+        });
+        
+        // Fetch channels from Xtream API
+        const apiUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}&action=get_live_streams`;
+        logger.info(`Fetching channels from Xtream API: ${apiUrl}`);
+        
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'User-Agent': 'EPG-Matcher/1.0'
+            },
+            timeout: 30000 // 30 second timeout
+        });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+        }
+        
+        // Parse JSON response
+        const channelsData = await response.json();
+        
+        if (!Array.isArray(channelsData)) {
+            throw new Error('Invalid response format from Xtream API, expected array');
+        }
+        
+        mergedOptions.onProgress({
+            stage: 'processing',
+            percent: 50,
+            message: `Processing ${channelsData.length} channels from Xtream API`,
+            details: {
+                rawChannelCount: channelsData.length
+            }
+        });
+        
+        // Process channel data into our format
+        const channels = channelsData.map(channel => ({
+            id: `xtream_${channel.stream_id}`,
+            name: channel.name || `Channel ${channel.stream_id}`,
+            logo: channel.stream_icon || null,
+            group: channel.category_name || 'Uncategorized',
+            url: `${normalizedUrl}${channel.stream_type}/${username}/${password}/${channel.stream_id}`,
+            epgChannelId: channel.epg_channel_id || null,
+            streamType: channel.stream_type || 'live',
+            added: channel.added || new Date().toISOString(),
+            categoryId: channel.category_id || 0,
+            customSid: channel.custom_sid || null,
+            tvArchive: channel.tv_archive || 0,
+            directSource: channel.direct_source || null,
+            tvArchiveDuration: channel.tv_archive_duration || 0
+        }));
+        
+        // Apply channel limit if specified
+        let filteredChannels = channels;
+        if (mergedOptions.maxChannelsToProcess > 0 && channels.length > mergedOptions.maxChannelsToProcess) {
+            logger.warn(`Limiting Xtream channels to ${mergedOptions.maxChannelsToProcess} (from ${channels.length})`);
+            filteredChannels = channels.slice(0, mergedOptions.maxChannelsToProcess);
+            
+            mergedOptions.onProgress({
+                stage: 'limiting',
+                percent: 70,
+                message: `Limiting to ${mergedOptions.maxChannelsToProcess} channels`,
+                details: {
+                    originalCount: channels.length,
+                    limitedCount: filteredChannels.length,
+                    limit: mergedOptions.maxChannelsToProcess
+                }
+            });
+        }
+        
+        // Remove duplicate channels by checking for unique IDs
+        const uniqueChannels = [];
+        const seenIds = new Set();
+        for (const channel of filteredChannels) {
+            if (!seenIds.has(channel.id)) {
+                uniqueChannels.push(channel);
+                seenIds.add(channel.id);
+            }
+        }
+        
+        logger.info(`Filtered ${channels.length} M3U entries to ${uniqueChannels.length} unique channels`);
+        
+        // Cache the channels to disk
+        try {
+            fs.writeFileSync(cacheFile, JSON.stringify(uniqueChannels, null, 2));
+            logger.info(`Saved ${uniqueChannels.length} channels to cache: ${cacheFile}`);
+        } catch (writeError) {
+            logger.error(`Failed to write Xtream cache: ${writeError.message}`);
+        }
+        
+        mergedOptions.onProgress({
+            stage: 'complete',
+            percent: 100,
+            message: `Successfully parsed ${uniqueChannels.length} channels from Xtream`,
+            details: {
+                channelCount: uniqueChannels.length,
+                fromCache: false
+            }
+        });
+        
+        return {
+            url: `${normalizedUrl}`,
+            channels: uniqueChannels,
+            lastUpdated: new Date().toISOString(),
+            fromCache: false,
+            success: true
+        };
+    } catch (error) {
+        logger.error(`Error loading Xtream EPG: ${error.message}`);
+        
+        mergedOptions.onProgress({
+            stage: 'error',
+            percent: 0,
+            message: `Error: ${error.message}`,
+            details: {
+                error: error.message,
+                baseUrl
+            }
+        });
+        
+        return {
+            url: baseUrl,
+            error: error.message,
+            channels: [],
+            success: false
+        };
+    }
+}
 
-        // Try loading additional sources
-        for (const url of EXTERNAL_EPG_URLS) {
-            // Skip already loaded sources
-            if (url in epgSources) continue;
+/**
+ * Create a test EPG source with random data for development purposes
+ * @param {number} channelCount - Number of test channels to create
+ * @param {Object} options - Options for creating test data
+ * @returns {Object} - Object containing test EPG data
+ */
+function createTestEpgSource(channelCount = 50, options = {}) {
+    const channels = [];
+    const genres = ['News', 'Sports', 'Entertainment', 'Movies', 'Kids', 'Music', 'Documentary', 'Science', 'Lifestyle'];
+    const countries = ['US', 'UK', 'CA', 'AU', 'DE', 'FR', 'JP', 'BR', 'ES', 'IT'];
+    
+    logger.info(`Creating test EPG source with ${channelCount} channels`);
+    
+    // Create random channels
+    for (let i = 0; i < channelCount; i++) {
+        const channelId = `test_channel_${i + 1}`;
+        const genre = genres[Math.floor(Math.random() * genres.length)];
+        const country = countries[Math.floor(Math.random() * countries.length)];
+        
+        channels.push({
+            id: channelId,
+            name: `Test Channel ${i + 1}`,
+            logo: `https://via.placeholder.com/150?text=Ch${i+1}`,
+            group: genre,
+            url: `#test_channel_${i + 1}`,
+            epgChannelId: channelId,
+            country: country,
+            language: 'English',
+            categories: [genre],
+            programs: generateTestPrograms(channelId, 24) // 24 hours of test programs
+        });
+    }
+    
+    return {
+        url: 'test://epg.source',
+        name: 'Test EPG Source',
+        description: 'Generated test data for development',
+        channels: channels,
+        lastUpdated: new Date().toISOString(),
+        fromCache: false,
+        success: true
+    };
+}
 
-            // Stop if we've loaded enough sources
-            if (Object.keys(epgSources).length >= maxSources) {
-                logger.info(`Reached maximum of ${maxSources} EPG sources, stopping to conserve memory`);
+/**
+ * Generate test program data for a channel
+ * @private
+ * @param {string} channelId - Channel ID to generate programs for
+ * @param {number} hours - Number of hours of programming to generate
+ * @returns {Array} - Array of program objects
+ */
+function generateTestPrograms(channelId, hours) {
+    const programs = [];
+    const now = new Date();
+    const startTime = new Date(now);
+    startTime.setHours(0, 0, 0, 0); // Start at beginning of day
+    
+    const programTitles = [
+        'Morning News', 'Documentary', 'Movie: Action Heroes', 
+        'Cooking Show', 'Science Hour', 'Sports Highlights',
+        'Kids Cartoon', 'Evening News', 'Late Night Show',
+        'Weather Update', 'Reality TV', 'Music Videos',
+        'Nature Documentary', 'History Special', 'Comedy Hour'
+    ];
+    
+    // Standard program durations in minutes
+    const durations = [30, 60, 90, 120];
+    
+    let currentTime = new Date(startTime);
+    const endDay = new Date(startTime);
+    endDay.setHours(endDay.getHours() + hours);
+    
+    while (currentTime < endDay) {
+        // Get random program details
+        const titleIndex = Math.floor(Math.random() * programTitles.length);
+        const durationIndex = Math.floor(Math.random() * durations.length);
+        const duration = durations[durationIndex]; // in minutes
+        
+        const startTimeStr = currentTime.toISOString();
+        const endTime = new Date(currentTime);
+        endTime.setMinutes(endTime.getMinutes() + duration);
+        const endTimeStr = endTime.toISOString();
+        
+        // Create program object
+        programs.push({
+            id: `${channelId}_prog_${programs.length + 1}`,
+            title: programTitles[titleIndex],
+            start: startTimeStr,
+            stop: endTimeStr,
+            description: `This is a test program description for ${programTitles[titleIndex]}`,
+            category: getRandomCategory(),
+            rating: Math.floor(Math.random() * 5) + 1,
+            length: duration * 60, // length in seconds
+            channelId: channelId
+        });
+        
+        // Move current time forward
+        currentTime = new Date(endTime);
+    }
+    
+    return programs;
+}
+
+/**
+ * Get a random program category for test data
+ * @private
+ * @returns {string} - Random category name
+ */
+function getRandomCategory() {
+    const categories = [
+        'News', 'Documentary', 'Movie', 'Series', 'Sports', 
+        'Kids', 'Music', 'Arts', 'Education', 'Entertainment'
+    ];
+    return categories[Math.floor(Math.random() * categories.length)];
+}
+
+/**
+ * Generate a summary of all EPG data in the system
+ * @param {Array} epgSources - Array of EPG source objects
+ * @returns {Object} - Summary statistics of EPG data
+ */
+function generateEpgSummary(epgSources = []) {
+    logger.info(`Generating EPG summary for ${epgSources.length} sources`);
+    
+    // Initialize summary object
+    const summary = {
+        totalSources: epgSources.length,
+        totalChannels: 0,
+        totalPrograms: 0,
+        categories: {},
+        countries: {},
+        languages: {},
+        channelsPerSource: {},
+        programsPerSource: {},
+        sourcesWithMostChannels: [],
+        channelsWithMostPrograms: [],
+        programTimespan: {
+            earliest: null,
+            latest: null,
+            daysSpan: 0
+        }
+    };
+    
+    // Track the earliest and latest program dates across all sources
+    let earliestDate = null;
+    let latestDate = null;
+    
+    // Process each source
+    epgSources.forEach(source => {
+        if (!source || !source.channels) {
+            return; // Skip invalid sources
+        }
+        
+        const sourceId = source.url || 'unknown';
+        const channelCount = source.channels.length || 0;
+        summary.totalChannels += channelCount;
+        summary.channelsPerSource[sourceId] = channelCount;
+        
+        let programCount = 0;
+        
+        // Process each channel in the source
+        source.channels.forEach(channel => {
+            if (!channel) return;
+            
+            // Count programs
+            const channelPrograms = channel.programs || [];
+            programCount += channelPrograms.length;
+            
+            // Track channel with program count
+            if (channelPrograms.length > 0) {
+                summary.channelsWithMostPrograms.push({
+                    channelId: channel.id,
+                    channelName: channel.name || channel.id,
+                    sourceUrl: sourceId,
+                    programCount: channelPrograms.length
+                });
+            }
+            
+            // Process each program for date range
+            channelPrograms.forEach(program => {
+                if (!program) return;
+                
+                // Track program timespan
+                if (program.start) {
+                    const startDate = new Date(program.start);
+                    if (!isNaN(startDate.getTime())) {
+                        if (!earliestDate || startDate < earliestDate) {
+                            earliestDate = startDate;
+                        }
+                    }
+                }
+                
+                if (program.stop) {
+                    const endDate = new Date(program.stop);
+                    if (!isNaN(endDate.getTime())) {
+                        if (!latestDate || endDate > latestDate) {
+                            latestDate = endDate;
+                        }
+                    }
+                }
+                
+                // Count categories
+                if (program.category) {
+                    const category = program.category;
+                    summary.categories[category] = (summary.categories[category] || 0) + 1;
+                }
+            });
+            
+            // Count channel metadata
+            if (channel.country) {
+                const country = channel.country;
+                summary.countries[country] = (summary.countries[country] || 0) + 1;
+            }
+            
+            if (channel.language) {
+                const language = channel.language;
+                summary.languages[language] = (summary.languages[language] || 0) + 1;
+            }
+            
+            // Count categories from channel
+            if (channel.categories && Array.isArray(channel.categories)) {
+                channel.categories.forEach(category => {
+                    if (category) {
+                        summary.categories[category] = (summary.categories[category] || 0) + 1;
+                    }
+                });
+            }
+        });
+        
+        // Add program count for this source
+        summary.programsPerSource[sourceId] = programCount;
+        summary.totalPrograms += programCount;
+        
+        // Track source with channel count
+        summary.sourcesWithMostChannels.push({
+            url: sourceId,
+            name: source.name || sourceId,
+            channelCount: channelCount,
+            programCount: programCount
+        });
+    });
+    
+    // Calculate program timespan
+    if (earliestDate && latestDate) {
+        summary.programTimespan.earliest = earliestDate.toISOString();
+        summary.programTimespan.latest = latestDate.toISOString();
+        
+        // Calculate days span
+        const timeDiff = latestDate.getTime() - earliestDate.getTime();
+        summary.programTimespan.daysSpan = Math.ceil(timeDiff / (1000 * 3600 * 24));
+    }
+    
+    // Sort results
+    summary.sourcesWithMostChannels.sort((a, b) => b.channelCount - a.channelCount);
+    summary.channelsWithMostPrograms.sort((a, b) => b.programCount - a.programCount);
+    
+    // Limit the arrays to top 10
+    summary.sourcesWithMostChannels = summary.sourcesWithMostChannels.slice(0, 10);
+    summary.channelsWithMostPrograms = summary.channelsWithMostPrograms.slice(0, 10);
+    
+    // Convert categories, countries, languages to sorted arrays
+    summary.categoriesList = Object.entries(summary.categories)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20); // Top 20 categories
+    
+    summary.countriesList = Object.entries(summary.countries)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20); // Top 20 countries
+    
+    summary.languagesList = Object.entries(summary.languages)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20); // Top 20 languages
+    
+    logger.info(`EPG summary generated: ${summary.totalSources} sources, ${summary.totalChannels} channels, ${summary.totalPrograms} programs`);
+    
+    return summary;
+}
+
+/**
+ * Search for programs across all EPG sources matching a search term
+ * @param {Array} epgSources - Array of EPG sources to search
+ * @param {string} searchTerm - The search term to look for
+ * @param {Object} options - Search options
+ * @param {number} [options.limit=100] - Maximum number of results to return
+ * @param {boolean} [options.includeFuture=true] - Whether to include future programs
+ * @param {boolean} [options.includePast=false] - Whether to include past programs
+ * @returns {Array} - Array of matching programs with channel info
+ */
+function searchEpg(epgSources, searchTerm, options = {}) {
+    const defaultOptions = {
+        limit: 100,
+        includeFuture: true,
+        includePast: false,
+        categoryFilter: null,
+        channelFilter: null
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    logger.info(`Searching EPG for '${searchTerm}' with options: ${JSON.stringify(mergedOptions)}`);
+    
+    if (!searchTerm || searchTerm.trim().length === 0) {
+        logger.warn('Empty search term provided for EPG search');
+        return [];
+    }
+    
+    if (!epgSources || !Array.isArray(epgSources) || epgSources.length === 0) {
+        logger.warn('No EPG sources provided for search');
+        return [];
+    }
+    
+    // Create search tokens for the term
+    const searchTokens = createSearchTokens(searchTerm);
+    const now = new Date();
+    const results = [];
+    
+    // Search through all sources and their channels
+    for (const source of epgSources) {
+        if (!source || !source.channels || !Array.isArray(source.channels)) {
+            continue;
+        }
+        
+        // Iterate through each channel in the source
+        for (const channel of source.channels) {
+            // Handle case where channel has no programs array
+            if (!channel) continue;
+            
+            // Check if channel name matches search term - add channel-level match
+            const channelName = channel.name || channel.id || '';
+            const channelNameTokens = createSearchTokens(channelName);
+            const channelMatches = searchTokens.some(token => 
+                channelNameTokens.includes(token) || 
+                channelName.toLowerCase().includes(token)
+            );
+            
+            if (channelMatches) {
+                results.push({
+                    channelId: channel.id || 'unknown',
+                    channelName: channelName,
+                    channelLogo: channel.icon || channel.logo || null,
+                    sourceUrl: source.url || 'unknown',
+                    sourceName: source.name || source.url || 'Unknown Source',
+                    title: `Channel: ${channelName}`,
+                    category: 'Channel',
+                    isChannel: true,
+                    highlight: searchTerm
+                });
+                
+                // Check if we've reached the limit
+                if (results.length >= mergedOptions.limit) {
+                    logger.info(`EPG search limit of ${mergedOptions.limit} reached`);
+                    return results;
+                }
+            }
+            
+            // Skip program search if no programs array
+            if (!channel.programs || !Array.isArray(channel.programs)) {
+                continue;
+            }
+            
+            // Apply channel filter if specified
+            if (mergedOptions.channelFilter && 
+                channel.id !== mergedOptions.channelFilter &&
+                channel.name !== mergedOptions.channelFilter) {
+                continue;
+            }
+            
+            // Iterate through each program in the channel
+            for (const program of channel.programs) {
+                if (!program || !program.title) {
+                    continue;
+                }
+                
+                // Check program time criteria
+                const startTime = program.start ? new Date(program.start) : null;
+                const endTime = program.stop ? new Date(program.stop) : null;
+                
+                if (startTime) {
+                    // Skip past programs if not including past
+                    if (!mergedOptions.includePast && endTime && endTime < now) {
+                        continue;
+                    }
+                    
+                    // Skip future programs if not including future
+                    if (!mergedOptions.includeFuture && startTime > now) {
+                        continue;
+                    }
+                }
+                
+                // Apply category filter if specified
+                if (mergedOptions.categoryFilter && 
+                    program.category !== mergedOptions.categoryFilter) {
+                    continue;
+                }
+                
+                // Check if program matches the search term
+                let matches = false;
+                
+                // Check program title
+                const titleTokens = createSearchTokens(program.title);
+                if (searchTokens.some(token => titleTokens.includes(token))) {
+                    matches = true;
+                }
+                
+                // Check program description if not matched by title
+                if (!matches && program.description) {
+                    const descTokens = createSearchTokens(program.description);
+                    if (searchTokens.some(token => descTokens.includes(token))) {
+                        matches = true;
+                    }
+                }
+                
+                // Add to results if matched
+                if (matches) {
+                    results.push({
+                        channelId: channel.id,
+                        channelName: channel.name || channel.id,
+                        channelLogo: channel.icon || channel.logo || null,
+                        sourceUrl: source.url || 'unknown',
+                        sourceName: source.name || source.url || 'Unknown Source',
+                        program: {
+                            ...program,
+                            channelId: channel.id
+                        }
+                    });
+                    
+                    // Check if we've reached the limit
+                    if (results.length >= mergedOptions.limit) {
+                        logger.info(`EPG search limit of ${mergedOptions.limit} reached`);
+                        return results;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Sort results by start time
+    results.sort((a, b) => {
+        // First sort channels to the top
+        if (a.isChannel && !b.isChannel) return -1;
+        if (!a.isChannel && b.isChannel) return 1;
+        
+        // For programs, sort by start time
+        if (!a.program || !a.program.start) return 1;
+        if (!b.program || !b.program.start) return -1;
+        
+        const aStart = new Date(a.program.start);
+        const bStart = new Date(b.program.start);
+        
+        return aStart - bStart;
+    });
+    
+    logger.info(`EPG search for '${searchTerm}' returned ${results.length} results`);
+    return results;
+}
+
+/**
+ * Create search tokens from a search term
+ * @param {string} term - The search term to tokenize
+ * @returns {Array} - Array of normalized search tokens
+ */
+function createSearchTokens(term) {
+    if (!term || typeof term !== 'string') {
+        return [];
+    }
+    
+    // Convert to lowercase and remove special characters
+    const normalized = term.toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    
+    // Split into tokens and filter out short tokens
+    return normalized.split(' ')
+        .filter(token => token.length > 1)
+        .map(token => token.trim());
+}
+
+/**
+ * Search for MLB team games in EPG data
+ * @param {Array} epgSources - Array of EPG sources to search
+ * @param {string} teamName - MLB team name to search for
+ * @param {Object} options - Search options
+ * @returns {Array} - Array of matching programs with channel info
+ */
+function searchForMlbTeam(epgSources, teamName, options = {}) {
+    const defaultOptions = {
+        limit: 100,
+        includeFuture: true,
+        includePast: false,
+        daysAhead: 7,
+        daysBehind: 1
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    logger.info(`Searching for MLB team "${teamName}" with options: ${JSON.stringify(mergedOptions)}`);
+    
+    if (!teamName || teamName.trim().length === 0) {
+        logger.warn('Empty team name provided for MLB team search');
+        return [];
+    }
+    
+    if (!epgSources || !Array.isArray(epgSources) || epgSources.length === 0) {
+        logger.warn('No EPG sources provided for MLB team search');
+        return [];
+    }
+    
+    // Normalize team name and create search patterns
+    const normalizedTeamName = teamName.toLowerCase().trim();
+    
+    // MLB team nicknames and alternative names
+    const mlbTeams = {
+        'yankees': ['ny yankees', 'new york yankees', 'nyy'],
+        'red sox': ['boston red sox', 'bos'],
+        'rays': ['tampa bay rays', 'tampa bay', 'tb rays', 'tb'],
+        'blue jays': ['toronto blue jays', 'tor', 'toronto'],
+        'orioles': ['baltimore orioles', 'bal', 'baltimore'],
+        'guardians': ['cleveland guardians', 'cleveland', 'cle'],
+        'tigers': ['detroit tigers', 'detroit', 'det'],
+        'royals': ['kansas city royals', 'kansas city', 'kc'],
+        'twins': ['minnesota twins', 'minnesota', 'min'],
+        'white sox': ['chicago white sox', 'chw', 'chi white sox'],
+        'astros': ['houston astros', 'houston', 'hou'],
+        'angels': ['los angeles angels', 'la angels', 'laa'],
+        'athletics': ['oakland athletics', 'oakland', 'oak', 'a\'s'],
+        'mariners': ['seattle mariners', 'seattle', 'sea'],
+        'rangers': ['texas rangers', 'texas', 'tex'],
+        'braves': ['atlanta braves', 'atlanta', 'atl'],
+        'marlins': ['miami marlins', 'miami', 'mia'],
+        'mets': ['new york mets', 'ny mets', 'nym'],
+        'phillies': ['philadelphia phillies', 'philadelphia', 'phi'],
+        'nationals': ['washington nationals', 'washington', 'wsh', 'was'],
+        'cubs': ['chicago cubs', 'chc', 'chi cubs'],
+        'reds': ['cincinnati reds', 'cincinnati', 'cin'],
+        'brewers': ['milwaukee brewers', 'milwaukee', 'mil'],
+        'pirates': ['pittsburgh pirates', 'pittsburgh', 'pit'],
+        'cardinals': ['st louis cardinals', 'st. louis cardinals', 'st louis', 'stl'],
+        'diamondbacks': ['arizona diamondbacks', 'arizona', 'ari', 'd-backs', 'dbacks'],
+        'rockies': ['colorado rockies', 'colorado', 'col'],
+        'dodgers': ['los angeles dodgers', 'la dodgers', 'lad'],
+        'padres': ['san diego padres', 'san diego', 'sd'],
+        'giants': ['san francisco giants', 'san francisco', 'sf']
+    };
+    
+    // Find which MLB team we're searching for
+    let targetTeam = null;
+    let teamVariations = [];
+    
+    // Check if the normalized team name is a key in mlbTeams
+    if (mlbTeams[normalizedTeamName]) {
+        targetTeam = normalizedTeamName;
+        teamVariations = [normalizedTeamName, ...mlbTeams[normalizedTeamName]];
+    } else {
+        // Check if the normalized team name is in any of the team variations
+        for (const [team, variations] of Object.entries(mlbTeams)) {
+            if (variations.includes(normalizedTeamName)) {
+                targetTeam = team;
+                teamVariations = [team, ...variations];
                 break;
             }
-
-            logger.info(`Loading additional EPG source: ${url}`);
-            try {
-                const source = await loadSingleEpgSource(url);
-
-                if (source) {
-                    // Mark very large sources for special handling during caching
-                    if (source.channels && source.channels.length > 10000 ||
-                        source.programs && source.programs.length > 500000) {
-                        source.isLargeSource = true;
-                        logger.info(`Source ${url} is very large (${source.channels?.length || 0} channels, ${source.programs?.length || 0} programs)`);
+        }
+    }
+    
+    // If we didn't find a match to a known MLB team, still try to search for the term
+    if (!targetTeam) {
+        logger.warn(`Unknown MLB team "${teamName}", will search for exact term`);
+        teamVariations = [normalizedTeamName];
+    } else {
+        logger.info(`Identified "${teamName}" as MLB team "${targetTeam}"`);
+    }
+    
+    // Set up date ranges
+    const now = new Date();
+    const futureDate = new Date();
+    futureDate.setDate(now.getDate() + mergedOptions.daysAhead);
+    
+    const pastDate = new Date();
+    pastDate.setDate(now.getDate() - mergedOptions.daysBehind);
+    
+    const results = [];
+    
+    // Search for MLB games in the EPG data
+    for (const source of epgSources) {
+        if (!source || !source.channels || !Array.isArray(source.channels)) {
+            continue;
+        }
+        
+        for (const channel of source.channels) {
+            if (!channel || !channel.programs || !Array.isArray(channel.programs)) {
+                continue;
+            }
+            
+            for (const program of channel.programs) {
+                if (!program || !program.title) {
+                    continue;
+                }
+                
+                // Check program time criteria
+                const startTime = program.start ? new Date(program.start) : null;
+                const endTime = program.stop ? new Date(program.stop) : null;
+                
+                if (startTime) {
+                    // Skip past programs if not including past
+                    if (!mergedOptions.includePast && endTime && endTime < pastDate) {
+                        continue;
                     }
-
-                    epgSources[url] = source;
-                    logger.info(`Successfully loaded additional source: ${url}`);
-                } else {
-                    failedSources.push({ url, reason: 'Failed to load' });
-                    logger.warn(`Failed to load additional source: ${url}`);
+                    
+                    // Skip future programs if not including future
+                    if (!mergedOptions.includeFuture && startTime > futureDate) {
+                        continue;
+                    }
                 }
-            } catch (error) {
-                failedSources.push({ url, reason: error.message });
-                logger.error(`Error loading additional source ${url}: ${error.message}`, { error });
+                
+                // Check if it's a baseball/MLB program
+                const isMlbProgram = isMlbProgramTitle(program.title);
+                if (!isMlbProgram) {
+                    continue;
+                }
+                
+                // Check if the program contains our team name
+                const programTitle = program.title.toLowerCase();
+                const programDesc = program.description ? program.description.toLowerCase() : '';
+                
+                let teamMatch = false;
+                for (const variation of teamVariations) {
+                    if (programTitle.includes(variation) || programDesc.includes(variation)) {
+                        teamMatch = true;
+                        break;
+                    }
+                }
+                
+                if (teamMatch) {
+                    results.push({
+                        channelId: channel.id,
+                        channelName: channel.name || channel.id,
+                        channelLogo: channel.logo || null,
+                        sourceUrl: source.url || 'unknown',
+                        sourceName: source.name || source.url || 'Unknown Source',
+                        program: {
+                            ...program,
+                            channelId: channel.id
+                        }
+                    });
+                    
+                    // Check if we've reached the limit
+                    if (results.length >= mergedOptions.limit) {
+                        logger.info(`MLB team search limit of ${mergedOptions.limit} reached`);
+                        break;
+                    }
+                }
+            }
+            
+            if (results.length >= mergedOptions.limit) {
+                break;
             }
         }
+        
+        if (results.length >= mergedOptions.limit) {
+            break;
+        }
     }
-
-    // Final summary
-    const successCount = Object.keys(epgSources).length;
-    logger.info(`Loaded ${successCount} EPG sources successfully. ${failedSources.length} sources failed.`);
-    if (failedSources.length > 0) {
-        logger.info(`Failed sources: ${JSON.stringify(failedSources)}`);
-    }
-
-    // Return even if empty (calling code must handle this)
-    return epgSources;
+    
+    // Sort results by start time
+    results.sort((a, b) => {
+        if (!a.program.start) return 1;
+        if (!b.program.start) return -1;
+        
+        const aStart = new Date(a.program.start);
+        const bStart = new Date(b.program.start);
+        
+        return aStart - bStart;
+    });
+    
+    logger.info(`MLB team search for "${teamName}" returned ${results.length} results`);
+    return results;
 }
 
 /**
-* Loads a single EPG source to allow for better error handling
-* 
-* @param {string} url - URL of the EPG source
-* @returns {Promise<Object|null>} Parsed EPG data or null if failed
-*/
-async function loadSingleEpgSource(url) {
-    const startTime = Date.now();
-    logger.info(`Fetching EPG data from ${url}`);
-
-    try {
-        const epgBuffer = await fetchURL(url);
-
-        if (!epgBuffer || epgBuffer.length === 0) {
-            logger.error(`Received empty buffer from ${url}`);
-            return null;
-        }
-
-        logger.info(`Fetched ${epgBuffer.length} bytes from ${url} in ${Date.now() - startTime}ms`);
-
-        // Handle gzipped content
-        let epgContent;
-        try {
-            if (url.endsWith('.gz')) {
-                logger.info(`Unzipping EPG data from ${url}`);
-                epgContent = zlib.gunzipSync(epgBuffer).toString('utf8');
-                logger.info(`Unzipped to ${epgContent.length} bytes`);
-            } else {
-                epgContent = epgBuffer.toString('utf8');
-            }
-        } catch (e) {
-            logger.error(`Failed to process EPG data from ${url}`, { error: e.message });
-            return null;
-        }
-
-        // Basic XML validation
-        if (!epgContent.includes('<?xml') || !epgContent.includes('<tv')) {
-            logger.error(`Invalid XML structure in EPG from ${url}`);
-            return null;
-        }
-
-        // Parse EPG
-        logger.info(`Parsing EPG data from ${url}`);
-        const parseStartTime = Date.now();
-        const parsedEPG = await parseEPG(epgContent);
-        logger.info(`Parsed EPG in ${Date.now() - parseStartTime}ms`);
-
-        if (!parsedEPG || parsedEPG.channels.length === 0) {
-            logger.warn(`No channels found in EPG from ${url}`);
-            return null;
-        }
-
-        // Log channel ID samples for debugging
-        if (parsedEPG.channels.length > 0) {
-            const channelIdSamples = parsedEPG.channels.slice(0, 5).map(ch => ch.$ ? ch.$.id : 'unknown');
-            logger.info(`Sample channel IDs from ${url}: ${channelIdSamples.join(', ')}`);
-        }
-
-        // Log program count details
-        logger.info(`Successfully loaded EPG from ${url}:`, {
-            channelCount: parsedEPG.channels.length,
-            programCount: parsedEPG.programs.length,
-            channelMapSize: Object.keys(parsedEPG.channelMap).length,
-            programMapSize: Object.keys(parsedEPG.programMap).length
-        });
-
-        return parsedEPG;
-    } catch (e) {
-        logger.error(`Error loading EPG source ${url}`, { error: e.message, stack: e.stack });
-        return null;
-    }
-}
-
-/**
-* Special mapping for sports channels
-* Helps match M3U channels with EPG data for sports
-* 
-* @param {string} channelName - Original channel name
-* @returns {Array} Array of potential EPG IDs to match against
-*/
-function generateSportsEpgMappings(channelName) {
-    const nameLower = channelName.toLowerCase();
-    const mappings = [];
-
-    // Extract team name from common patterns
-    // US| MLB LOS ANGELES ANGELS HD -> los angeles angels
-    let teamName = nameLower.replace(/^us\|\s*mlb\s*/i, '').replace(/\s*hd$/i, '');
-
-    // Add the clean team name
-    mappings.push(teamName);
-
-    // MLB-specific mappings
-    if (nameLower.includes('mlb') || nameLower.includes('baseball')) {
-        // Add without MLB prefix
-        mappings.push(teamName.replace(/^mlb[\s-]+/i, ''));
-
-        // Add with different formats
-        mappings.push(`mlb ${teamName}`);
-        mappings.push(`baseball ${teamName}`);
-
-        // Special case for channel IDs with dash format
-        if (channelName.includes('-')) {
-            const parts = channelName.split('-');
-            if (parts.length >= 2) {
-                mappings.push(parts[1].split('.')[0]); // MLB-WashingtonNationals.us -> WashingtonNationals
-                mappings.push(parts[1].replace(/\..*$/, '')); // Remove any domain suffix
-            }
-        }
-
-        // Handle city + team name format (Los Angeles Angels)
-        const cityTeamMatch = teamName.match(/^(.*?)\s+(.*?)$/);
-        if (cityTeamMatch) {
-            const [_, city, team] = cityTeamMatch;
-            // Add just the team name (Angels)
-            mappings.push(team);
-            // Add just the city (Los Angeles)
-            mappings.push(city);
-            // Add different separators
-            mappings.push(`${city}-${team}`);
-            mappings.push(`${city}.${team}`);
-        }
-
-        // Team-specific mappings
-        if (nameLower.includes('nationals') || nameLower.includes('washington')) {
-            mappings.push('washington');
-            mappings.push('nationals');
-            mappings.push('washington nationals');
-            mappings.push('nats');
-            mappings.push('washington nats');
-            mappings.push('MLB Washington Nationals');
-        }
-    }
-
-    // Remove duplicates
-    return [...new Set(mappings)];
-}
-
-/**
- * Enhanced version of loadAllExternalEPGs with better error handling and logging
- * 
- * @returns {Promise<Object>} Object with EPG sources keyed by URL
+ * Check if a program title appears to be an MLB broadcast
+ * @private
+ * @param {string} title - Program title to check
+ * @returns {boolean} - Whether the title appears to be an MLB broadcast
  */
-async function loadAllExternalEPGsEnhanced() {
-    const epgSources = {};
+function isMlbProgramTitle(title) {
+    if (!title) return false;
+    
+    const lowerTitle = title.toLowerCase();
+    
+    // Keywords indicating baseball broadcasts
+    const baseballKeywords = [
+        'mlb', 'baseball', 'major league baseball',
+        'world series', 'playoffs', 'alds', 'alcs', 'nlds', 'nlcs',
+        'all-star game', 'all star game',
+        'spring training', 'wild card'
+    ];
+    
+    // Check for these keywords
+    for (const keyword of baseballKeywords) {
+        if (lowerTitle.includes(keyword)) {
+            return true;
+        }
+    }
+    
+    // Check for common game patterns like "Team vs Team" or "Team at Team"
+    const gamePatterns = [' vs ', ' vs. ', ' at ', ' @ '];
+    if (gamePatterns.some(pattern => lowerTitle.includes(pattern))) {
+        return true;
+    }
+    
+    return false;
+}
 
-    for (const url of EXTERNAL_EPG_URLS) {
-        logger.info(`Starting to load EPG from ${url}`);
-
-        try {
-            // Add detailed timing logging
-            const startTime = Date.now();
-            logger.info(`Fetching EPG data from ${url}`);
-
-            const epgBuffer = await fetchURL(url);
-            logger.info(`Fetched ${epgBuffer.length} bytes from ${url} in ${Date.now() - startTime}ms`);
-
-            // Handle gzipped content
-            let epgContent;
-            try {
-                if (url.endsWith('.gz')) {
-                    logger.info(`Unzipping EPG data from ${url}`);
-                    epgContent = zlib.gunzipSync(epgBuffer).toString('utf8');
-                    logger.info(`Unzipped to ${epgContent.length} bytes`);
-                } else {
-                    epgContent = epgBuffer.toString('utf8');
+/**
+ * Load EPG data from a single source URL
+ * @param {string} url - URL of the EPG source
+ * @param {Object} options - Loading options
+ * @param {boolean} [options.forceRefresh=false] - Force refresh of EPG data
+ * @param {number} [options.maxChannelsToProcess=0] - Maximum channels to process (0 = unlimited)
+ * @param {Function} [options.onProgress] - Progress callback function
+ * @returns {Promise<Object>} - Object containing EPG data
+ */
+async function loadSingleEpgSource(url, options = {}) {
+    // Default options
+    const defaultOptions = {
+        forceRefresh: false,
+        maxChannelsToProcess: 0, // 0 means no limit
+        onProgress: (progress) => {
+            logger.debug(`Progress update: ${JSON.stringify(progress)}`);
+        }
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    logger.info(`Loading EPG data from ${url} with options: ${JSON.stringify({
+        ...mergedOptions,
+        onProgress: mergedOptions.onProgress ? 'Function defined' : 'No function'
+    })}`);
+    
+    try {
+        // Progress reporting
+        mergedOptions.onProgress({
+            stage: 'start',
+            percent: 0,
+            message: `Starting EPG load from ${url}`,
+            details: { url }
+        });
+        
+        // Special handling for Xtream API URLs
+        if (url.includes('/player_api.php') || url.match(/https?:\/\/[^\/]+\/c\//) || url.includes('username=') && url.includes('password=')) {
+            logger.info(`Detected Xtream API URL: ${url}`);
+            mergedOptions.onProgress({
+                stage: 'detect',
+                percent: 5,
+                message: 'Detected Xtream API URL',
+                details: { url, type: 'xtream' }
+            });
+            
+            // Extract username and password from the URL if present
+            let username = '';
+            let password = '';
+            let baseUrl = '';
+            
+            if (url.includes('username=') && url.includes('password=')) {
+                // Extract from query parameters
+                const urlObj = new URL(url);
+                username = urlObj.searchParams.get('username') || '';
+                password = urlObj.searchParams.get('password') || '';
+                
+                // Remove username and password from the URL for the base URL
+                urlObj.searchParams.delete('username');
+                urlObj.searchParams.delete('password');
+                baseUrl = urlObj.origin + urlObj.pathname;
+            } else if (url.match(/https?:\/\/[^\/]+\/c\//)) {
+                // Extract from URL path format: http://domain.com/c/username/password/...
+                const parts = url.split('/');
+                const domainIndex = parts.findIndex(part => part.includes(':'));
+                if (domainIndex > 0 && parts.length > domainIndex + 3) {
+                    username = parts[domainIndex + 2];
+                    password = parts[domainIndex + 3];
+                    baseUrl = parts.slice(0, domainIndex + 2).join('/');
                 }
-            } catch (e) {
-                logger.error(`Failed to process EPG data from ${url}`, { error: e.message, stack: e.stack });
-                continue;
             }
-
-            // Basic XML validation
-            if (!epgContent.includes('<?xml') || !epgContent.includes('<tv')) {
-                logger.error(`Invalid XML structure in EPG from ${url}`);
-                continue;
+            
+            if (username && password && baseUrl) {
+                logger.info(`Loading Xtream EPG with credentials from ${baseUrl}`);
+                return loadXtreamEPG(baseUrl, username, password, mergedOptions);
+            } else {
+                logger.warn(`Could not extract Xtream credentials from URL: ${url}`);
             }
-
-            // Parse EPG
-            logger.info(`Parsing EPG data from ${url}`);
-            const parseStartTime = Date.now();
-            const parsedEPG = await parseEPG(epgContent);
-            logger.info(`Parsed EPG in ${Date.now() - parseStartTime}ms`);
-
-            if (parsedEPG.channels.length > 0) {
-                epgSources[url] = parsedEPG;
-                logger.info(`Successfully loaded EPG from ${url}:`, {
-                    channelCount: parsedEPG.channels.length,
-                    programCount: parsedEPG.programs.length,
-                    channelMapSize: Object.keys(parsedEPG.channelMap).length,
-                    programMapSize: Object.keys(parsedEPG.programMap).length
+        }
+        
+        // For test purposes, if URL is 'test://epg', return test data
+        if (url === 'test://epg') {
+            logger.info('Generating test EPG data');
+            mergedOptions.onProgress({
+                stage: 'complete',
+                percent: 100,
+                message: 'Generated test EPG data',
+                details: { type: 'test' }
+            });
+            return createTestEpgSource(100, mergedOptions);
+        }
+        
+        // Create a unique ID for this source based on URL
+        const sourceId = crypto.createHash('md5').update(url).digest('hex');
+        
+        // Define cache locations
+        const cachePath = path.join(__dirname, '../cache');
+        const chunkPath = path.join(cachePath, sourceId.replace(/[^a-z0-9]/gi, '_').toLowerCase());
+        
+        // Ensure cache directories exist
+        if (!fs.existsSync(cachePath)) {
+            logger.info(`Creating EPG cache directory: ${cachePath}`);
+            fs.mkdirSync(cachePath, { recursive: true });
+        }
+        
+        // Check for cached EPG data that's still valid
+        if (!mergedOptions.forceRefresh) {
+            try {
+                // Check for metadata cache file
+                const metadataFile = path.join(cachePath, `${sourceId}_metadata.json`);
+                const channelsFile = path.join(cachePath, `${sourceId}_channels.json`);
+                
+                if (fs.existsSync(metadataFile) && fs.existsSync(channelsFile)) {
+                    // Read metadata to check cache freshness
+                    const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8'));
+                    const lastUpdated = new Date(metadata.lastUpdated || 0);
+                    const cacheAge = Date.now() - lastUpdated.getTime();
+                    const cacheTtlMs = 24 * 60 * 60 * 1000; // 24 hours default
+                    
+                    if (cacheAge < cacheTtlMs) {
+                        logger.info(`Using cached EPG data for ${url}, age: ${Math.round(cacheAge / 1000 / 60)} minutes`);
+                        
+                        mergedOptions.onProgress({
+                            stage: 'cache',
+                            percent: 10,
+                            message: 'Found valid cached EPG data',
+                            details: {
+                                cacheAge: Math.round(cacheAge / 1000 / 60),
+                                lastUpdated: metadata.lastUpdated
+                            }
+                        });
+                        
+                        // Read cached channels
+                        const channels = JSON.parse(fs.readFileSync(channelsFile, 'utf8'));
+                        
+                        // Filter channels if a limit is specified
+                        let filteredChannels = channels;
+                        if (mergedOptions.maxChannelsToProcess > 0 && channels.length > mergedOptions.maxChannelsToProcess) {
+                            logger.info(`Limiting channels to ${mergedOptions.maxChannelsToProcess} from ${channels.length}`);
+                            filteredChannels = channels.slice(0, mergedOptions.maxChannelsToProcess);
+                            
+                            mergedOptions.onProgress({
+                                stage: 'limiting',
+                                percent: 80,
+                                message: `Limiting to ${mergedOptions.maxChannelsToProcess} channels`,
+                                details: {
+                                    originalCount: channels.length,
+                                    limitedCount: filteredChannels.length
+                                }
+                            });
+                        }
+                        
+                        mergedOptions.onProgress({
+                            stage: 'complete',
+                            percent: 100,
+                            message: `Loaded ${filteredChannels.length} channels from cache`,
+                            details: {
+                                channelCount: filteredChannels.length,
+                                fromCache: true
+                            }
+                        });
+                        
+                        return {
+                            url,
+                            channels: filteredChannels,
+                            lastUpdated: metadata.lastUpdated,
+                            fromCache: true,
+                            cached: true,
+                            success: true
+                        };
+                    } else {
+                        logger.info(`Cached EPG data for ${url} has expired (${Math.round(cacheAge / 1000 / 60)} minutes old)`);
+                    }
+                }
+            } catch (cacheError) {
+                logger.warn(`Error reading cached EPG data: ${cacheError.message}`);
+            }
+        }
+        
+        // If we got here, we need to fetch the EPG data
+        mergedOptions.onProgress({
+            stage: 'downloading',
+            percent: 20,
+            message: `Downloading EPG data from ${url}`,
+            details: { url }
+        });
+        
+        // Use the streaming parser to handle the EPG data
+        const result = await parseEPG(url, {
+            maxChannelsToProcess: mergedOptions.maxChannelsToProcess,
+            onProgress: (progress) => {
+                // Transform progress to include overall context
+                const overallPercent = 20 + (progress.percent || 0) * 0.75; // 20-95%
+                mergedOptions.onProgress({
+                    stage: progress.stage || 'processing',
+                    percent: Math.min(95, Math.round(overallPercent)),
+                    message: progress.message || `Processing EPG data from ${url}`,
+                    details: {
+                        ...progress.details,
+                        url
+                    }
                 });
+            }
+        });
+        
+        if (!result || !result.channels) {
+            throw new Error(`Failed to parse EPG data from ${url}`);
+        }
+        
+        // Filter channels if a limit is specified
+        let filteredChannels = result.channels;
+        if (mergedOptions.maxChannelsToProcess > 0 && result.channels.length > mergedOptions.maxChannelsToProcess) {
+            logger.info(`Limiting channels to ${mergedOptions.maxChannelsToProcess} from ${result.channels.length}`);
+            filteredChannels = result.channels.slice(0, mergedOptions.maxChannelsToProcess);
+            
+            mergedOptions.onProgress({
+                stage: 'limiting',
+                percent: 92,
+                message: `Limiting to ${mergedOptions.maxChannelsToProcess} channels`,
+                details: {
+                    originalCount: result.channels.length,
+                    limitedCount: filteredChannels.length
+                }
+            });
+        }
+        
+        // Cache the parsed data
+        try {
+            // Ensure the chunks directory exists
+            if (!fs.existsSync(chunkPath)) {
+                fs.mkdirSync(chunkPath, { recursive: true });
+            }
+            
+            // Create metadata
+            const metadata = {
+                url,
+                lastUpdated: new Date().toISOString(),
+                channelCount: filteredChannels.length,
+                programCount: result.programCount || 0
+            };
+            
+            // Write metadata file
+            fs.writeFileSync(
+                path.join(cachePath, `${sourceId}_metadata.json`),
+                JSON.stringify(metadata, null, 2)
+            );
+            
+            // Write channels file
+            fs.writeFileSync(
+                path.join(cachePath, `${sourceId}_channels.json`),
+                JSON.stringify(filteredChannels, null, 2)
+            );
+            
+            logger.info(`Cached EPG data for ${url} with ${filteredChannels.length} channels`);
+        } catch (cacheError) {
+            logger.warn(`Error caching EPG data: ${cacheError.message}`);
+        }
+        
+        mergedOptions.onProgress({
+            stage: 'complete',
+            percent: 100,
+            message: `Successfully loaded ${filteredChannels.length} channels from ${url}`,
+            details: {
+                channelCount: filteredChannels.length,
+                url,
+                fromCache: false
+            }
+        });
+        
+        return {
+            url,
+            channels: filteredChannels,
+            lastUpdated: new Date().toISOString(),
+            fromCache: false,
+            success: true
+        };
+    } catch (error) {
+        logger.error(`Error loading EPG from ${url}: ${error.message}`);
+        
+        mergedOptions.onProgress({
+            stage: 'error',
+            percent: 0,
+            message: `Error: ${error.message}`,
+            details: {
+                error: error.message,
+                url
+            }
+        });
+        
+        return {
+            url,
+            error: error.message,
+            channels: [],
+            success: false
+        };
+    }
+}
 
-                // Log channel ID samples for matching
-                if (parsedEPG.channels.length > 0) {
-                    const channelIdSamples = parsedEPG.channels.slice(0, 5).map(ch => ch.$ ? ch.$.id : 'unknown');
-                    logger.info(`Sample channel IDs from ${url}: ${channelIdSamples.join(', ')}`);
+/**
+ * Parse EPG data from a URL or file
+ * @param {string} source - URL or file path to parse
+ * @param {Object} options - Parsing options
+ * @param {number} [options.maxChannelsToProcess=0] - Maximum channels to process (0 = unlimited)
+ * @param {Function} [options.onProgress] - Progress callback function
+ * @returns {Promise<Object>} - Object containing parsed EPG data
+ */
+async function parseEPG(source, options = {}) {
+    const zlib = require('zlib');
+    const fs = require('fs');
+    const fetch = require('node-fetch');
+    const xml2js = require('xml2js');
+    const path = require('path');
+    const { getCachePath } = require('../utils/cacheUtils');
+    const epgStreamParser = require('../utils/epgStreamParser');
+    
+    // Default options
+    const defaultOptions = {
+        forceRefresh: false,
+        maxChannelsToProcess: 0, // 0 means no limit
+        onProgress: (progress) => {
+            logger.debug(`Progress update: ${JSON.stringify(progress)}`);
+        }
+    };
+    
+    const mergedOptions = { ...defaultOptions, ...options };
+    
+    try {
+        logger.info(`Parsing EPG data from ${source}`);
+        
+        // Load constants for XML size limits
+        const constants = require('../config/constants');
+        const MAX_XML_SIZE = (constants.XML_MAX_SIZE_MB || 500) * 1024 * 1024; // Default to 500MB if not set
+        
+        // Report starting progress
+        mergedOptions.onProgress({
+            stage: 'start',
+            percent: 0,
+            message: `Starting EPG parse from ${source}`,
+            details: { source }
+        });
+        
+        // Check if source is a URL or file
+        const isUrl = source.startsWith('http://') || source.startsWith('https://');
+        
+        // Use streaming approach for all parsing to avoid memory issues
+        if (isUrl) {
+            // Download from URL with streaming approach
+            mergedOptions.onProgress({
+                stage: 'download',
+                percent: 5,
+                message: `Downloading EPG data from ${source}`,
+                details: { source }
+            });
+            
+            // Check if the URL ends with .gz to determine if it's gzipped
+            const isGzipped = source.toLowerCase().endsWith('.gz');
+            
+            // Use streaming download and parse
+            return await epgStreamParser.downloadAndParseEpg(source, progress => {
+                // Map the progress from epgStreamParser to our format
+                mergedOptions.onProgress({
+                    stage: progress.stage || 'download',
+                    percent: progress.percent || 10,
+                    message: progress.message || 'Downloading and parsing EPG data',
+                    details: { ...progress.details, source }
+                });
+            });
+        } else {
+            // Read from file system with streaming approach
+            mergedOptions.onProgress({
+                stage: 'read',
+                percent: 5,
+                message: `Reading EPG data from file: ${source}`,
+                details: { source }
+            });
+            
+            // Check if file exists
+            if (!fs.existsSync(source)) {
+                throw new Error(`EPG file not found: ${source}`);
+            }
+            
+            // Check if file is gzipped
+            const isGzipped = source.toLowerCase().endsWith('.gz');
+            
+            // Use streaming parse directly from file
+            return await epgStreamParser.parseEpgStream(source, isGzipped);
+        }
+    } catch (error) {
+        logger.error(`Error parsing EPG data from ${source}: ${error.message}`);
+        throw error;
+    }
+}
 
-                    // Check specifically for Travel Channel
-                    const travelChannels = parsedEPG.channels.filter(ch => {
-                        if (!ch.$ || !ch.$.id) return false;
+/**
+ * Create a unique ID for a source URL
+ */
+function createSourceId(source) {
+    if (!source) return 'unknown_source';
+    
+    // Use crypto to create a hash of the source URL
+    return crypto.createHash('md5').update(source).digest('hex');
+}
 
-                        // Check ID
-                        if (ch.$.id.toLowerCase().includes('travel')) return true;
+/**
+ * Get the cache base path
+ */
+function getCachePath() {
+    const constants = require('../config/constants');
+    const cachePath = constants.CACHE_DIR || path.join(__dirname, '../cache');
+    
+    // Ensure the base cache directory exists
+    if (!fs.existsSync(cachePath)) {
+        fs.mkdirSync(cachePath, { recursive: true });
+    }
+    
+    return cachePath;
+}
 
-                        // Check display names
-                        if (ch['display-name']) {
-                            for (const name of ch['display-name']) {
-                                const displayName = typeof name === 'string' ? name : (name && name._ ? name._ : '');
-                                if (displayName.toLowerCase().includes('travel')) return true;
+/**
+ * Stream and parse an EPG source with chunking for memory efficiency
+ */
+async function streamingParseEPG(sourceUrl, sourceId, options = {}) {
+    const constants = require('../config/constants');
+    const context = { sourceUrl, sourceId };
+    
+    try {
+        logger.info(`Starting streaming parse of EPG from ${sourceUrl}`, context);
+        
+        // Default options
+        const mergedOptions = {
+            forceRefresh: options.forceRefresh || false,
+            maxChannelsPerSource: options.maxChannelsPerSource || constants.MAX_CHANNELS_PER_SOURCE || 5000,
+            onProgress: options.onProgress || (() => {}),
+            signal: options.signal
+        };
+        
+        // Create source ID and set up paths
+        const cachePath = getCachePath();
+        const sourceDir = path.join(cachePath, sourceId);
+        const channelsPath = path.join(sourceDir, 'channels.json');
+        const metadataPath = path.join(sourceDir, 'metadata.json');
+        const chunksDir = path.join(sourceDir, 'chunks');
+        
+        // Ensure directories exist
+        if (!fs.existsSync(sourceDir)) {
+            fs.mkdirSync(sourceDir, { recursive: true });
+        }
+        if (!fs.existsSync(chunksDir)) {
+            fs.mkdirSync(chunksDir, { recursive: true });
+        }
+        
+        // Check for valid cached version (if not forcing refresh)
+        if (!mergedOptions.forceRefresh) {
+            try {
+                // Check if metadata and channels files exist
+                if (fs.existsSync(metadataPath) && fs.existsSync(channelsPath)) {
+                    // Read metadata
+                    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+                    const lastUpdated = new Date(metadata.lastUpdated);
+                    const now = new Date();
+                    
+                    // Check if cache is still valid (default 24 hours)
+                    const cacheTimeMs = (constants.CACHE_TIME_HOURS || 24) * 60 * 60 * 1000;
+                    if ((now - lastUpdated) < cacheTimeMs) {
+                        logger.info(`Using cached EPG data for ${sourceUrl}, last updated ${lastUpdated.toISOString()}`, context);
+                        
+                        // Read channels data
+                        const channelsData = JSON.parse(fs.readFileSync(channelsPath, 'utf8'));
+                        if (Array.isArray(channelsData.channels)) {
+                            // Return cached data
+                            return {
+                                channels: channelsData.channels,
+                                totalPrograms: channelsData.totalPrograms || 0,
+                                lastUpdated: metadata.lastUpdated,
+                                fromCache: true
+                            };
+                        } else {
+                            logger.warn(`Invalid channels structure in cache for ${sourceUrl}`, context);
+                        }
+                    } else {
+                        logger.info(`Cached EPG data for ${sourceUrl} is expired, refreshing`, context);
+                    }
+                }
+            } catch (cacheError) {
+                logger.warn(`Error reading cache for ${sourceUrl}: ${cacheError.message}`, {
+                    ...context,
+                    error: cacheError.stack
+                });
+            }
+        } else {
+            logger.info(`Force refresh requested for EPG data from ${sourceUrl}`, context);
+        }
+        
+        // If we get here, we need to fetch and parse the EPG data
+        // Initialize parsing state
+        const channels = [];
+        let totalPrograms = 0;
+        let currentChannel = null;
+        let programBuffer = [];
+        let channelCount = 0;
+        let programCount = 0;
+        
+        // Initialize XML parser with event handlers
+        const parser = new xml2js.Parser({
+            explicitArray: false,
+            trim: true,
+            mergeAttrs: true
+        });
+        
+        // Define XML processing events
+        const onChannel = (channel) => {
+            if (channels.length >= mergedOptions.maxChannelsPerSource && mergedOptions.maxChannelsPerSource > 0) {
+                return; // Skip if we reached the limit
+            }
+            
+            try {
+                // Process channel data
+                if (channel && channel.id) {
+                    currentChannel = {
+                        id: channel.id,
+                        name: channel.display_name || channel.id,
+                        icon: channel.icon?.src || '',
+                        programs: []
+                    };
+                    channels.push(currentChannel);
+                    channelCount++;
+                    
+                    // Log progress periodically
+                    if (channelCount % 100 === 0) {
+                        logger.debug(`Processed ${channelCount} channels from ${sourceUrl}`, context);
+                        mergedOptions.onProgress({
+                            stage: 'channels',
+                            percent: 45 + Math.min(channelCount / 500 * 10, 10),
+                            message: `Processed ${channelCount} channels`,
+                            details: { channelCount, sourceUrl }
+                        });
+                    }
+                }
+            } catch (channelError) {
+                logger.warn(`Error processing channel: ${channelError.message}`, context);
+            }
+        };
+        
+        const onProgram = (program) => {
+            if (!currentChannel || (mergedOptions.maxChannelsPerSource > 0 && 
+                channels.length > mergedOptions.maxChannelsPerSource)) {
+                return; // Skip if no channel or beyond limit
+            }
+            
+            try {
+                // Process program data
+                if (program && program.start && program.channel) {
+                    programBuffer.push(program);
+                    programCount++;
+                    totalPrograms++;
+                    
+                    // Chunk programs to disk periodically to save memory
+                    const chunkThreshold = constants.CHUNKING_THRESHOLD || 100;
+                    if (programBuffer.length >= chunkThreshold) {
+                        // Save programs to disk
+                        const channelId = currentChannel.id;
+                        const chunkPath = path.join(chunksDir, `${channelId}_${Date.now()}.json`);
+                        fs.writeFileSync(chunkPath, JSON.stringify(programBuffer));
+                        
+                        // Clear buffer
+                        programBuffer = [];
+                        
+                        // Force garbage collection occasionally
+                        if (global.gc && programCount % (constants.FORCE_GC_AFTER_PROGRAMS || 100000) === 0) {
+                            global.gc();
+                        }
+                    }
+                    
+                    // Log progress periodically
+                    if (programCount % 10000 === 0) {
+                        logger.debug(`Processed ${programCount} programs from ${sourceUrl}`, context);
+                        mergedOptions.onProgress({
+                            stage: 'programs',
+                            percent: 55 + Math.min(programCount / 10000 * 5, 35),
+                            message: `Processed ${programCount} programs across ${channelCount} channels`,
+                            details: { programCount, channelCount, sourceUrl }
+                        });
+                    }
+                }
+            } catch (programError) {
+                logger.warn(`Error processing program: ${programError.message}`, context);
+            }
+        };
+        
+        // Stream parsing with improved error handling
+        try {
+            // Improved options for fetching
+            const fetchOptions = {
+                headers: {
+                    'User-Agent': 'EPG-Matcher/1.0',
+                    'Accept': 'application/xml, text/xml, */*',
+                    'Accept-Encoding': 'gzip, deflate'
+                },
+                timeout: 180000, // 3 minute timeout
+                signal: mergedOptions.signal || AbortSignal.timeout(180000) // Allow external abort or timeout
+            };
+            
+            // Fetch the XML data
+            logger.info(`Fetching EPG data from ${sourceUrl}`, context);
+            const response = await fetch(sourceUrl, fetchOptions);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+            }
+            
+            // Check if response is gzipped
+            const contentEncoding = response.headers.get('content-encoding');
+            const contentType = response.headers.get('content-type');
+            const isGzipped = contentEncoding === 'gzip' || 
+                            contentType === 'application/gzip' || 
+                            sourceUrl.endsWith('.gz');
+            
+            // Get content as a buffer first to check headers
+            const buffer = await response.buffer();
+            
+            // Check for gzip magic numbers (0x1F, 0x8B) at start of buffer
+            const hasGzipHeader = buffer.length >= 2 && buffer[0] === 0x1F && buffer[1] === 0x8B;
+            
+            // Choose decompression or direct parsing
+            let xmlStream;
+            if (isGzipped || hasGzipHeader) {
+                logger.info(`Decompressing gzipped EPG data from ${sourceUrl}`, context);
+                // Create a pass-through stream and pipe through gunzip
+                const passThrough = new PassThrough();
+                passThrough.end(buffer);
+                
+                try {
+                    // Create gunzip stream with error handling
+                    const gunzip = zlib.createGunzip()
+                        .on('error', (err) => {
+                            logger.error(`Gunzip error for ${sourceUrl}: ${err.message}`, {
+                                ...context,
+                                error: err.stack
+                            });
+                            
+                            // Try to read as plain text as fallback
+                            try {
+                                const plainText = buffer.toString('utf8');
+                                if (plainText.includes('<?xml') || plainText.includes('<tv>')) {
+                                    logger.warn(`Falling back to plain text parsing for ${sourceUrl}`, context);
+                                    const textStream = new PassThrough();
+                                    textStream.end(plainText);
+                                    xmlStream = textStream;
+                                }
+                            } catch (textErr) {
+                                logger.error(`Failed to parse as plain text: ${textErr.message}`, context);
+                                throw err; // Re-throw original error
+                            }
+                        });
+                    
+                    xmlStream = passThrough.pipe(gunzip);
+                } catch (gzipError) {
+                    logger.error(`Failed to setup gzip decompression: ${gzipError.message}`, context);
+                    throw gzipError;
+                }
+            } else {
+                // Not gzipped, use buffer directly
+                logger.info(`Parsing uncompressed EPG data from ${sourceUrl}`, context);
+                const bufferStream = new PassThrough();
+                bufferStream.end(buffer);
+                xmlStream = bufferStream;
+            }
+            
+            // Create XML reader
+            const xmlReader = new xml2js.Parser({
+                explicitArray: false,
+                trim: true,
+                mergeAttrs: true
+            });
+            
+            // Parse XML stream
+            logger.info(`Parsing XML stream from ${sourceUrl}`, context);
+
+            // Use a simplified approach with xml2js without XmlStream
+            const xmlData = await new Promise((resolve, reject) => {
+                // Instead of collecting all chunks and converting to a single string,
+                // use streaming XML parsing to avoid memory issues
+                try {
+                    logger.info(`Using streaming XML parser for large EPG data from ${sourceUrl}`);
+                    const saxParser = require('sax').createStream(true);
+                    
+                    // Create a structure to hold the parsed data
+                    const result = { tv: { channel: [], programme: [] } };
+                    let currentElement = null;
+                    let currentData = {};
+                    let elementStack = [];
+                    
+                    // Handle XML parsing events
+                    saxParser.on('opentag', (node) => {
+                        // Start of XML element
+                        currentElement = node.name;
+                        elementStack.push({ name: currentElement, data: {} });
+                        
+                        if (currentElement === 'channel') {
+                            currentData = { $: { id: node.attributes.id } };
+                        } else if (currentElement === 'programme') {
+                            currentData = { 
+                                $: { 
+                                    channel: node.attributes.channel,
+                                    start: node.attributes.start,
+                                    stop: node.attributes.stop
+                                } 
+                            };
+                        }
+                    });
+                    
+                    saxParser.on('closetag', (tagName) => {
+                        // End of XML element
+                        if (tagName === 'channel') {
+                            result.tv.channel.push(currentData);
+                            if (result.tv.channel.length % 1000 === 0) {
+                                logger.debug(`Parsed ${result.tv.channel.length} channels from ${sourceUrl}`);
+                            }
+                        } else if (tagName === 'programme') {
+                            result.tv.programme.push(currentData);
+                            if (result.tv.programme.length % 10000 === 0) {
+                                logger.debug(`Parsed ${result.tv.programme.length} programs from ${sourceUrl}`);
+                                // Force garbage collection on large files
+                                if (global.gc && result.tv.programme.length % 100000 === 0) {
+                                    logger.info(`Forcing garbage collection after parsing ${result.tv.programme.length} programs`);
+                                    global.gc();
+                                }
                             }
                         }
-
-                        return false;
+                        
+                        elementStack.pop();
+                        if (elementStack.length > 0) {
+                            currentElement = elementStack[elementStack.length - 1].name;
+                        } else {
+                            currentElement = null;
+                        }
                     });
+                    
+                    saxParser.on('text', (text) => {
+                        // Handle text content between tags
+                        if (text.trim() && currentElement) {
+                            // Add text content to current element
+                            if (currentElement === 'display-name' && elementStack.length > 1 && elementStack[elementStack.length - 2].name === 'channel') {
+                                currentData['display-name'] = text.trim();
+                            } else if (currentElement === 'title' && elementStack.length > 1 && elementStack[elementStack.length - 2].name === 'programme') {
+                                currentData.title = text.trim();
+                            } else if (currentElement === 'desc' && elementStack.length > 1 && elementStack[elementStack.length - 2].name === 'programme') {
+                                currentData.desc = text.trim();
+                            }
+                        }
+                    });
+                    
+                    saxParser.on('error', (err) => {
+                        logger.error(`XML parsing error for ${sourceUrl}: ${err.message}`, { ...context, error: err });
+                        reject(err);
+                    });
+                    
+                    saxParser.on('end', () => {
+                        logger.info(`Finished parsing XML stream from ${sourceUrl}: ${result.tv.channel.length} channels, ${result.tv.programme.length} programs`);
+                        resolve(result);
+                    });
+                    
+                    // Start processing the XML data
+                    xmlStream.pipe(saxParser);
+                    
+                } catch (err) {
+                    logger.error(`Failed to create SAX parser: ${err.message}`, { ...context, error: err });
+                    reject(err);
+                }
+            });
 
-                    if (travelChannels.length > 0) {
-                        logger.info(`Found ${travelChannels.length} travel-related channels in ${url}:`, {
-                            channels: travelChannels.map(ch => ({
-                                id: ch.$.id,
-                                names: ch['display-name'] ? ch['display-name'].map(n => typeof n === 'string' ? n : (n && n._ ? n._ : 'unknown')) : []
-                            }))
-                        });
-                    } else {
-                        logger.warn(`No travel-related channels found in ${url}`);
+            try {
+                // Since we're using streaming parser, xmlData is already the parsed result
+                const result = xmlData;
+                
+                // Process channels
+                if (result?.tv?.channel) {
+                    const channelsArray = Array.isArray(result.tv.channel) ? 
+                        result.tv.channel : [result.tv.channel];
+                    
+                    channelsArray.forEach(channel => {
+                        if (channels.length >= mergedOptions.maxChannelsPerSource && 
+                            mergedOptions.maxChannelsPerSource > 0) {
+                            return; // Skip if we reached the limit
+                        }
+                        
+                        try {
+                            // Process channel data
+                            if (channel && channel.id) {
+                                const newChannel = {
+                                    id: channel.id,
+                                    name: channel.display_name || channel.id,
+                                    icon: channel.icon?.src || '',
+                                    programs: [] // Initialize an empty programs array for the channel
+                                };
+                                channels.push(newChannel);
+                                currentChannel = newChannel; // Keep track of current channel
+                                channelCount++;
+                                
+                                // Log progress periodically
+                                if (channelCount % 100 === 0) {
+                                    logger.debug(`Processed ${channelCount} channels from ${sourceUrl}`, context);
+                                    mergedOptions.onProgress({
+                                        stage: 'channels',
+                                        percent: 45 + Math.min(channelCount / 500 * 10, 10),
+                                        message: `Processed ${channelCount} channels`,
+                                        details: { channelCount, sourceUrl }
+                                    });
+                                }
+                            }
+                        } catch (channelError) {
+                            logger.warn(`Error processing channel: ${channelError.message}`, context);
+                        }
+                    });
+                }
+                
+                // Process programs and store them in the channels
+                if (result?.tv?.programme) {
+                    const programsArray = Array.isArray(result.tv.programme) ?
+                        result.tv.programme : [result.tv.programme];
+                    
+                    // Create a map of channels for easier lookup
+                    const channelMap = {};
+                    channels.forEach(ch => channelMap[ch.id] = ch);
+                    
+                    // Process programs
+                    programsArray.forEach(program => {
+                        if (program && program.start && program.channel) {
+                            const channelId = program.channel;
+                            const channel = channelMap[channelId];
+                            
+                            // Skip if channel not found or beyond limit
+                            if (!channel || (mergedOptions.maxChannelsPerSource > 0 && 
+                                channels.length > mergedOptions.maxChannelsPerSource)) {
+                                return;
+                            }
+                            
+                            try {
+                                // Format the program object
+                                const formattedProgram = {
+                                    title: program.title || 'Untitled',
+                                    start: program.start,
+                                    stop: program.stop,
+                                    description: program.desc || '',
+                                    category: program.category || [],
+                                    channelId: channelId
+                                };
+                                
+                                // Add program to channel's programs array
+                                channel.programs.push(formattedProgram);
+                                
+                                // Also add to program buffer for disk storage
+                                programBuffer.push(program);
+                                programCount++;
+                                totalPrograms++;
+                                
+                                // Chunk programs to disk periodically to save memory
+                                const chunkThreshold = constants.CHUNKING_THRESHOLD || 100;
+                                if (programBuffer.length >= chunkThreshold) {
+                                    // Save programs to disk
+                                    const chunkPath = path.join(chunksDir, `${channelId}_${Date.now()}.json`);
+                                    fs.writeFileSync(chunkPath, JSON.stringify(programBuffer));
+                                    
+                                    // Clear buffer
+                                    programBuffer = [];
+                                    
+                                    // Force garbage collection occasionally
+                                    if (global.gc && programCount % (constants.FORCE_GC_AFTER_PROGRAMS || 100000) === 0) {
+                                        global.gc();
+                                    }
+                                }
+                                
+                                // Log progress periodically
+                                if (programCount % 10000 === 0) {
+                                    logger.debug(`Processed ${programCount} programs from ${sourceUrl}`, context);
+                                    mergedOptions.onProgress({
+                                        stage: 'programs',
+                                        percent: 55 + Math.min(programCount / 10000 * 5, 35),
+                                        message: `Processed ${programCount} programs across ${channelCount} channels`,
+                                        details: { programCount, channelCount, sourceUrl }
+                                    });
+                                }
+                            } catch (programError) {
+                                logger.warn(`Error processing program: ${programError.message}`, context);
+                            }
+                        }
+                    });
+                }
+                
+                // Save any remaining programs
+                if (programBuffer.length > 0) {
+                    const channelId = "remaining";
+                    const chunkPath = path.join(chunksDir, `${channelId}_${Date.now()}.json`);
+                    fs.writeFileSync(chunkPath, JSON.stringify(programBuffer));
+                    programBuffer = [];
+                }
+                
+                // Save metadata
+                const metadata = {
+                    lastUpdated: new Date().toISOString(),
+                    sourceUrl,
+                    channelCount,
+                    programCount: totalPrograms
+                };
+                fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+                
+                // Save channels summary (without programs)
+                const channelsData = {
+                    channels: channels.map(c => ({ ...c, programs: [] })),
+                    totalPrograms: totalPrograms
+                };
+                fs.writeFileSync(channelsPath, JSON.stringify(channelsData, null, 2));
+                
+                logger.info(`Completed parsing EPG data from ${sourceUrl}: ${channelCount} channels, ${totalPrograms} programs`, context);
+                mergedOptions.onProgress({
+                    stage: 'complete',
+                    percent: 100,
+                    message: `Completed parsing EPG data: ${channelCount} channels, ${totalPrograms} programs`,
+                    details: { channelCount, programCount: totalPrograms, sourceUrl }
+                });
+                
+                // Return the final result
+                return {
+                    channels: channels, // Keep all program data
+                    totalPrograms,
+                    lastUpdated: metadata.lastUpdated,
+                    fromCache: false
+                };
+            } catch (parseError) {
+                logger.error(`Failed to parse XML data from ${sourceUrl}: ${parseError.message}`, {
+                    ...context,
+                    error: parseError.stack
+                });
+                throw parseError;
+            }
+        } catch (streamError) {
+            logger.error(`Streaming error for ${sourceUrl}: ${streamError.message}`, {
+                ...context,
+                error: streamError.stack
+            });
+            throw streamError;
+        }
+    } catch (error) {
+        logger.error(`Failed to stream parse EPG from ${sourceUrl}: ${error.message}`, {
+            ...context,
+            error: error.stack
+        });
+        throw error;
+    }
+}
+
+/**
+ * Get all loaded EPG sources
+ * @returns {Object} Object containing all loaded EPG sources
+ */
+function getLoadedSources() {
+    // Check if we have sources in the global scope
+    if (global._loadedEpgSources && Object.keys(global._loadedEpgSources).length > 0) {
+        return global._loadedEpgSources;
+    }
+    
+    // Check for sources in module.exports._loadedSources
+    if (typeof module.exports._loadedSources !== 'undefined' && 
+        Object.keys(module.exports._loadedSources).length > 0) {
+        return module.exports._loadedSources;
+    }
+    
+    // Try to find any loaded sources from the entire global scope
+    if (global.epgSources && Object.keys(global.epgSources).length > 0) {
+        return global.epgSources;
+    }
+    
+    // Access loaded sources from loadAllExternalEPGs function's results
+    if (global._epgCache && Object.keys(global._epgCache).length > 0) {
+        return global._epgCache;
+    }
+    
+    // If we've logged 3844 channels, they must be somewhere...
+    // Look in all the places they might be stored
+    for (const key of Object.keys(global)) {
+        // Look for objects that might contain our EPG sources
+        if (global[key] && typeof global[key] === 'object') {
+            // Check if this object has channels array or sources with channels
+            if (global[key].channels && Array.isArray(global[key].channels)) {
+                return { 'found-source': global[key] };
+            }
+            
+            // Look one level deeper
+            for (const subKey of Object.keys(global[key])) {
+                if (global[key][subKey] && typeof global[key][subKey] === 'object') {
+                    if (global[key][subKey].channels && Array.isArray(global[key][subKey].channels)) {
+                        const source = {};
+                        source[subKey] = global[key][subKey];
+                        return source;
                     }
                 }
-
-                // Check for program data specifically for travel channels
-                const travelProgramCounts = {};
-                const travelRelatedIds = Object.keys(parsedEPG.channelMap).filter(id =>
-                    id.toLowerCase().includes('travel')
-                );
-
-                if (travelRelatedIds.length > 0) {
-                    logger.info(`Found ${travelRelatedIds.length} travel-related channel IDs in channel map for ${url}`);
-
-                    travelRelatedIds.forEach(id => {
-                        const channel = parsedEPG.channelMap[id];
-                        if (channel && channel.$ && channel.$.id) {
-                            const channelId = channel.$.id;
-                            const programs = parsedEPG.programMap[channelId] || [];
-                            travelProgramCounts[channelId] = programs.length;
-                        }
-                    });
-
-                    logger.info(`Travel channel program counts in ${url}:`, travelProgramCounts);
-                } else {
-                    logger.warn(`No travel-related channel IDs found in channel map for ${url}`);
-                }
-
-                // Log program channel reference samples
-                if (parsedEPG.programs.length > 0) {
-                    const programRefSamples = parsedEPG.programs.slice(0, 5).map(p => p.$ ? p.$.channel : 'unknown');
-                    logger.info(`Sample program channel refs from ${url}: ${programRefSamples.join(', ')}`);
-
-                    // Count programs per channel
-                    const programsPerChannel = {};
-                    parsedEPG.programs.forEach(p => {
-                        if (p.$ && p.$.channel) {
-                            programsPerChannel[p.$.channel] = (programsPerChannel[p.$.channel] || 0) + 1;
-                        }
-                    });
-
-                    const channelsWithPrograms = Object.keys(programsPerChannel).length;
-                    const topChannels = Object.entries(programsPerChannel)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 10);
-
-                    logger.info(`${channelsWithPrograms} channels have program data in ${url}`);
-                    logger.info(`Top 10 channels by program count in ${url}:`, {
-                        topChannels: topChannels.map(([id, count]) => ({ id, count }))
-                    });
-                }
-            } else {
-                logger.warn(`No channels found in EPG from ${url}`);
             }
-        } catch (e) {
-            logger.error(`Failed to load EPG from ${url}`, { error: e.message, stack: e.stack });
         }
     }
-
-    // Final summary
-    logger.info(`Loaded ${Object.keys(epgSources).length} EPG sources`);
-    Object.keys(epgSources).forEach(url => {
-        logger.info(`Source ${url} data summary:`, {
-            channels: epgSources[url].channels.length,
-            programs: epgSources[url].programs.length,
-            channelMapEntries: Object.keys(epgSources[url].channelMap).length,
-            programMapEntries: Object.keys(epgSources[url].programMap).length
-        });
-    });
-
-    return epgSources;
+    
+    // Add reference to global epg data for next time
+    if (!global._epgDataSources) {
+        global._epgDataSources = {};
+    }
+    
+    // Return empty object if no sources found
+    return global._epgDataSources;
 }
 
 /**
- * Loads EPG data from an Xtream provider
- * 
- * @param {string} baseUrl - Xtream base URL
- * @param {string} username - Xtream username
- * @param {string} password - Xtream password
- * @returns {Promise<Object>} Parsed EPG data
+ * Get all loaded channels from any available source
+ * @returns {Array} Array of all loaded channels
  */
-async function loadXtreamEPG(baseUrl, username, password) {
-    try {
-        const xtreamEpgUrl = `${baseUrl}xmltv.php?username=${username}&password=${password}`;
-        const epgContent = (await fetchURL(xtreamEpgUrl)).toString('utf8');
-        const xtreamEPG = await parseEPG(epgContent);
+function getAllLoadedChannels() {
+    const sources = getLoadedSources();
+    let allChannels = [];
 
-        if (xtreamEPG.channels.length > 0) {
-            logger.info(`Loaded ${xtreamEPG.channels.length} channels and ${xtreamEPG.programs.length} programs from XTREAM EPG`);
-            return xtreamEPG;
+    if (sources && Object.keys(sources).length > 0) {
+        // Extract channels from each source
+        for (const sourceKey in sources) {
+            const source = sources[sourceKey];
+            
+            if (source && source.channels && Array.isArray(source.channels)) {
+                // Format channels with source information
+                const formattedChannels = source.channels.map(ch => {
+                    if (!ch.$ || !ch.$.id) return null;
+                    
+                    // Extract display name
+                    let displayName = ch.$.id;
+                    let iconUrl = null;
+                    
+                    if (ch['display-name'] && Array.isArray(ch['display-name'])) {
+                        for (const name of ch['display-name']) {
+                            if (typeof name === 'string') {
+                                displayName = name;
+                                break;
+                            } else if (name && name._) {
+                                displayName = name._;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Extract icon
+                    if (ch.icon && Array.isArray(ch.icon)) {
+                        for (const icon of ch.icon) {
+                            if (icon && icon.$ && icon.$.src) {
+                                iconUrl = icon.$.src;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Return formatted channel
+                    return {
+                        id: ch.$.id,
+                        channelId: ch.$.id,
+                        channelName: displayName,
+                        name: displayName,
+                        icon: iconUrl,
+                        source: sourceKey,
+                        hasPrograms: source.programMap && source.programMap[ch.$.id] ? true : false,
+                        programCount: source.programMap && source.programMap[ch.$.id] ? source.programMap[ch.$.id].length : 0
+                    };
+                }).filter(Boolean);
+                
+                allChannels = allChannels.concat(formattedChannels);
+            }
         }
-
-        logger.warn('No channels found in XTREAM EPG');
-        return null;
-    } catch (e) {
-        logger.warn('No EPG from XTREAM, proceeding without it', { error: e.message });
-        return null;
     }
+    
+    // Try to find channels directly in the global scope
+    if (allChannels.length === 0 && global._allChannels && Array.isArray(global._allChannels)) {
+        return global._allChannels;
+    }
+    
+    // Cache the results for next time
+    global._allChannels = allChannels;
+    
+    return allChannels;
 }
 
-/**
- * Create a test EPG source with popular channels for testing
- * 
- * @returns {Object} A test EPG source with channel and program data
- */
-function createTestEpgSource() {
-    const now = new Date();
-
-    // Create timestamps for programs
-    const startTime1 = new Date(now);
-    startTime1.setHours(startTime1.getHours() - 1);
-
-    const endTime1 = new Date(now);
-    endTime1.setMinutes(endTime1.getMinutes() + 30);
-
-    const startTime2 = new Date(endTime1);
-    const endTime2 = new Date(startTime2);
-    endTime2.setHours(endTime2.getHours() + 1);
-
-    // Format dates for EPG
-    const formatDate = (date) => {
-        return date.toISOString().replace(/[-:]/g, '').split('.')[0] + ' +0000';
-    };
-
-    // Common US channels
-    const channels = [
-        { $: { id: 'travel_channel' }, 'display-name': ['Travel Channel'] },
-        { $: { id: 'Travel.US.-.East.us' }, 'display-name': ['Travel US - East'] },
-        { $: { id: 'history_channel' }, 'display-name': ['History Channel'] },
-        { $: { id: 'discovery' }, 'display-name': ['Discovery Channel'] },
-        { $: { id: 'national_geographic' }, 'display-name': ['National Geographic'] },
-        { $: { id: 'cnn' }, 'display-name': ['CNN'] },
-        { $: { id: 'hbo' }, 'display-name': ['HBO'] },
-        { $: { id: 'espn' }, 'display-name': ['ESPN'] },
-        { $: { id: 'fox_news' }, 'display-name': ['Fox News'] },
-        { $: { id: 'nbc' }, 'display-name': ['NBC'] },
-        { $: { id: 'abc' }, 'display-name': ['ABC'] }
-    ];
-
-    // Sample programs
-    const programs = [];
-
-    // Create programs for each channel
-    channels.forEach(channel => {
-        programs.push({
-            $: {
-                channel: channel.$.id,
-                start: formatDate(startTime1),
-                stop: formatDate(endTime1)
-            },
-            title: [`${channel['display-name'][0]} Morning Show`],
-            desc: [`Morning program on ${channel['display-name'][0]}`]
-        });
-
-        programs.push({
-            $: {
-                channel: channel.$.id,
-                start: formatDate(endTime1),
-                stop: formatDate(endTime2)
-            },
-            title: [`${channel['display-name'][0]} Afternoon Special`],
-            desc: [`Afternoon special program on ${channel['display-name'][0]}`]
-        });
-    });
-
-    // Build channel map and program map
-    const channelMap = {};
-    const programMap = {};
-
-    channels.forEach(channel => {
-        channelMap[channel.$.id] = channel;
-        channelMap[channel.$.id.toLowerCase()] = channel;
-        channelMap[channel['display-name'][0]] = channel;
-        channelMap[channel['display-name'][0].toLowerCase()] = channel;
-        channelMap[channel['display-name'][0].toLowerCase().replace(/\s+/g, '_')] = channel;
-
-        // Special case for Travel Channel with HD suffix
-        if (channel.$.id === 'travel_channel' || channel.$.id === 'Travel.US.-.East.us') {
-            channelMap['travel_channel_hd'] = channel;
-            channelMap['travelhd'] = channel;
-            channelMap['travelchannel'] = channel;
-            channelMap['travel'] = channel;
-        }
-    });
-
-    programs.forEach(program => {
-        if (!programMap[program.$.channel]) {
-            programMap[program.$.channel] = [];
-        }
-        programMap[program.$.channel].push(program);
-    });
-
-    return {
-        channels,
-        programs,
-        channelMap,
-        programMap,
-        isTestSource: true
-    };
-}
-
+// Add to module exports
 module.exports = {
     parseEPG,
-    findProgramsForChannel,
-    findProgramsForSpecificChannel,
-    searchChannelsAcrossSources,
     loadExternalEPG,
     loadAllExternalEPGs,
     loadAllExternalEPGsEnhanced,
     loadXtreamEPG,
+    loadSingleEpgSource,
+    getEpgSummary: generateEpgSummary,
     createTestEpgSource,
-    processPrograms
+    searchEpg,
+    searchChannelsAcrossSources,
+    findProgramsForChannel,
+    getLoadedSources,
+    getAllLoadedChannels,
 };

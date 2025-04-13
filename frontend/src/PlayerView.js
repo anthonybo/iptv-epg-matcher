@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import IPTVPlayer from './IPTVPlayer';
 import EPGMatcher from './EPGMatcher';
 
@@ -24,7 +24,46 @@ const PlayerView = ({
 }) => {
   // State
   const [playerType, setPlayerType] = useState('mpegts-player'); // Default to TS player
+  const [currentChannel, setCurrentChannel] = useState(selectedChannel);
   
+  useEffect(() => {
+    // When the selected channel changes, set it in PlayerView
+    if (selectedChannel) {
+        setCurrentChannel(selectedChannel);
+        
+        // Initialize EPG session if needed when channel is selected
+        if (sessionId) {
+            console.log('[PlayerView] Ensuring EPG session is initialized for channel', selectedChannel.name);
+            fetch('/api/epg/init', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ sessionId })
+            })
+            .then(response => {
+                if (response.ok) {
+                    console.log('[PlayerView] EPG session initialized successfully');
+                    // Trigger EPG sources reload
+                    return fetch(`/api/epg/${sessionId}/sources?_t=${Date.now()}`);
+                }
+                throw new Error('Failed to initialize EPG session');
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data && data.sources) {
+                    console.log('[PlayerView] Loaded EPG sources:', data.sources);
+                    // Dispatch event to notify other components
+                    window.dispatchEvent(new CustomEvent('epgSourcesUpdated', { detail: data.sources }));
+                }
+            })
+            .catch(error => {
+                console.error('[PlayerView] Error initializing EPG:', error);
+            });
+        }
+    }
+  }, [selectedChannel, sessionId]);
+
   return (
     <div style={{ padding: '20px' }}>
       <h2 style={{ marginTop: 0, color: '#333', fontWeight: '500' }}>

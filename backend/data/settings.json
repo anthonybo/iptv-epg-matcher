@@ -1,0 +1,40 @@
+{
+  "epgUrls": [
+    "https://strongepg.ip-ddns.com/epg/w-8k-epg.xml.gz",
+    "https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz",
+    "https://epg.pw/xmltv/epg_US.xml",
+    "https://www.open-epg.com/files/unitedstates1.xml.gz",
+    "https://open-epg.com/files/sports1.xml",
+    "https://epg.starlite.best/utc.xml.gz",
+    "https://raw.githubusercontent.com/acidjesuz/epgtalk/master/guide.xml",
+    "https://i.mjh.nz/PlutoTV/us.xml.gz"
+  ],
+  "epgParserSettings": {
+    "useStreaming": true,
+    "maxTextLength": 2097152,
+    "maxProgramsPerChannel": 500,
+    "batchSize": 1000,
+    "bufferSize": 16384
+  },
+  "cacheSettings": {
+    "cacheDir": "../../cache",
+    "epgCacheTtl": 43200000,
+    "cleanupInterval": 86400000
+  },
+  "matchSettings": {
+    "matchThreshold": 0.6,
+    "fuzzyMatchEnabled": true,
+    "saveMatchesToDisk": true
+  },
+  "uiSettings": {
+    "darkMode": true,
+    "showDebugInfo": false,
+    "autoRefreshInterval": 3600000
+  },
+  "systemSettings": {
+    "logLevel": "info",
+    "maxMemoryUsage": 1024,
+    "gcInterval": 300000
+  },
+  "lastUpdated": "2023-04-10T00:00:00.000Z"
+} 

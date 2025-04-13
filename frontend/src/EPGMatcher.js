@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
+import EpgDataLoader from './EpgDataLoader';
 
 /**
  * Enhanced EPGMatcher component for matching channels with EPG data
@@ -13,43 +14,346 @@ import axios from 'axios';
  * @returns {JSX.Element} EPGMatcher component
  */
 const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = {} }) => {
-    // State management
-    const [epgSearch, setEpgSearch] = useState('');
-    const [epgData, setEpgData] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [suggestedIds, setSuggestedIds] = useState([]);
+    const [session, setSession] = useState(sessionId);
+    const [epgSearch, setEpgSearch] = useState("");
     const [searchResults, setSearchResults] = useState([]);
-    const [error, setError] = useState(null);
-    const [debugMode, setDebugMode] = useState(false);
     const [epgSources, setEpgSources] = useState([]);
-    const [alternateMatches, setAlternateMatches] = useState([]);
-    const [currentSource, setCurrentSource] = useState(null);
-    const [channelInfo, setChannelInfo] = useState(null);
+    const [epgData, setEpgData] = useState(null);
+    const [resultSortMethod, setResultSortMethod] = useState("match");
     const [selectedEpgId, setSelectedEpgId] = useState(null);
-    const [resultSortMethod, setResultSortMethod] = useState('programCount'); // 'programCount', 'name', 'source'
-    const [resultFilter, setResultFilter] = useState('');
-    const [statusType, setStatusType] = useState('info'); // 'info', 'success', 'error', 'warning'
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [searching, setSearching] = useState(false);
+    const [searchStatus, setSearchStatus] = useState("");
+    const [showSourcesInfo, setShowSourcesInfo] = useState(false);
+    const [debugMode, setDebugMode] = useState(false);
+    const [sourceInfo, setSourceInfo] = useState(null);
+    const [currentProgram, setCurrentProgram] = useState(null);
+    const [status, setStatus] = useState("");
+    const [statusType, setStatusType] = useState("info");
+    const [resultFilter, setResultFilter] = useState("");
+    const [suggestedIds, setSuggestedIds] = useState([]);
+    const [loadingEpgSources, setLoadingEpgSources] = useState(false);
+    const [currentSource, setCurrentSource] = useState(null);
 
-    // Initialize component and fetch EPG sources
-    useEffect(() => {
-        if (sessionId) {
-            // Extract loaded sources from storage if available
+    // Function to find the current program from a list of programs
+    const findCurrentProgram = (programs) => {
+        if (!programs || !Array.isArray(programs) || programs.length === 0) {
+            return null;
+        }
+        
+        const now = new Date();
+        
+        // Find a program that is currently airing
+        return programs.find(program => {
             try {
-                axios.get(`http://localhost:5001/api/epg/${sessionId}/sources`)
-                    .then(response => {
-                        if (response.data && response.data.sources) {
-                            setEpgSources(response.data.sources);
-                        }
-                    })
-                    .catch(() => {
-                        // Sources endpoint doesn't exist, use placeholder
-                        setEpgSources(['Default EPG Source']);
-                    });
+                const startTime = new Date(program.start);
+                const endTime = new Date(program.stop);
+                
+                // Check if current time is between start and end
+                return startTime <= now && endTime >= now;
             } catch (error) {
-                console.log('EPG sources API error');
+                console.error('Error checking if program is current:', error, program);
+                return false;
+            }
+        });
+    };
+
+    // Create a function to ensure we have a valid unified session
+    const ensureUnifiedSession = async () => {
+        if (!sessionId) {
+            console.log('No session ID, creating a new unified session...');
+            try {
+                const response = await fetch('/api/session/create-and-register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to create session: ${response.status} ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                console.log('Created new unified session:', data);
+                
+                // Update the session ID in parent component if onEpgMatch is available
+                if (onEpgMatch) {
+                    onEpgMatch(null, { sessionId: data.sessionId });
+                }
+                
+                // Return the new session ID
+                return data.sessionId;
+            } catch (error) {
+                console.error('Error creating unified session:', error);
+                setError(`Failed to create EPG session: ${error.message}`);
+                return null;
             }
         }
-    }, [sessionId]);
+        
+        return sessionId;
+    };
+
+    // Handle safe close of sources dropdown to prevent unnecessary renders
+    const handleToggleSourcesInfo = () => {
+        setShowSourcesInfo(prev => !prev);
+    };
+
+    // Fetch available EPG sources
+    const fetchEpgSources = useCallback(async () => {
+        if (!session) {
+            console.log("No session ID provided for EPG sources");
+            return;
+        }
+
+        setLoadingEpgSources(true);
+        try {
+            console.log('Fetching EPG sources for session:', session);
+            const response = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+            
+            if (!response.ok) {
+                console.log('Failed to load EPG sources, initializing session...');
+                await loadEpgData();
+                return;
+            }
+            
+            const data = await response.json();
+            
+            // Check if sources is an array property or direct array
+            const sourcesToUse = data.sources || data;
+            
+            if (Array.isArray(sourcesToUse) && sourcesToUse.length > 0) {
+                console.log('Loaded EPG sources directly:', sourcesToUse);
+                setEpgSources(sourcesToUse);
+            } else {
+                console.log('No EPG sources found in response:', data);
+                    await loadEpgData();
+            }
+        } catch (error) {
+            console.error('Error fetching EPG sources:', error);
+            await loadEpgData();
+        } finally {
+            setLoadingEpgSources(false);
+        }
+    }, [session]);
+    
+    // Function to load EPG data from sources
+    const loadEpgData = async () => {
+        if (!session) {
+            const newSessionId = await ensureUnifiedSession();
+            if (!newSessionId) {
+                throw new Error('Failed to create session for EPG loading');
+            }
+        }
+        
+        setStatus('Loading EPG data sources...');
+        
+        try {
+            // First try to load EPG sources from the server
+            const sourcesResponse = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+            
+            if (!sourcesResponse.ok) {
+                // If that fails, try to initialize the EPG session
+                console.log('No EPG sources found, initializing EPG session first...');
+                
+                // First try simple initialization without loading everything
+                const initResponse = await fetch(`http://localhost:5001/api/epg/init`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                    body: JSON.stringify({ sessionId: session })
+                });
+                
+                if (!initResponse.ok) {
+                    throw new Error(`Failed to initialize EPG session: ${initResponse.status} ${initResponse.statusText}`);
+                }
+                
+                console.log('EPG session initialized, loading sources...');
+                
+                // Now try to fetch sources again
+                const sourcesRetryResponse = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+                
+                if (!sourcesRetryResponse.ok) {
+                    throw new Error(`Failed to load EPG sources after initialization: ${sourcesRetryResponse.status} ${sourcesRetryResponse.statusText}`);
+                }
+                
+                const sourcesData = await sourcesRetryResponse.json();
+                
+                if (sourcesData && sourcesData.sources) {
+                    console.log('Loaded EPG sources after initialization:', sourcesData.sources);
+                    setEpgSources(sourcesData.sources);
+                    return sourcesData.sources;
+                }
+            } else {
+                // We got sources directly
+                const sourcesData = await sourcesResponse.json();
+                
+                if (sourcesData && sourcesData.sources) {
+                    console.log('Loaded EPG sources directly:', sourcesData.sources);
+                    setEpgSources(sourcesData.sources);
+                    return sourcesData.sources;
+                }
+            }
+            
+            // If we reach here, we couldn't load sources the standard way - try one more approach
+            console.log('Attempting to load EPG data directly...');
+            
+            // Try to load a specific source to trigger the backend to initialize
+            const loadResponse = await fetch(`http://localhost:5001/api/epg/${session}/load`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    source: {
+                        url: 'all',
+                        forceRefresh: false,
+                        maxChannels: 0 // No limit
+                    }
+                })
+            });
+            
+            if (!loadResponse.ok) {
+                throw new Error(`Failed to load EPG data: ${loadResponse.status} ${loadResponse.statusText}`);
+            }
+            
+            const loadData = await loadResponse.json();
+            console.log('EPG data load response:', loadData);
+            
+            // Try to get sources one more time
+            const sourcesAfterLoadResponse = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+            
+            if (!sourcesAfterLoadResponse.ok) {
+                throw new Error(`Still failed to load EPG sources: ${sourcesAfterLoadResponse.status} ${sourcesAfterLoadResponse.statusText}`);
+            }
+            
+            const sourcesAfterLoadData = await sourcesAfterLoadResponse.json();
+            
+            if (sourcesAfterLoadData && sourcesAfterLoadData.sources) {
+                console.log('Loaded EPG sources after direct load:', sourcesAfterLoadData.sources);
+                setEpgSources(sourcesAfterLoadData.sources);
+                return sourcesAfterLoadData.sources;
+            }
+            
+            throw new Error('Failed to load EPG sources despite multiple attempts');
+        } catch (error) {
+            console.error('Error loading EPG data:', error);
+            setError(`Error loading EPG data: ${error.message}`);
+            throw error; // Re-throw to allow caller to handle
+        } finally {
+            setStatus('');
+        }
+    };
+
+    useEffect(() => {
+        // Reset polling count and fetch immediately when session changes
+        if (session) {
+            console.log("Session changed, fetching EPG sources once");
+            fetchEpgSources();
+        }
+        
+        // Clear any previous debounce timers
+        return () => {
+            if (window.epgSourceDebounceTimer) {
+                clearTimeout(window.epgSourceDebounceTimer);
+            }
+        };
+    }, [session, fetchEpgSources]);
+
+    // Add event to allow manual refreshing with debounce
+    useEffect(() => {
+        const triggerEpgSourceFetch = () => {
+            if (window.epgSourceDebounceTimer) {
+                clearTimeout(window.epgSourceDebounceTimer);
+            }
+            
+            if (!loadingEpgSources) {
+                window.epgSourceDebounceTimer = setTimeout(() => {
+                    console.log("Debounced EPG source fetch triggered");
+        fetchEpgSources();
+                }, 2000); // Increased debounce to 2 seconds
+            }
+        };
+        
+        window.addEventListener('refreshEpgSources', triggerEpgSourceFetch);
+        
+        return () => {
+            window.removeEventListener('refreshEpgSources', triggerEpgSourceFetch);
+            if (window.epgSourceDebounceTimer) {
+                clearTimeout(window.epgSourceDebounceTimer);
+            }
+        };
+    }, [fetchEpgSources, loadingEpgSources]);
+
+    // Safely format EPG sources for display in UI
+    const safeFormattedEpgSources = useMemo(() => {
+        if (!Array.isArray(epgSources)) {
+            console.warn('EPG sources is not an array:', epgSources);
+            return [];
+        }
+        
+        try {
+            // Create a Map for strict deduplication
+            const uniqueSourcesMap = new Map();
+            const total = epgSources.length;
+            let valid = 0, duplicates = 0, invalid = 0;
+            
+            // Process each source with validation
+            epgSources.forEach(source => {
+                if (!source || typeof source !== 'object') {
+                    invalid++;
+                    return;
+                }
+                
+                const sourceUrl = source.url ? source.url.toLowerCase().trim() : '';
+                const sourceName = source.name ? source.name.toLowerCase().trim() : '';
+                
+                if (!sourceUrl && !sourceName) {
+                    invalid++;
+                    return;
+                }
+                
+                // Use composite key for strong deduplication
+                const uniqueKey = `${sourceName}|${sourceUrl}`;
+                
+                if (!uniqueSourcesMap.has(uniqueKey)) {
+                    valid++;
+                    uniqueSourcesMap.set(uniqueKey, {
+                        key: `source-${uniqueSourcesMap.size}`,
+                        name: source.name || 'Unnamed Source',
+                        url: sourceUrl || null,
+                        channelCount: typeof source.channelCount === 'number' ? source.channelCount : null
+                    });
+                } else {
+                    duplicates++;
+                }
+            });
+            
+            const uniqueSources = Array.from(uniqueSourcesMap.values());
+            console.log(`EPG Sources: Total=${total}, Valid=${valid}, Duplicates=${duplicates}, Invalid=${invalid}, Unique=${uniqueSources.length}`);
+            
+            // Cap sources to display
+            const MAX_DISPLAYED_SOURCES = 20;
+            const displayedSources = uniqueSources.slice(0, MAX_DISPLAYED_SOURCES);
+            
+            if (uniqueSources.length > MAX_DISPLAYED_SOURCES) {
+                displayedSources.push({
+                    key: 'source-more',
+                    name: `+ ${uniqueSources.length - MAX_DISPLAYED_SOURCES} more sources`,
+                    url: null,
+                    channelCount: null,
+                    isPlaceholder: true
+                });
+            }
+            
+            return displayedSources;
+        } catch (error) {
+            console.error('Error deduplicating EPG sources:', error);
+            return [];
+        }
+    }, [epgSources]);
 
     /**
      * When channel changes, update search term and generate suggestions
@@ -69,12 +373,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         generateEpgIdSuggestions(channelName);
 
         // Check if we already have a match for this channel
-        if (sessionId && matchedChannels[selectedChannel.tvgId]) {
+        if (session && matchedChannels[selectedChannel.tvgId]) {
             fetchEpgData(matchedChannels[selectedChannel.tvgId]);
         } else {
             fetchEpgData(selectedChannel.tvgId);
         }
-    }, [sessionId, selectedChannel, matchedChannels]);
+    }, [session, selectedChannel, matchedChannels]);
 
     // Generate potential EPG IDs from channel name
     const generateEpgIdSuggestions = (channelName) => {
@@ -128,65 +432,108 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         setSuggestedIds(uniqueSuggestions);
     };
 
-    // Search for EPG channels
-    const searchEpgChannels = async (searchTerm) => {
-        if (!sessionId || !searchTerm.trim()) return;
-
-        setLoading(true);
-        setError(null);
+    // Search for channels in the EPG database using the session
+    const searchEpgChannels = async (term) => {
+        // Don't search if no term provided
+        if (!term || term.trim().length < 2) {
+            setSearchStatus('Please enter at least 2 characters to search');
+            return;
+        }
+        
+        setSearching(true);
+        setSearchStatus(`Searching for "${term}"...`);
+        setSearchResults([]);
 
         try {
-            console.log(`Searching for EPG channels: ${searchTerm}`);
-            const response = await axios.get(`http://localhost:5001/api/epg/${sessionId}/search?term=${encodeURIComponent(searchTerm)}`);
-            console.log('EPG Search response:', response.data);
+            // Ensure we have a session first
+            if (!session) {
+                const newSessionId = await ensureUnifiedSession();
+                setSession(newSessionId);
+            }
 
-            if (response.data && response.data.sources) {
-                // Flatten the results for easier display
-                const results = [];
+            // Load EPG sources if needed
+            await loadEpgData();
 
-                Object.keys(response.data.sources).forEach(sourceKey => {
-                    const source = response.data.sources[sourceKey];
-                    source.matches.forEach(match => {
-                        // Get the most appropriate display name
-                        let displayName = match.id;
-                        if (match.displayNames && match.displayNames.length > 0) {
-                            // Prefer English names if available
-                            const englishName = match.displayNames.find(n => n.lang === 'en');
-                            if (englishName) {
-                                displayName = englishName.name;
-                            } else {
-                                displayName = match.displayNames[0].name;
-                            }
-                        }
-
-                        results.push({
-                            id: match.id,
-                            name: displayName,
-                            sourceKey: sourceKey,
-                            icon: match.icon,
-                            programCount: match.programCount || 0
-                        });
-                    });
-                });
-
-                // Sort by program count (most programs first)
-                results.sort((a, b) => b.programCount - a.programCount);
-
-                setSearchResults(results);
-
-                if (results.length === 0) {
-                    setError(`No channels found matching "${searchTerm}"`);
+            // First try the session-based search endpoint
+            try {
+                console.log(`Searching EPG channels with term: "${term}" in session ${session}`);
+                const response = await axios.get(
+                    `http://localhost:5001/api/epg/${session}/search?term=${encodeURIComponent(term)}&_t=${Date.now()}`
+                );
+                
+                console.log('EPG search response:', response.data);
+                
+                if (response.data && Array.isArray(response.data.results)) {
+                    const results = response.data.results;
+                    
+                    // Format and store the search results
+                    setSearchResults(results.map(result => ({
+                        id: result.id || result.channelId || '',
+                        name: result.name || result.channelName || result.display_name || '',
+                        icon: result.icon || result.logo || '',
+                        source_name: result.source_name || 'Unknown',
+                        source_id: result.source_id || '',
+                        programCount: result.programCount || 0
+                    })));
+                    
+                    if (results.length === 0) {
+                        setSearchStatus(`No results found for "${term}"`);
+                    } else {
+                        setSearchStatus(`Found ${results.length} results for "${term}"`);
+                    }
+                } else {
+                    // Handle invalid response format
+                    console.warn('Invalid search response format:', response.data);
+                    setSearchStatus(`Error: Unexpected response format`);
+                    setSearchResults([]);
+                    
+                    // Still try the debug endpoint
+                    throw new Error('Invalid search response format');
                 }
-            } else {
-                setSearchResults([]);
-                setError(`No results found for "${searchTerm}"`);
+            } catch (error) {
+                console.error('Error searching EPG channels in session:', error);
+                
+                // Then try the debug API as fallback
+                try {
+                    console.log(`Falling back to debug search with term: "${term}"`);
+                    const debugResponse = await axios.get(
+                        `http://localhost:5001/api/debug/search-epg?term=${encodeURIComponent(term)}&_t=${Date.now()}`
+                    );
+                    
+                    console.log('Debug search response:', debugResponse.data);
+                    
+                    if (debugResponse.data && Array.isArray(debugResponse.data.results)) {
+                        const results = debugResponse.data.results;
+                        
+                        // Format and store the search results
+                        setSearchResults(results.map(result => ({
+                            id: result.id || result.channelId || '',
+                            name: result.name || result.channelName || result.display_name || '',
+                            icon: result.icon || result.logo || '',
+                            source_name: result.source_name || 'Unknown',
+                            source_id: result.source_id || '',
+                            programCount: result.programCount || 0
+                        })));
+                        
+                        if (results.length === 0) {
+                            setSearchStatus(`No results found for "${term}" (debug search)`);
+                        } else {
+                            setSearchStatus(`Found ${results.length} results for "${term}" (debug search)`);
+                        }
+                    } else {
+                        setSearchStatus(`No results found for "${term}". Try another search.`);
+                        setSearchResults([]);
+                    }
+                } catch (fallbackError) {
+                    console.error('Error in fallback debug search:', fallbackError);
+                    setSearchStatus(`Error searching: ${error.message}`);
+                }
             }
         } catch (error) {
             console.error('Error searching EPG channels:', error);
-            setError(`Error searching EPG channels: ${error.message}`);
-            setSearchResults([]);
+            setSearchStatus(`Error: ${error.message}`);
         } finally {
-            setLoading(false);
+            setSearching(false);
         }
     };
 
@@ -201,229 +548,257 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         searchEpgChannels(epgSearch);
     };
 
-    // Fetch EPG data for a channel ID
-    // Function to fetch EPG data with better validation
+    // Fetch EPG data for a specific channel ID
     const fetchEpgData = async (epgId) => {
-        if (!sessionId || !epgId) return;
-
         setLoading(true);
         setError(null);
-        setSearchResults([]);
-
+        
+        // Ensure we always have a string channelId, regardless of input format
+        let channelId;
+        if (epgId === null || epgId === undefined) {
+            setError('Invalid EPG ID provided');
+            setLoading(false);
+            return;
+        } else if (typeof epgId === 'object') {
+            // Extract ID from object, with multiple fallbacks
+            channelId = epgId.epgId || epgId.id || '';
+            console.log(`Extracted channel ID from object: ${channelId}`, epgId);
+        } else {
+            // Convert to string if it's a primitive value
+            channelId = String(epgId);
+        }
+        
+        if (!channelId) {
+            setError('Invalid EPG ID provided: No channel ID found');
+            setLoading(false);
+            return;
+        }
+        
+        console.log(`Fetching EPG data for ID: ${channelId}`);
+        
         try {
-            console.log(`Fetching EPG data for ID: ${epgId}`);
-            const response = await axios.get(`http://localhost:5001/api/epg/${sessionId}?channelId=${encodeURIComponent(epgId)}`);
-            console.log('EPG Data response:', response.data);
-
-            if (response.data) {
-                // Validate that the EPG data matches what we requested
-                let isValidMatch = true;
-                let mismatchReason = '';
-
-                // Check if the channel info exists and has the right ID
-                if (response.data.channelInfo) {
-                    const channelInfo = response.data.channelInfo;
-
-                    // If the EPG ID uses the format "source.name", extract the actual ID part
-                    const epgIdParts = epgId.match(/^([a-zA-Z0-9]+)\.(.+)$/);
-                    const actualEpgId = epgIdParts ? epgIdParts[2] : epgId;
-
-                    // Check if the returned channel ID matches what we requested
-                    // Consider both exact match and normalized versions
-                    const channelId = channelInfo.id;
-                    const normalizedRequestedId = actualEpgId.toLowerCase().replace(/[^a-z0-9]/g, '');
-                    const normalizedReturnedId = channelId.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-                    // Check if IDs match exactly or in normalized form
-                    if (channelId !== actualEpgId &&
-                        normalizedReturnedId !== normalizedRequestedId) {
-
-                        // Additional validation for network names
-                        if (actualEpgId.toLowerCase().includes('network') &&
-                            !channelId.toLowerCase().includes('network')) {
-
-                            // Extract network name from EPG ID
-                            const networkName = actualEpgId.replace(/network$/i, '').trim().toLowerCase();
-
-                            // If the channel doesn't contain the network name, it's likely a mismatch
-                            if (!channelId.toLowerCase().includes(networkName) &&
-                                !channelInfo.displayNames.some(dn =>
-                                    dn.name && dn.name.toLowerCase().includes(networkName))) {
-
-                                isValidMatch = false;
-                                mismatchReason = `Requested "${epgId}" but got "${channelId}" which doesn't appear to be the same network`;
-                            }
-                        }
-                        // If names don't match at all, warn about potential mismatch
-                        else if (!channelId.toLowerCase().includes(actualEpgId.toLowerCase()) &&
-                            !actualEpgId.toLowerCase().includes(channelId.toLowerCase())) {
-
-                            isValidMatch = false;
-                            mismatchReason = `Requested "${epgId}" but got "${channelId}"`;
-                        }
-                    }
+            const url = `http://localhost:5001/api/epg/${session}/?channelId=${encodeURIComponent(channelId)}`;
+            console.log(`Making EPG data request to: ${url}`);
+            
+            const response = await axios.get(url);
+            
+            console.log('EPG Data response status:', response.status);
+            console.log('EPG Data response headers:', response.headers);
+            
+            if (response.data && response.data.success) {
+                console.log('EPG Data response:', response.data);
+                setEpgData(response.data);
+                
+                // Extract source information
+                if (response.data.sources && Array.isArray(response.data.sources)) {
+                    setEpgSources(response.data.sources);
                 }
-
-                // Handle mismatch if detected
-                if (!isValidMatch) {
-                    setError(`Potential EPG mismatch: ${mismatchReason}. The data shown may be for a different channel than requested.`);
-                    setStatusType('warning');
-
-                    // Still set the data, but warn the user
-                    setEpgData(response.data);
-                } else {
-                    // Set data normally
-                    setEpgData(response.data);
+                
+                // Find current program
+                const programs = response.data.programs || [];
+                const currentProgram = findCurrentProgram(programs);
+                setCurrentProgram(currentProgram);
+                
+                // Set source information for the current channel
+                if (response.data.channel && response.data.channel.source_name) {
+                    setSourceInfo({
+                        name: response.data.channel.source_name,
+                        id: response.data.channel.source_id,
+                        programCount: programs.length
+                    });
                 }
-
-                // Check if we have any program data
-                const hasPrograms = response.data.programs && response.data.programs.length > 0;
-                const hasCurrentProgram = response.data.currentProgram != null;
-
-                if (!hasPrograms && !hasCurrentProgram) {
-                    if (isValidMatch) {
-                        setError(`No EPG data found for ID: ${epgId}. Try matching with a different ID.`);
-                    }
-                }
-
-                // If there are other matches, show them to the user
-                if (response.data.otherMatches && response.data.otherMatches.length > 0) {
-                    setAlternateMatches(response.data.otherMatches);
-                } else {
-                    setAlternateMatches([]);
-                }
-
-                // Set source information if available
-                if (response.data.sourceKey) {
-                    setCurrentSource(response.data.sourceKey);
-                }
-
-                // Set channel info if available
-                if (response.data.channelInfo) {
-                    setChannelInfo(response.data.channelInfo);
-                }
+                
+                setError(null);
             } else {
+                console.error('EPG Data error response:', response.data);
+                const errorMsg = response.data?.error || 'Failed to fetch EPG data';
+                setError(errorMsg);
                 setEpgData(null);
-                setError(`No EPG data returned for ID: ${epgId}`);
+                
+                // Log more detailed error information
+                if (response.data) {
+                    console.error('EPG error details:', {
+                        error: response.data.error,
+                        channelId,
+                        success: response.data.success,
+                        message: response.data.message,
+                    });
+                }
             }
         } catch (error) {
             console.error('Error fetching EPG data:', error);
-            setError(`Error fetching EPG data: ${error.message}`);
+            let errorMessage = `Error: ${error.message}`;
+            
+            // Add more details for axios errors
+            if (error.response) {
+                errorMessage += ` (Status: ${error.response.status})`;
+                console.error('EPG error response data:', error.response.data);
+            }
+            
+            setError(errorMessage);
             setEpgData(null);
         } finally {
             setLoading(false);
         }
     };
 
-    // Switch to an alternate match
-    const switchToAlternateMatch = async (match) => {
-        if (!match.sourceKey || !match.channelId) return;
-
-        setLoading(true);
-        setError(null);
-
-        try {
-            console.log(`Switching to alternate channel: ${match.channelId} from source ${match.sourceKey}`);
-            const response = await axios.get(`http://localhost:5001/api/epg/${sessionId}/channel/${match.sourceKey}/${encodeURIComponent(match.channelId)}`);
-            console.log('EPG Data response:', response.data);
-
-            if (response.data) {
-                setEpgData({
-                    currentProgram: response.data.currentProgram,
-                    programs: response.data.programs,
-                    channelInfo: response.data.channelInfo,
-                    sourceKey: match.sourceKey
-                });
-
-                // Update state
-                setCurrentSource(match.sourceKey);
-                if (response.data.channelInfo) {
-                    setChannelInfo(response.data.channelInfo);
-                }
-
-                // Call the match handler with the new channel ID
-                if (selectedChannel) {
-                    onEpgMatch(selectedChannel.tvgId, match.channelId);
-                }
-            } else {
-                setError(`No EPG data returned for channel ${match.channelId}`);
-            }
-        } catch (error) {
-            console.error('Error fetching alternate channel:', error);
-            setError(`Error fetching alternate channel: ${error.message}`);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    /**
-     * Handle matching a channel with EPG data
-     * Enhanced to update the matchedChannels in the session on the server
-     */
-    const handleMatch = (epgId) => {
-        if (!selectedChannel || !epgId) return;
-
-        // Store the selected ID
-        setSelectedEpgId(epgId);
-
-        // Update the search field to show the selected ID
-        setEpgSearch(epgId);
-
-        // Call the parent component's match handler
-        onEpgMatch(selectedChannel.tvgId, epgId);
-
-        // IMPORTANT NEW CODE: Update the matched channels in the session
-        // This ensures the streaming component can find the right channel
-        if (sessionId) {
+    // Handle EPG match selection
+    const handleMatch = (result) => {
+        if (!result) return;
+        
+        console.log('Handling match with result:', result);
+        
+        // Format the EPG channel info with all required properties
+        const epgChannel = {
+            id: result.id || result.channelId || '',
+            name: result.name || result.channelName || '',
+            icon: result.icon || result.logo || null,
+            source_name: result.source_name || result.sourceName || 'Unknown',
+            source_id: result.sourceId || result.source_id || ''
+        };
+        
+        console.log('Formatted EPG channel:', epgChannel);
+        
+        // Set the selected EPG ID for UI highlighting
+        setSelectedEpgId(epgChannel.id);
+        
+        // Update matched channels if a channel is selected
+        if (selectedChannel && onEpgMatch) {
             try {
-                // Send the match to the server to update the session
-                axios.post(`http://localhost:5001/api/epg/${sessionId}/match`, {
-                    channelId: selectedChannel.tvgId,
-                    epgId: epgId
-                }).then(response => {
-                    console.log('Updated matched channels in session', response.data);
-                }).catch(error => {
-                    console.error('Failed to update matched channels in session', error);
+                // Format the M3U channel info with all required properties
+                const m3uChannel = {
+                    id: selectedChannel.tvgId || selectedChannel.id || '',
+                    name: selectedChannel.name || '',
+                    logo: selectedChannel.logo || selectedChannel.tvgLogo || null,
+                    url: selectedChannel.url || '',
+                    group: selectedChannel.groupTitle || selectedChannel.group || ''
+                };
+                
+                console.log('Formatted M3U channel:', m3uChannel);
+                
+                // Detailed logging for debugging
+                console.log('Matching channels with full details:', { 
+                    epgChannel: epgChannel,
+                    m3uChannel: m3uChannel,
+                    selectedChannel: selectedChannel
+                });
+                
+                // Call the match endpoint on the backend
+                axios.post(`http://localhost:5001/api/epg/${session}/match`, {
+                    epgChannel,
+                    m3uChannel
+                })
+                .then(response => {
+                    console.log('Match saved:', response.data);
+                    
+                    // Clear search results
+                    setSearchResults([]);
+                    setSearchStatus('');
+                    
+                    // Update status
+                    setStatus(`Successfully matched ${m3uChannel.name} to ${epgChannel.name} from ${epgChannel.source_name || 'unknown source'}`);
+                    setStatusType('success');
+                })
+                .catch(error => {
+                    console.error('Error saving match:', error.response || error);
+                    const errorDetails = error.response?.data?.error || error.message;
+                    console.error('Match error details:', errorDetails);
+                    
+                    setStatus(`Failed to match: ${errorDetails}`);
+                    setStatusType('error');
+                });
+                
+                // Call the callback to update the parent component with all properties
+                onEpgMatch(m3uChannel.id, {
+                    epgId: epgChannel.id,
+                    epgName: epgChannel.name,
+                    epgIcon: epgChannel.icon,
+                    sourceName: epgChannel.source_name,
+                    sourceId: epgChannel.source_id
                 });
             } catch (error) {
                 console.error('Error updating matched channels in session', error);
+                setStatus(`Failed to match: ${error.message}`);
+                setStatusType('error');
             }
         }
 
         // Re-fetch EPG data with the new ID
-        fetchEpgData(epgId);
-
-        // Clear search results
-        setSearchResults([]);
+        fetchEpgData(epgChannel.id);
     };
 
     // Sort search results based on selected method
     const sortedSearchResults = () => {
-        if (!searchResults.length) return [];
+        if (!searchResults || !searchResults.length) return [];
 
         // Filter results first if there's a filter active
         let filtered = searchResults;
-        if (resultFilter) {
-            const filterLower = resultFilter.toLowerCase();
-            filtered = searchResults.filter(result =>
-                result.name.toLowerCase().includes(filterLower) ||
-                result.id.toLowerCase().includes(filterLower) ||
-                result.sourceKey.toLowerCase().includes(filterLower)
-            );
+        if (resultFilter && resultFilter.trim() !== '') {
+            const filterLower = resultFilter.toLowerCase().trim();
+            filtered = searchResults.filter(result => {
+                // Build a comprehensive search text from all available fields
+                const searchableText = [
+                    // Channel info
+                    result.channelName || result.name || '',
+                    result.channelId || result.id || '',
+                    // Source info
+                    result.sourceId || result.source || '',
+                    // Program info
+                    result.title || '',
+                    result.desc || result.description || '',
+                    // Categories as a string
+                    Array.isArray(result.categories) 
+                        ? result.categories.map(c => typeof c === 'string' ? c : c.name || '').join(' ')
+                        : ''
+                ].join(' ').toLowerCase();
+                
+                // Check if any token in the filter matches
+                const filterTokens = filterLower.split(/\s+/);
+                return filterTokens.every(token => searchableText.includes(token));
+            });
         }
 
-        // Then sort them
-        return [...filtered].sort((a, b) => {
-            switch (resultSortMethod) {
-                case 'name':
-                    return a.name.localeCompare(b.name);
-                case 'source':
-                    return a.sourceKey.localeCompare(b.sourceKey);
-                case 'programCount':
-                default:
-                    return b.programCount - a.programCount;
+        // Sort the filtered results
+        return filtered.sort((a, b) => {
+            if (resultSortMethod === 'name') {
+                return (a.channelName || a.name || '').localeCompare(b.channelName || b.name || '');
+            } else if (resultSortMethod === 'programs') {
+                return (b.programCount || 0) - (a.programCount || 0);
+            } else if (resultSortMethod === 'match' || resultSortMethod === 'score') {
+                // If we have explicit scores, use them
+                if (typeof b.score === 'number' && typeof a.score === 'number') {
+                    return b.score - a.score;
+                }
+                // Otherwise sort by proximity of the search term to channel name
+                const searchLower = epgSearch.toLowerCase();
+                const aName = (a.channelName || a.name || '').toLowerCase();
+                const bName = (b.channelName || b.name || '').toLowerCase();
+                
+                // Exact match gets highest priority
+                if (aName === searchLower && bName !== searchLower) return -1;
+                if (bName === searchLower && aName !== searchLower) return 1;
+                
+                // Starts with gets second priority
+                if (aName.startsWith(searchLower) && !bName.startsWith(searchLower)) return -1;
+                if (bName.startsWith(searchLower) && !aName.startsWith(searchLower)) return 1;
+                
+                // Contains gets third priority
+                if (aName.includes(searchLower) && !bName.includes(searchLower)) return -1;
+                if (bName.includes(searchLower) && !aName.includes(searchLower)) return 1;
+                
+                // Default to alphabetical
+                return aName.localeCompare(bName);
             }
+            return 0;
         });
+    };
+
+    // Handle search form submission
+    const handleSearchSubmit = (e) => {
+        e.preventDefault();
+        if (epgSearch.trim()) {
+            searchEpgChannels(epgSearch);
+        }
     };
 
     // Format date for display
@@ -431,9 +806,42 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         if (!dateString) return 'Unknown';
         try {
             const date = new Date(dateString);
-            return date.toLocaleString();
+            if (isNaN(date.getTime())) {
+                console.error('Invalid date string:', dateString);
+                return 'Invalid Date';
+            }
+            
+            // Format as "Apr 13, 2025"
+            return date.toLocaleDateString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric'
+            });
         } catch (e) {
+            console.error('Error formatting date:', e, dateString);
             return 'Invalid date';
+        }
+    };
+
+    // Format time for display (e.g., "8:30 PM")
+    const formatTime = (dateString) => {
+        if (!dateString) return 'Unknown';
+        try {
+            const date = new Date(dateString);
+            if (isNaN(date.getTime())) {
+                console.error('Invalid time string:', dateString);
+                return 'Invalid Time';
+            }
+            
+            // Format as "8:30 PM"
+            return date.toLocaleTimeString('en-US', {
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true
+            });
+        } catch (e) {
+            console.error('Error formatting time:', e, dateString);
+            return 'Invalid time';
         }
     };
 
@@ -442,8 +850,456 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         setDebugMode(!debugMode);
     };
 
+    // Specialized component for safely rendering EPG sources
+    const EpgSourcesDisplay = ({ sources, onClose }) => {
+        // Safety check - make sure sources is an array
+        const safeSources = Array.isArray(sources) ? sources : [];
+        const sourceCount = safeSources.length;
+        
+        return (
+            <div style={{
+                padding: '10px',
+                backgroundColor: '#f9f9f9',
+                borderRadius: '4px',
+                color: '#666',
+                fontSize: '13px',
+                maxHeight: '300px',
+                overflowY: 'auto',
+                position: 'relative'
+            }}>
+                <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '10px'
+                }}>
+                    <h3 style={{ margin: 0, fontSize: '16px' }}>
+                        {sourceCount} EPG Sources
+                    </h3>
+                    <button
+                        onClick={onClose}
+                        style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            fontSize: '16px'
+                        }}
+                    >
+                        ×
+                    </button>
+                </div>
+                
+                {sourceCount === 0 ? (
+                    <div>No EPG sources found</div>
+                ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                            <tr>
+                                <th style={{ textAlign: 'left', padding: '5px' }}>ID</th>
+                                <th style={{ textAlign: 'left', padding: '5px' }}>Name</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {safeSources.map((source, index) => (
+                                <tr key={source.id || index} style={{ 
+                                    borderBottom: '1px solid #eee',
+                                    backgroundColor: index % 2 === 0 ? '#f5f5f5' : 'white'
+                                }}>
+                                    <td style={{ padding: '5px' }}>{source.id}</td>
+                                    <td style={{ padding: '5px' }}>{source.name}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                )}
+            </div>
+        );
+    };
+
+    // Debug component for EPG troubleshooting - Completely rewritten for better data handling
+    const EpgDebugPanel = ({ sessionId, epgSources }) => {
+        const [showDebug, setShowDebug] = useState(false);
+        
+        if (!showDebug) {
+            return (
+                <div 
+                    onClick={() => setShowDebug(true)}
+                    style={{
+                        padding: '8px 15px',
+                        backgroundColor: '#f0f0f0',
+                        borderRadius: '4px',
+                        margin: '15px 0',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        color: '#666',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '5px'
+                    }}
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"></path>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                    Show EPG Debug Info
+                </div>
+            );
+        }
+        
+        return (
+            <div style={{
+                padding: '15px',
+                backgroundColor: '#f8f9fa',
+                border: '1px solid #ddd',
+                borderRadius: '6px',
+                margin: '15px 0',
+                fontSize: '13px'
+            }}>
+                <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginBottom: '10px'
+                }}>
+                    <h4 style={{
+                        margin: '0 0 10px 0',
+                        color: '#333',
+                        fontWeight: '500',
+                        fontSize: '14px'
+                    }}>EPG Debug Information</h4>
+                    <button
+                        onClick={() => setShowDebug(false)}
+                        style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: '#666',
+                            padding: '0',
+                            display: 'flex',
+                            alignItems: 'center'
+                        }}
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+                
+                <div style={{
+                    backgroundColor: '#fff',
+                    padding: '10px',
+                    borderRadius: '4px',
+                    marginBottom: '10px',
+                    border: '1px solid #eee'
+                }}>
+                    <p style={{ margin: '0 0 5px 0', fontWeight: '500' }}>Session ID:</p>
+                    <code style={{
+                        display: 'block',
+                        padding: '5px',
+                        backgroundColor: '#f5f5f5',
+                        borderRadius: '3px',
+                        fontSize: '12px',
+                        overflowX: 'auto'
+                    }}>{typeof sessionId === 'string' ? sessionId : 'No session ID available'}</code>
+                </div>
+                
+                <div style={{
+                    backgroundColor: '#fff',
+                    padding: '10px',
+                    borderRadius: '4px',
+                    border: '1px solid #eee'
+                }}>
+                    <p style={{ margin: '0 0 5px 0', fontWeight: '500' }}>
+                        EPG Sources ({Array.isArray(epgSources) ? epgSources.length : 0}):
+                    </p>
+                    
+                    <div style={{ maxHeight: '200px', overflow: 'auto' }}>
+                        <EpgSourcesDisplay 
+                            sources={safeFormattedEpgSources} 
+                            onClose={() => {}} // No-op since this is just a display
+                        />
+                    </div>
+                    
+                    <div style={{
+                        marginTop: '10px',
+                        display: 'flex',
+                        gap: '10px',
+                        justifyContent: 'flex-end'
+                    }}>
+                        <button
+                            onClick={async () => {
+                                try {
+                                    const initResponse = await axios.post(`http://localhost:5001/api/epg/init`, {
+                                        sessionId: session
+                                    });
+                                    console.log('EPG session re-initialization response:', initResponse.data);
+                                    alert('EPG session reinitialized. Check console for details.');
+                                    
+                                    // Re-fetch sources
+                                    const sourcesResponse = await axios.get(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+                                    if (sourcesResponse.data && sourcesResponse.data.sources) {
+                                        console.log('Reloaded EPG sources:', sourcesResponse.data.sources);
+                                        window.dispatchEvent(new CustomEvent('epgSourcesUpdated', { detail: sourcesResponse.data.sources }));
+                                    }
+                                } catch (error) {
+                                    console.error('Error reinitializing EPG session:', error);
+                                    alert(`Error: ${error.message}`);
+                                }
+                            }}
+                            style={{
+                                padding: '5px 10px',
+                                backgroundColor: '#f5f5f5',
+                                border: '1px solid #ddd',
+                                borderRadius: '4px',
+                                fontSize: '12px',
+                                cursor: 'pointer'
+                            }}
+                        >
+                            Reinitialize EPG Session
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    // Helper component for EPG data loading button
+    const EpgDataLoader = ({ sessionId, onSuccess }) => {
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState(null);
+        
+        const loadEpgData = async () => {
+            if (!sessionId) {
+                setError("No session ID available");
+                return;
+            }
+            
+            setLoading(true);
+            setError(null);
+            
+            try {
+                console.log('Manually loading EPG channel data from sources...');
+                
+                // First ensure the EPG session is initialized
+                const initResponse = await fetch('/api/epg/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId })
+                });
+                
+                if (!initResponse.ok) {
+                    throw new Error(`Failed to initialize EPG session: ${initResponse.status}`);
+                }
+                
+                // Now load the EPG data
+                const loadResponse = await fetch(`/api/epg/${sessionId}/load-data`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        loadAll: true, 
+                        maxSources: 5,
+                        memoryEfficient: true  // Add memory optimization option
+                    })
+                });
+                
+                if (!loadResponse.ok) {
+                    throw new Error(`Failed to load EPG data: ${loadResponse.status}`);
+                }
+                
+                const result = await loadResponse.json();
+                console.log('EPG data load result:', result);
+                
+                if (onSuccess && typeof onSuccess === 'function') {
+                    onSuccess();
+                }
+            } catch (err) {
+                console.error('Error loading EPG data:', err);
+                setError(err.message);
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        return (
+            <div style={{
+                margin: '20px 0',
+                padding: '15px',
+                backgroundColor: '#e3f2fd',
+                borderRadius: '8px',
+                border: '1px solid #90caf9',
+                textAlign: 'center'
+            }}>
+                <h4 style={{ margin: '0 0 10px 0', color: '#1565c0' }}>EPG Data Required</h4>
+                <p style={{ margin: '0 0 15px 0' }}>
+                    Your EPG sources are registered but have 0 channels loaded. You need to load EPG data before searching.
+                </p>
+                <button
+                    onClick={loadEpgData}
+                    disabled={loading}
+                    style={{
+                        padding: '10px 20px',
+                        backgroundColor: '#1976d2',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: loading ? 'not-allowed' : 'pointer',
+                        fontSize: '16px',
+                        fontWeight: 'bold'
+                    }}
+                >
+                    {loading ? 'Loading EPG Data...' : 'Load EPG Data From Sources'}
+                </button>
+                {error && (
+                    <p style={{ color: 'red', marginTop: '10px' }}>{error}</p>
+                )}
+                <p style={{ fontSize: '12px', color: '#666', marginTop: '10px' }}>
+                    This will download and parse 5 EPG sources (may take a few minutes)
+                </p>
+            </div>
+        );
+    };
+
+    // Component to display the EPG program data
+    const EpgProgramDisplay = () => {
+        if (!epgData || !epgData.channel) return null;
+        
+        const { channel, programs } = epgData;
+        
+        return (
+            <div style={{
+                marginTop: '20px',
+                border: '1px solid #e0e0e0',
+                borderRadius: '8px',
+                overflow: 'hidden'
+            }}>
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '12px',
+                    backgroundColor: '#f5f5f5',
+                    borderBottom: '1px solid #e0e0e0'
+                }}>
+                    {channel.icon && (
+                        <img 
+                            src={channel.icon} 
+                            alt={channel.name} 
+                            style={{
+                                width: '32px',
+                                height: '32px',
+                                marginRight: '10px',
+                                objectFit: 'contain'
+                            }}
+                            onError={(e) => { e.target.style.display = 'none' }}
+                        />
+                    )}
+                    <div>
+                        <h3 style={{ margin: '0 0 4px 0', fontWeight: '500' }}>{channel.name}</h3>
+                        <div style={{ fontSize: '12px', color: '#666' }}>
+                            Source: {channel.source_name || 'Unknown'} • ID: {channel.id}
+                        </div>
+                    </div>
+                </div>
+                
+                {currentProgram && (
+                    <div style={{
+                        padding: '12px',
+                        backgroundColor: '#e3f2fd',
+                        borderBottom: '1px solid #bbdefb'
+                    }}>
+                        <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            marginBottom: '6px'
+                        }}>
+                            <h4 style={{ margin: 0, fontWeight: '500', color: '#1565c0' }}>
+                                {currentProgram.title}
+                                <span style={{
+                                    marginLeft: '8px',
+                                    fontSize: '11px',
+                                    padding: '2px 6px',
+                                    backgroundColor: '#1976d2',
+                                    color: 'white',
+                                    borderRadius: '10px',
+                                    verticalAlign: 'middle'
+                                }}>
+                                    ON NOW
+                                </span>
+                            </h4>
+                            <div style={{ fontSize: '13px', color: '#1976d2', fontWeight: '500' }}>
+                                {formatTime(currentProgram.start)} - {formatTime(currentProgram.stop)}
+                            </div>
+                        </div>
+                        {currentProgram.description && (
+                            <div style={{ fontSize: '13px', color: '#333' }}>
+                                {currentProgram.description}
+                            </div>
+                        )}
+                    </div>
+                )}
+                
+                {programs && programs.length > 0 ? (
+                    <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                        {programs.map((program, index) => {
+                            const isCurrentProgram = currentProgram && program.id === currentProgram.id;
+                            if (isCurrentProgram && currentProgram) {
+                                // Skip current program as it's already displayed above
+                                return null;
+                            }
+                            
+                            return (
+                                <div 
+                                    key={program.id || index} 
+                                    style={{
+                                        padding: '10px 12px',
+                                        borderBottom: index < programs.length - 1 ? '1px solid #eee' : 'none',
+                                        backgroundColor: index % 2 === 0 ? '#fafafa' : 'white',
+                                        display: 'flex'
+                                    }}
+                                >
+                                    <div style={{ width: '100px', flexShrink: 0 }}>
+                                        <div style={{ fontSize: '13px', fontWeight: '500' }}>
+                                            {formatTime(program.start)}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: '#666' }}>
+                                            {formatDate(program.start)}
+                                        </div>
+                                    </div>
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontWeight: '400' }}>
+                                            {program.title}
+                                        </div>
+                                        {program.description && (
+                                            <div style={{ 
+                                                fontSize: '12px', 
+                                                color: '#666',
+                                                marginTop: '4px',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                display: '-webkit-box',
+                                                WebkitLineClamp: 2,
+                                                WebkitBoxOrient: 'vertical'
+                                            }}>
+                                                {program.description}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>
+                        No program data available for this channel
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     return (
-        <div className="epg-matcher" style={{
+        <div className="epg-matcher-container" style={{
             marginTop: '20px',
             padding: '20px',
             border: '1px solid rgba(0, 0, 0, 0.1)',
@@ -480,6 +1336,247 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 </div>
             </div>
 
+            {/* Show program data if available after a match */}
+            {epgData && <EpgProgramDisplay />}
+
+            {/* Error message */}
+            {error && (
+                <div style={{
+                    padding: '15px',
+                    marginBottom: '20px',
+                    backgroundColor: '#ffebee',
+                    borderRadius: '4px',
+                    border: '1px solid #ffcdd2',
+                    color: '#c62828'
+                }}>
+                    {error}
+                </div>
+            )}
+
+            {/* Add prominent EPG Data Loader if needed */}
+            {epgSources.length > 0 && 
+             epgSources.every(source => !source.channelCount || source.channelCount === 0) && (
+                <EpgDataLoader 
+                    sessionId={session} 
+                    onSuccess={fetchEpgSources}
+                />
+            )}
+
+            {/* Search Form */}
+            <div style={{
+                marginBottom: '20px',
+                padding: '15px',
+                backgroundColor: '#f5f5f5',
+                borderRadius: '8px'
+            }}>
+                <form onSubmit={handleSearchSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <input
+                            type="text"
+                            value={epgSearch}
+                            onChange={(e) => setEpgSearch(e.target.value)}
+                            placeholder="Search EPG channels..."
+                            style={{
+                                flex: 1,
+                                padding: '10px 12px',
+                                fontSize: '14px',
+                                border: '1px solid #ddd',
+                                borderRadius: '4px',
+                                outline: 'none'
+                            }}
+                        />
+                        <button
+                            type="submit"
+                            disabled={loading || !epgSearch.trim()}
+                            style={{
+                                padding: '10px 15px',
+                                backgroundColor: '#1976d2',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '4px',
+                                cursor: (loading || !epgSearch.trim()) ? 'not-allowed' : 'pointer',
+                                fontSize: '14px',
+                                fontWeight: '500',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '5px'
+                            }}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            {loading ? 'Searching...' : 'Search'}
+                        </button>
+                    </div>
+                    
+                    {suggestedIds.length > 0 && (
+                        <div style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: '5px',
+                            marginTop: '5px'
+                        }}>
+                            <span style={{ fontSize: '12px', color: '#666', marginRight: '5px' }}>Suggestions:</span>
+                            {suggestedIds.slice(0, 5).map((suggestion, index) => (
+                                <button
+                                    key={index}
+                                    type="button"
+                                    onClick={() => {
+                                        setEpgSearch(suggestion.id);
+                                        searchEpgChannels(suggestion.id);
+                                    }}
+                                    style={{
+                                        padding: '4px 8px',
+                                        backgroundColor: '#e0e0e0',
+                                        border: 'none',
+                                        borderRadius: '12px',
+                                        fontSize: '12px',
+                                        cursor: 'pointer',
+                                        whiteSpace: 'nowrap'
+                                    }}
+                                >
+                                    {suggestion.id}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </form>
+            </div>
+
+            {/* Search Results */}
+            {searching ? (
+                <div style={{ textAlign: 'center', padding: '20px' }}>
+                    <div style={{ fontSize: '24px', marginBottom: '10px' }}>⏳</div>
+                    <p>Searching EPG data...</p>
+                </div>
+            ) : searchResults && searchResults.length > 0 ? (
+                <div style={{ marginBottom: '20px' }}>
+                    <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '10px'
+                    }}>
+                        <h4 style={{ margin: 0 }}>Search Results</h4>
+                        <span style={{ fontSize: '13px', color: '#666' }}>
+                            {searchResults.length} matches found
+                        </span>
+                    </div>
+
+                    {/* Add Filter and Sort Controls */}
+                    <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '10px',
+                        backgroundColor: '#f5f5f5',
+                        padding: '8px 12px',
+                        borderRadius: '4px'
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <label htmlFor="result-filter" style={{ fontSize: '13px', color: '#444' }}>Filter:</label>
+                            <input
+                                id="result-filter"
+                                type="text"
+                                value={resultFilter}
+                                onChange={(e) => setResultFilter(e.target.value)}
+                                placeholder="Filter results..."
+                                style={{
+                                    padding: '6px 8px',
+                                    border: '1px solid #ddd',
+                                    borderRadius: '4px',
+                                    fontSize: '13px',
+                                    width: '180px'
+                                }}
+                            />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <label htmlFor="result-sort" style={{ fontSize: '13px', color: '#444' }}>Sort by:</label>
+                            <select
+                                id="result-sort"
+                                value={resultSortMethod}
+                                onChange={(e) => setResultSortMethod(e.target.value)}
+                                style={{
+                                    padding: '6px 8px',
+                                    border: '1px solid #ddd',
+                                    borderRadius: '4px',
+                                    fontSize: '13px',
+                                    backgroundColor: 'white'
+                                }}
+                            >
+                                <option value="match">Best Match</option>
+                                <option value="name">Channel Name</option>
+                                <option value="programs">Program Count</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style={{
+                        maxHeight: '300px',
+                        overflowY: 'auto',
+                        border: '1px solid #eee',
+                        borderRadius: '4px'
+                    }}>
+                        {sortedSearchResults().length > 0 ? (
+                            sortedSearchResults().map((result, index) => (
+                                <div
+                                    key={index}
+                                    style={{
+                                        padding: '10px',
+                                        borderBottom: index < sortedSearchResults().length - 1 ? '1px solid #eee' : 'none',
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        backgroundColor: index % 2 === 0 ? '#f9f9f9' : 'white'
+                                    }}
+                                >
+                                    <div>
+                                        <div style={{ fontWeight: '500' }}>{result.channelName || result.name || result.channelId}</div>
+                                        <div style={{ fontSize: '12px', color: '#666' }}>
+                                            {result.sourceId || result.source} · ID: {result.channelId || result.id}
+                                        </div>
+                                        {result.title && (
+                                            <div style={{ fontSize: '12px', color: '#006064', marginTop: '3px' }}>
+                                                Current: {result.title}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <button
+                                        onClick={() => handleMatch(result)}
+                                        style={{
+                                            padding: '6px 12px',
+                                            backgroundColor: '#4caf50',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '13px'
+                                        }}
+                                    >
+                                        Use This
+                                    </button>
+                                </div>
+                            ))
+                        ) : (
+                            <div style={{ padding: '15px', textAlign: 'center', color: '#666' }}>
+                                No results match your filter criteria
+                            </div>
+                        )}
+                    </div>
+                </div>
+            ) : searchStatus ? (
+                <div style={{
+                    padding: '15px',
+                    backgroundColor: '#fff3e0',
+                    borderRadius: '4px',
+                    marginBottom: '20px',
+                    border: '1px solid #ffe0b2'
+                }}>
+                    <p style={{ margin: 0, color: '#e65100' }}>{searchStatus}</p>
+                </div>
+            ) : null}
+
             {/* Debug Panel (Collapsible) */}
             {debugMode && (
                 <div style={{
@@ -494,8 +1591,10 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     border: '1px solid #e0e0e0'
                 }}>
                     <strong>Debug Info:</strong>
-                    <div><strong>Session ID:</strong> {sessionId || 'None'}</div>
-                    <div><strong>EPG Sources:</strong> {epgSources.length > 0 ? epgSources.join(', ') : 'None detected'}</div>
+                    <div><strong>Session ID:</strong> {session || 'None'}</div>
+                    <div><strong>EPG Sources:</strong> {safeFormattedEpgSources.length > 0 
+                        ? `${safeFormattedEpgSources.length} unique sources (deduplicated from ${epgSources.length})` 
+                        : 'None detected'}</div>
                     <div><strong>Selected Channel:</strong> {selectedChannel ? selectedChannel.name : 'None'}</div>
                     <div><strong>Channel ID:</strong> {selectedChannel ? selectedChannel.tvgId : 'None'}</div>
                     <div><strong>Current Source:</strong> {currentSource || 'None'}</div>
@@ -508,813 +1607,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     )}
                 </div>
             )}
-
-            {selectedChannel ? (
-                <>
-                    {/* Current Channel Info Card */}
-                    <div className="current-channel-info" style={{
-                        marginBottom: '20px',
-                        padding: '15px',
-                        backgroundColor: '#f5f8ff',
-                        borderRadius: '8px',
-                        border: '1px solid #e6eeff'
-                    }}>
-                        <h4 style={{
-                            margin: '0 0 10px 0',
-                            color: '#1a73e8',
-                            fontWeight: '500'
-                        }}>{selectedChannel.name}</h4>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '15px' }}>
-                            <div>
-                                <span style={{ color: '#666', fontSize: '13px' }}>Channel ID:</span>
-                                <div style={{ fontWeight: '500' }}>{selectedChannel.tvgId}</div>
-                            </div>
-                            <div>
-                                <span style={{ color: '#666', fontSize: '13px' }}>Group:</span>
-                                <div style={{ fontWeight: '500' }}>{selectedChannel.groupTitle}</div>
-                            </div>
-                            {matchedChannels[selectedChannel.tvgId] && (
-                                <div>
-                                    <span style={{ color: '#666', fontSize: '13px' }}>Matched EPG ID:</span>
-                                    <div style={{ fontWeight: '500', color: '#0b8043' }}>{matchedChannels[selectedChannel.tvgId]}</div>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-
-                    {/* EPG Matching Section */}
-                    <div className="epg-match" style={{ marginBottom: '20px' }}>
-                        <h4 style={{
-                            margin: '0 0 15px 0',
-                            color: '#333',
-                            fontWeight: '500',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px'
-                        }}>
-                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="11" cy="11" r="8"></circle>
-                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                            </svg>
-                            Match with EPG Source
-                        </h4>
-
-                        {/* Search field with match button */}
-                        <div style={{ marginBottom: '20px' }}>
-                            <div style={{
-                                display: 'flex',
-                                marginBottom: '10px',
-                                gap: '10px'
-                            }}>
-                                <div style={{ flex: 1, position: 'relative' }}>
-                                    <svg
-                                        style={{
-                                            position: 'absolute',
-                                            left: '10px',
-                                            top: '50%',
-                                            transform: 'translateY(-50%)',
-                                            color: '#666'
-                                        }}
-                                        xmlns="http://www.w3.org/2000/svg"
-                                        width="16"
-                                        height="16"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        strokeWidth="2"
-                                        strokeLinecap="round"
-                                        strokeLinejoin="round"
-                                    >
-                                        <circle cx="11" cy="11" r="8"></circle>
-                                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                                    </svg>
-                                    <input
-                                        type="text"
-                                        placeholder="Search for EPG ID..."
-                                        value={epgSearch}
-                                        onChange={(e) => setEpgSearch(e.target.value)}
-                                        style={{
-                                            width: '100%',
-                                            padding: '10px 10px 10px 35px',
-                                            borderRadius: '6px',
-                                            border: '1px solid #ddd',
-                                            fontSize: '14px',
-                                            transition: 'border-color 0.2s ease',
-                                            outline: 'none'
-                                        }}
-                                        onFocus={(e) => e.target.style.borderColor = '#1a73e8'}
-                                        onBlur={(e) => e.target.style.borderColor = '#ddd'}
-                                    />
-                                </div>
-                                <button
-                                    onClick={searchEpgIds}
-                                    disabled={!epgSearch.trim() || loading}
-                                    style={{
-                                        padding: '10px 16px',
-                                        backgroundColor: !epgSearch.trim() || loading ? '#e0e0e0' : '#1a73e8',
-                                        color: !epgSearch.trim() || loading ? '#999' : 'white',
-                                        border: 'none',
-                                        borderRadius: '6px',
-                                        cursor: !epgSearch.trim() || loading ? 'not-allowed' : 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '5px',
-                                        fontSize: '14px',
-                                        fontWeight: '500',
-                                        transition: 'background-color 0.2s ease'
-                                    }}
-                                >
-                                    {loading ? (
-                                        <>
-                                            <span className="loading-spinner" style={{
-                                                display: 'inline-block',
-                                                width: '16px',
-                                                height: '16px',
-                                                border: '2px solid rgba(255,255,255,0.3)',
-                                                borderRadius: '50%',
-                                                borderTopColor: 'white',
-                                                animation: 'spin 1s linear infinite'
-                                            }}></span>
-                                            <span>Searching...</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                <circle cx="11" cy="11" r="8"></circle>
-                                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                                            </svg>
-                                            <span>Search</span>
-                                        </>
-                                    )}
-                                </button>
-                                <button
-                                    onClick={() => handleMatch(selectedEpgId || epgSearch)}
-                                    disabled={(!epgSearch.trim() && !selectedEpgId) || loading}
-                                    style={{
-                                        padding: '10px 16px',
-                                        backgroundColor: (!epgSearch.trim() && !selectedEpgId) || loading ? '#e0e0e0' : '#0b8043',
-                                        color: (!epgSearch.trim() && !selectedEpgId) || loading ? '#999' : 'white',
-                                        border: 'none',
-                                        borderRadius: '6px',
-                                        cursor: (!epgSearch.trim() && !selectedEpgId) || loading ? 'not-allowed' : 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '5px',
-                                        fontSize: '14px',
-                                        fontWeight: '500',
-                                        transition: 'background-color 0.2s ease'
-                                    }}
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-                                        <polyline points="22 4 12 14.01 9 11.01"></polyline>
-                                    </svg>
-                                    <span>Match</span>
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Search results section */}
-                        {searchResults.length > 0 && (
-                            <div style={{
-                                marginBottom: '20px',
-                                backgroundColor: '#f9f9f9',
-                                padding: '15px',
-                                borderRadius: '8px',
-                                border: '1px solid #eee'
-                            }}>
-                                <div style={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'center',
-                                    marginBottom: '15px'
-                                }}>
-                                    <h5 style={{ margin: 0, fontWeight: '500' }}>Search Results: {searchResults.length} matches</h5>
-
-                                    {/* Sort and filter controls */}
-                                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                                        <div style={{ position: 'relative' }}>
-                                            <svg
-                                                style={{
-                                                    position: 'absolute',
-                                                    left: '7px',
-                                                    top: '50%',
-                                                    transform: 'translateY(-50%)',
-                                                    color: '#666'
-                                                }}
-                                                xmlns="http://www.w3.org/2000/svg"
-                                                width="14"
-                                                height="14"
-                                                viewBox="0 0 24 24"
-                                                fill="none"
-                                                stroke="currentColor"
-                                                strokeWidth="2"
-                                                strokeLinecap="round"
-                                                strokeLinejoin="round"
-                                            >
-                                                <circle cx="11" cy="11" r="8"></circle>
-                                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                                            </svg>
-                                            <input
-                                                type="text"
-                                                placeholder="Filter results..."
-                                                value={resultFilter}
-                                                onChange={(e) => setResultFilter(e.target.value)}
-                                                style={{
-                                                    padding: '5px 5px 5px 25px',
-                                                    borderRadius: '4px',
-                                                    border: '1px solid #ddd',
-                                                    fontSize: '12px',
-                                                    width: '130px'
-                                                }}
-                                            />
-                                        </div>
-                                        <select
-                                            value={resultSortMethod}
-                                            onChange={(e) => setResultSortMethod(e.target.value)}
-                                            style={{
-                                                padding: '5px 8px',
-                                                borderRadius: '4px',
-                                                border: '1px solid #ddd',
-                                                fontSize: '12px',
-                                                background: 'white'
-                                            }}
-                                        >
-                                            <option value="programCount">Sort by programs</option>
-                                            <option value="name">Sort by name</option>
-                                            <option value="source">Sort by source</option>
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {/* Enhanced results listing with virtualization for large results */}
-                                <div style={{
-                                    maxHeight: '300px',
-                                    overflowY: 'auto',
-                                    borderRadius: '4px',
-                                    backgroundColor: 'white',
-                                    border: '1px solid #eee'
-                                }}>
-                                    {sortedSearchResults().map((result, index) => (
-                                        <div key={`search_${index}`} style={{
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            alignItems: 'center',
-                                            padding: '10px 15px',
-                                            borderBottom: index < sortedSearchResults().length - 1 ? '1px solid #f0f0f0' : 'none',
-                                            backgroundColor: index % 2 === 0 ? '#fbfbfb' : 'white',
-                                            transition: 'background-color 0.1s ease'
-                                        }}>
-                                            <div style={{ flex: 1, minWidth: 0 }}>
-                                                <div style={{
-                                                    fontWeight: '500',
-                                                    overflow: 'hidden',
-                                                    textOverflow: 'ellipsis',
-                                                    whiteSpace: 'nowrap'
-                                                }}>{result.name}</div>
-                                                <div style={{
-                                                    fontSize: '12px',
-                                                    color: '#666',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '8px',
-                                                    flexWrap: 'wrap',
-                                                    marginTop: '3px'
-                                                }}>
-                                                    <div style={{
-                                                        padding: '2px 6px',
-                                                        backgroundColor: '#f0f0f0',
-                                                        borderRadius: '4px',
-                                                        fontSize: '11px',
-                                                        color: '#333'
-                                                    }}>
-                                                        {result.sourceKey}
-                                                    </div>
-                                                    <div style={{
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                        gap: '3px'
-                                                    }}>
-                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                                                            <line x1="16" y1="2" x2="16" y2="6"></line>
-                                                            <line x1="8" y1="2" x2="8" y2="6"></line>
-                                                            <line x1="3" y1="10" x2="21" y2="10"></line>
-                                                        </svg>
-                                                        {result.programCount > 0 ? `${result.programCount} programs` : 'No programs'}
-                                                    </div>
-                                                </div>
-                                                <div style={{
-                                                    fontSize: '11px',
-                                                    color: '#888',
-                                                    marginTop: '3px',
-                                                    overflow: 'hidden',
-                                                    textOverflow: 'ellipsis',
-                                                    whiteSpace: 'nowrap'
-                                                }}>
-                                                    ID: {result.id}
-                                                </div>
-                                            </div>
-                                            <button
-                                                onClick={() => handleMatch(result.id)}
-                                                style={{
-                                                    padding: '6px 12px',
-                                                    backgroundColor: '#1a73e8',
-                                                    color: 'white',
-                                                    border: 'none',
-                                                    borderRadius: '4px',
-                                                    cursor: 'pointer',
-                                                    fontSize: '12px',
-                                                    fontWeight: '500',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px',
-                                                    minWidth: '80px',
-                                                    justifyContent: 'center',
-                                                    transition: 'background-color 0.2s ease'
-                                                }}
-                                                onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#0d66d0'}
-                                                onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#1a73e8'}
-                                            >
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                    <polyline points="9 10 4 15 9 20"></polyline>
-                                                    <path d="M20 4v7a4 4 0 0 1-4 4H4"></path>
-                                                </svg>
-                                                Use This
-                                            </button>
-                                        </div>
-                                    ))}
-                                    {sortedSearchResults().length === 0 && (
-                                        <div style={{
-                                            padding: '15px',
-                                            textAlign: 'center',
-                                            color: '#666',
-                                            fontSize: '14px'
-                                        }}>
-                                            No matches found with your filter
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Error message */}
-                        {error && (
-                            <div style={{
-                                padding: '12px 15px',
-                                backgroundColor: '#fff8f7',
-                                borderRadius: '6px',
-                                marginBottom: '15px',
-                                border: '1px solid #fddcd7',
-                                color: '#d93025',
-                                display: 'flex',
-                                alignItems: 'flex-start',
-                                gap: '10px'
-                            }}>
-                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ minWidth: '18px', marginTop: '2px' }}>
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <line x1="12" y1="8" x2="12" y2="12"></line>
-                                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                                </svg>
-                                <p style={{ margin: 0 }}>{error}</p>
-                            </div>
-                        )}
-
-                        {/* Suggested EPG IDs */}
-                        {suggestedIds.length > 0 && (
-                            <div className="suggested-ids" style={{ marginBottom: '20px' }}>
-                                <h5 style={{
-                                    margin: '0 0 10px 0',
-                                    fontWeight: '500',
-                                    fontSize: '14px',
-                                    color: '#666',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '5px'
-                                }}>
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <circle cx="12" cy="12" r="10"></circle>
-                                        <line x1="12" y1="16" x2="12" y2="12"></line>
-                                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
-                                    </svg>
-                                    Suggested EPG IDs:
-                                </h5>
-                                <div style={{
-                                    display: 'flex',
-                                    flexWrap: 'wrap',
-                                    gap: '8px',
-                                    maxWidth: '100%'
-                                }}>
-                                    {suggestedIds.map((suggestion) => (
-                                        <button
-                                            key={`suggest_${suggestion.id}`}
-                                            onClick={() => handleMatch(suggestion.id)}
-                                            style={{
-                                                padding: '6px 12px',
-                                                backgroundColor: '#f5f5f5',
-                                                border: '1px solid #ddd',
-                                                borderRadius: '4px',
-                                                cursor: 'pointer',
-                                                fontSize: '12px',
-                                                color: '#333',
-                                                transition: 'all 0.2s ease'
-                                            }}
-                                            onMouseOver={(e) => {
-                                                e.currentTarget.style.backgroundColor = '#e8e8e8';
-                                                e.currentTarget.style.borderColor = '#ccc';
-                                            }}
-                                            onMouseOut={(e) => {
-                                                e.currentTarget.style.backgroundColor = '#f5f5f5';
-                                                e.currentTarget.style.borderColor = '#ddd';
-                                            }}
-                                        >
-                                            {suggestion.name}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* EPG Data Section */}
-                    <div className="epg-data" style={{ marginBottom: '20px' }}>
-                        <h4 style={{
-                            margin: '0 0 15px 0',
-                            color: '#333',
-                            fontWeight: '500',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '8px'
-                        }}>
-                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                                <line x1="16" y1="2" x2="16" y2="6"></line>
-                                <line x1="8" y1="2" x2="8" y2="6"></line>
-                                <line x1="3" y1="10" x2="21" y2="10"></line>
-                            </svg>
-                            EPG Data
-                        </h4>
-
-                        {/* Alternative matches section - now scrollable */}
-                        {alternateMatches.length > 0 && (
-                            <div style={{
-                                marginBottom: '20px',
-                                padding: '15px',
-                                backgroundColor: '#f0f7ff',
-                                borderRadius: '8px',
-                                border: '1px solid #d0e3ff'
-                            }}>
-                                <h5 style={{
-                                    margin: '0 0 10px 0',
-                                    fontWeight: '500',
-                                    color: '#1a73e8',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '5px'
-                                }}>
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                        <line x1="4" y1="21" x2="4" y2="14"></line>
-                                        <line x1="4" y1="10" x2="4" y2="3"></line>
-                                        <line x1="12" y1="21" x2="12" y2="12"></line>
-                                        <line x1="12" y1="8" x2="12" y2="3"></line>
-                                        <line x1="20" y1="21" x2="20" y2="16"></line>
-                                        <line x1="20" y1="12" x2="20" y2="3"></line>
-                                        <line x1="1" y1="14" x2="7" y2="14"></line>
-                                        <line x1="9" y1="8" x2="15" y2="8"></line>
-                                        <line x1="17" y1="16" x2="23" y2="16"></line>
-                                    </svg>
-                                    Alternative Matches ({alternateMatches.length})
-                                </h5>
-                                <p style={{
-                                    fontSize: '13px',
-                                    color: '#444',
-                                    margin: '0 0 10px 0'
-                                }}>
-                                    Other possible matches from different EPG sources. Click one to switch.
-                                </p>
-
-                                {/* Scrollable container for alternate matches */}
-                                <div style={{
-                                    maxHeight: '150px',
-                                    overflowY: 'auto',
-                                    padding: '5px',
-                                    background: 'rgba(255,255,255,0.5)',
-                                    borderRadius: '6px'
-                                }}>
-                                    <div style={{
-                                        display: 'flex',
-                                        flexWrap: 'wrap',
-                                        gap: '8px',
-                                        maxWidth: '100%'
-                                    }}>
-                                        {alternateMatches.map((match, index) => (
-                                            <button
-                                                key={`alt_${index}`}
-                                                onClick={() => switchToAlternateMatch(match)}
-                                                style={{
-                                                    padding: '8px 12px',
-                                                    backgroundColor: 'white',
-                                                    border: '1px solid #c2d7ff',
-                                                    borderRadius: '6px',
-                                                    cursor: 'pointer',
-                                                    fontSize: '13px',
-                                                    display: 'flex',
-                                                    flexDirection: 'column',
-                                                    alignItems: 'flex-start',
-                                                    transition: 'all 0.2s ease',
-                                                    minWidth: '150px',
-                                                    textAlign: 'left'
-                                                }}
-                                                onMouseOver={(e) => {
-                                                    e.currentTarget.style.backgroundColor = '#f5f9ff';
-                                                    e.currentTarget.style.borderColor = '#a1c3ff';
-                                                }}
-                                                onMouseOut={(e) => {
-                                                    e.currentTarget.style.backgroundColor = 'white';
-                                                    e.currentTarget.style.borderColor = '#c2d7ff';
-                                                }}
-                                            >
-                                                <span style={{ fontWeight: '500' }}>{match.displayName || match.channelId}</span>
-                                                <span style={{
-                                                    fontSize: '11px',
-                                                    marginTop: '3px',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '4px',
-                                                    color: '#666'
-                                                }}>
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                                                        <line x1="16" y1="2" x2="16" y2="6"></line>
-                                                        <line x1="8" y1="2" x2="8" y2="6"></line>
-                                                        <line x1="3" y1="10" x2="21" y2="10"></line>
-                                                    </svg>
-                                                    {match.programCount} programs
-                                                </span>
-                                                <span style={{
-                                                    fontSize: '11px',
-                                                    padding: '2px 6px',
-                                                    backgroundColor: '#f0f0f0',
-                                                    borderRadius: '4px',
-                                                    marginTop: '5px'
-                                                }}>
-                                                    {match.sourceKey}
-                                                </span>
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {epgData ? (
-                            <div>
-                                {/* Channel info section */}
-                                {epgData.channelInfo && (
-                                    <div className="channel-info" style={{
-                                        background: '#e8f5e9',
-                                        padding: '15px',
-                                        borderRadius: '8px',
-                                        marginBottom: '15px',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '15px',
-                                        border: '1px solid #c8e6c9'
-                                    }}>
-                                        {epgData.channelInfo.icon && (
-                                            <img
-                                                src={epgData.channelInfo.icon}
-                                                alt="Channel Logo"
-                                                style={{
-                                                    maxWidth: '60px',
-                                                    maxHeight: '60px',
-                                                    border: '1px solid #ddd',
-                                                    borderRadius: '6px',
-                                                    padding: '2px',
-                                                    background: 'white'
-                                                }}
-                                            />
-                                        )}
-                                        <div>
-                                            <h5 style={{ margin: '0 0 5px 0', color: '#2e7d32' }}>
-                                                {epgData.channelInfo.displayNames && epgData.channelInfo.displayNames.length > 0
-                                                    ? epgData.channelInfo.displayNames[0].name
-                                                    : epgData.channelInfo.id}
-                                            </h5>
-                                            <div style={{
-                                                fontSize: '13px',
-                                                color: '#444',
-                                                display: 'flex',
-                                                flexWrap: 'wrap',
-                                                gap: '10px'
-                                            }}>
-                                                <div>
-                                                    <strong>Source:</strong> {currentSource}
-                                                </div>
-                                                <div>
-                                                    <strong>Channel ID:</strong> {epgData.channelInfo.id}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div className="current-program" style={{
-                                    background: '#f0f9ff',
-                                    padding: '15px',
-                                    borderRadius: '8px',
-                                    marginBottom: '15px',
-                                    border: '1px solid #d3e5ff'
-                                }}>
-                                    <h5 style={{
-                                        margin: '0 0 10px 0',
-                                        color: '#1a73e8',
-                                        fontWeight: '500',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '5px'
-                                    }}>
-                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                            <circle cx="12" cy="12" r="10"></circle>
-                                            <polyline points="12 6 12 12 16 14"></polyline>
-                                        </svg>
-                                        Current Program
-                                    </h5>
-                                    {epgData.currentProgram ? (
-                                        <>
-                                            <p style={{
-                                                fontWeight: '500',
-                                                margin: '0 0 8px 0',
-                                                fontSize: '16px'
-                                            }}>{epgData.currentProgram.title}</p>
-                                            <p style={{
-                                                margin: '0 0 10px 0',
-                                                fontSize: '14px',
-                                                color: '#444',
-                                                lineHeight: '1.4'
-                                            }}>{epgData.currentProgram.desc || 'No description available'}</p>
-                                            <div style={{
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                fontSize: '12px',
-                                                color: '#666',
-                                                gap: '5px'
-                                            }}>
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                    <circle cx="12" cy="12" r="10"></circle>
-                                                    <polyline points="12 6 12 12 16 14"></polyline>
-                                                </svg>
-                                                {formatDate(epgData.currentProgram.start)} - {formatDate(epgData.currentProgram.stop)}
-                                            </div>
-                                        </>
-                                    ) : (
-                                        <p style={{
-                                            color: '#666',
-                                            margin: 0
-                                        }}>No current program information available. Try matching with another EPG ID.</p>
-                                    )}
-                                </div>
-
-                                <div className="upcoming-programs">
-                                    <h5 style={{
-                                        margin: '0 0 10px 0',
-                                        color: '#333',
-                                        fontWeight: '500',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '5px'
-                                    }}>
-                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-                                        </svg>
-                                        Upcoming Programs
-                                    </h5>
-                                    {epgData.programs && epgData.programs.length > 0 ? (
-                                        <ul style={{
-                                            listStyle: 'none',
-                                            padding: '5px',
-                                            margin: 0,
-                                            backgroundColor: '#f9f9f9',
-                                            borderRadius: '8px',
-                                            border: '1px solid #eee',
-                                            maxHeight: '300px',
-                                            overflowY: 'auto'
-                                        }}>
-                                            {epgData.programs.map((program, index) => (
-                                                <li key={`program_${index}`} style={{
-                                                    padding: '10px',
-                                                    margin: '5px 0',
-                                                    borderBottom: index < epgData.programs.length - 1 ? '1px solid #f0f0f0' : 'none',
-                                                    backgroundColor: index % 2 === 0 ? 'white' : '#f9f9f9',
-                                                    borderRadius: '6px'
-                                                }}>
-                                                    <div style={{
-                                                        fontWeight: '500',
-                                                        marginBottom: '3px',
-                                                        color: '#333'
-                                                    }}>{program.title}</div>
-                                                    <div style={{
-                                                        fontSize: '12px',
-                                                        color: '#666',
-                                                        marginBottom: '5px',
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                        gap: '4px'
-                                                    }}>
-                                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                            <circle cx="12" cy="12" r="10"></circle>
-                                                            <polyline points="12 6 12 12 16 14"></polyline>
-                                                        </svg>
-                                                        {formatDate(program.start)} - {formatDate(program.stop)}
-                                                    </div>
-                                                    {program.desc && (
-                                                        <p style={{
-                                                            margin: 0,
-                                                            fontSize: '13px',
-                                                            color: '#555',
-                                                            lineHeight: '1.3'
-                                                        }}>{program.desc.substring(0, 120)}{program.desc.length > 120 ? '...' : ''}</p>
-                                                    )}
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    ) : (
-                                        <p style={{ color: '#666' }}>No upcoming programs available. Try matching with another EPG ID.</p>
-                                    )}
-                                </div>
-                            </div>
-                        ) : (
-                            <div style={{
-                                padding: '25px',
-                                borderRadius: '8px',
-                                backgroundColor: '#f5f5f5',
-                                textAlign: 'center',
-                                color: '#666',
-                                border: '1px dashed #ddd'
-                            }}>
-                                <p style={{ margin: 0 }}>No EPG data available for this channel. Try matching with an EPG ID from the suggestions above.</p>
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="epg-troubleshooting" style={{
-                        marginTop: '20px',
-                        padding: '15px',
-                        backgroundColor: '#fffde7',
-                        borderRadius: '8px',
-                        border: '1px solid #fff9c4'
-                    }}>
-                        <h5 style={{
-                            marginTop: 0,
-                            color: '#f57c00',
-                            fontWeight: '500',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '5px'
-                        }}>
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <line x1="12" y1="8" x2="12" y2="12"></line>
-                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                            </svg>
-                            EPG Data Troubleshooting
-                        </h5>
-                        <p style={{
-                            margin: '0 0 10px 0',
-                            fontSize: '14px',
-                            color: '#555'
-                        }}>If you're not seeing any EPG data for any channels, there might be an issue with the EPG sources:</p>
-                        <ol style={{
-                            paddingLeft: '25px',
-                            margin: '10px 0',
-                            fontSize: '14px',
-                            color: '#555'
-                        }}>
-                            <li>Try searching with different terms (e.g., full channel name, partial name, without "HD")</li>
-                            <li>Check if different EPG sources have different naming conventions</li>
-                            <li>Look at sample channel IDs in the debug mode to see available formats</li>
-                            <li>Try matching with IDs from any of the suggestions</li>
-                        </ol>
-                    </div>
-                </>
-            ) : (
-                <div style={{
-                    padding: '30px',
-                    textAlign: 'center',
-                    borderRadius: '8px',
-                    backgroundColor: '#f5f5f5',
-                    color: '#666',
-                    border: '1px dashed #ddd'
-                }}>
-                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: '15px', color: '#999' }}>
-                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                        <line x1="16" y1="2" x2="16" y2="6"></line>
-                        <line x1="8" y1="2" x2="8" y2="6"></line>
-                        <line x1="3" y1="10" x2="21" y2="10"></line>
-                    </svg>
-                    <p style={{ margin: 0, fontSize: '16px' }}>Select a channel to view and match EPG data</p>
-                </div>
-            )}
+            
+            {/* Add the debug panel at the bottom */}
+            <details style={{marginTop: '20px', border: '1px solid #ccc', borderRadius: '4px', padding: '10px'}}>
+                <summary style={{fontWeight: 'bold', cursor: 'pointer'}}>EPG Debug Information</summary>
+                <EpgDebugPanel sessionId={session} />
+            </details>
         </div>
     );
 };

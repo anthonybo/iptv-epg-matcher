@@ -4,20 +4,20 @@ const logger = require('../config/logger');
 const { STREAM_TIMEOUT } = require('../config/constants');
 
 /**
- * Fetches content from a URL and returns it as a buffer
+ * Fetches content from a URL and returns the response
  * 
  * @param {string} url - URL to fetch
- * @returns {Promise<Buffer>} Response buffer
+ * @param {Object} options - Fetch options (timeout, headers, etc.)
+ * @returns {Promise<Response>} Fetch response
  * @throws {Error} If fetch fails
  */
-async function fetchURL(url) {
+async function fetchURL(url, options = {}) {
   logger.info(`Fetching URL: ${url}`);
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, options);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-    const buffer = await response.buffer();
-    logger.info(`Fetched ${buffer.length} bytes from ${url}`);
-    return buffer;
+    logger.info(`Fetched response from ${url} with status ${response.status}`);
+    return response;
   } catch (e) {
     logger.error(`Fetch failed for ${url}: ${e.message}`);
     throw e;

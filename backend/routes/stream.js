@@ -1,273 +1,431 @@
-/**
- * Stream Routes - handles streaming endpoints
- */
 const express = require('express');
 const router = express.Router();
+const fetch = require('node-fetch');
 const { getSession } = require('../utils/storageUtils');
-const { logWithColor, streamTs, streamHls } = require('../services/streamService');
+const logger = require('../config/logger');
+const sessionStorage = require('../utils/sessionStorage');
+const { PassThrough } = require('stream');
 
 /**
- * GET /api/stream/:sessionId/:channelId
- * Streams a channel by ID with improved error handling and channel ID mapping
+ * GET /:sessionId/:channelId
+ * Stream a channel by redirecting to the appropriate URL
+ * Supports both direct streaming and format conversion
  */
 router.get('/:sessionId/:channelId', async (req, res) => {
-    const { sessionId, channelId } = req.params;
-    const forceFormat = req.query.format;
-
-    logWithColor('info', `Stream request received for ${channelId}`, {
-        sessionId,
-        channelId,
-        forceFormat,
-        timestamp: new Date().toISOString(),
-        clientIp: req.ip || req.headers['x-forwarded-for']
-    });
-
-    // Validate session
-    const session = getSession(sessionId);
-    if (!session) {
-        logWithColor('error', 'Session not found', { sessionId });
-        return res.status(404).json({ error: 'Session not found' });
-    }
-
     try {
-        // Find the channel
-        const decodedChannelId = decodeURIComponent(channelId);
-        logWithColor('debug', `Looking for channel ${decodedChannelId}`, { sessionId });
+        const { sessionId, channelId } = req.params;
+        const format = req.query.format || 'ts'; // Default to ts format
+        
+        logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}`);
+        
+        // Get session data using sessionStorage module directly
+        let session = sessionStorage.getSession(sessionId);
 
-        let channel = session.channels.find(ch => ch.tvgId === decodedChannelId);
-
-        // If channel not found by tvgId, check if it might be a hash ID that needs to be mapped to an EPG ID
+        // Check if session exists
+        if (!session) {
+            logger.warn(`Session ${sessionId} not found for streaming. Auto-creating...`);
+            
+            // Create a simple session with empty channels array
+            session = sessionStorage.createSession(sessionId, { 
+                data: { channels: [] } 
+            });
+            
+            logger.info(`Auto-created session ${sessionId} for streaming`);
+        }
+        
+        // Ensure channels array exists
+        if (!session.data || !session.data.channels) {
+            logger.warn(`Session ${sessionId} has no data.channels array, initializing it`);
+            // Update session with proper structure
+            session = sessionStorage.updateSession(sessionId, {
+                data: { channels: [] }
+            });
+        }
+        
+        // Check if session has channels
+        if (!session.data.channels || session.data.channels.length === 0) {
+            logger.error(`Session ${sessionId} exists but has no channels`);
+            return res.status(404).json({ error: 'No channels loaded for this session' });
+        }
+        
+        // Normalize channelId - either with or without 'channel_' prefix
+        let normalizedChannelId = channelId;
+        let channel;
+        
+        // Try to find the channel with the exact ID first
+        channel = session.data.channels.find(ch => ch.tvgId === channelId);
+        
+        // If not found, try adding 'channel_' prefix if it's not already there
+        if (!channel && !channelId.startsWith('channel_')) {
+            normalizedChannelId = `channel_${channelId}`;
+            channel = session.data.channels.find(ch => ch.tvgId === normalizedChannelId);
+            logger.info(`Channel not found with ID ${channelId}, trying with prefix: ${normalizedChannelId}`);
+        }
+        
+        // If still not found and has 'channel_' prefix, try without it
+        if (!channel && channelId.startsWith('channel_')) {
+            normalizedChannelId = channelId.replace(/^channel_/, '');
+            channel = session.data.channels.find(ch => ch.tvgId === normalizedChannelId);
+            logger.info(`Channel not found with ID ${channelId}, trying without prefix: ${normalizedChannelId}`);
+        }
+        
         if (!channel) {
-            logWithColor('debug', `Channel not found directly, checking if it's a hash ID that needs mapping`, { channelId: decodedChannelId });
-
-            // Check if we have EPG data that might have a match for this channel
-            if (session.epgSources && Object.keys(session.epgSources).length > 0) {
-                // Check if there's a matched EPG ID for this channel in matched channels map
-                const matchedChannels = session.matchedChannels || {};
-
-                // Loop through all channels to find one with a matching hash ID format
-                for (const ch of session.channels) {
-                    // If this is a hash-style ID like channel_5225231964fb693ecfaf076ecadd39e4
-                    if (ch.tvgId.startsWith('channel_') && ch.tvgId.length > 20) {
-                        // Check if there's an EPG match for this channel
-                        const mappedEpgId = matchedChannels[ch.tvgId];
-
-                        if (mappedEpgId) {
-                            logWithColor('info', `Found mapped EPG ID ${mappedEpgId} for hash ID ${ch.tvgId}`);
-                            // If this mapped ID matches what the frontend is requesting, use this channel
-                            if (mappedEpgId === decodedChannelId) {
-                                channel = ch;
-                                logWithColor('info', `Using channel ${ch.name} for EPG ID ${decodedChannelId}`);
-                                break;
-                            }
-                        }
+            logger.error(`Channel not found: ${channelId} in session ${sessionId}`);
+            return res.status(404).json({ error: 'Channel not found' });
+        }
+        
+        if (!channel.url) {
+            logger.error(`No stream URL for channel ${channelId}`);
+            return res.status(400).json({ error: 'No stream URL for this channel' });
+        }
+        
+        logger.info(`Streaming channel: ${channel.name} (${normalizedChannelId}) from URL: ${channel.url}`);
+        
+        // Option 1: Simple redirect to the original URL
+        if (req.query.redirect === 'true') {
+            return res.redirect(channel.url);
+        }
+        
+        // For HEAD requests, don't try to stream, just check availability
+        if (req.method === 'HEAD') {
+            try {
+                // Test if the URL is reachable
+                const testResponse = await fetch(channel.url, {
+                    method: 'HEAD',
+                    timeout: 5000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
                     }
+                });
+                
+                if (!testResponse.ok) {
+                    logger.warn(`Stream URL check failed for ${channelId}: ${testResponse.status} ${testResponse.statusText}`);
+                    return res.status(502).json({
+                        error: 'Stream source unavailable',
+                        details: `Source returned: ${testResponse.status} ${testResponse.statusText}`
+                    });
                 }
-            }
-        }
-
-        // Final check if we found a channel
-        if (!channel) {
-            // Last resort - try all channels by name
-            const channelByName = session.channels.find(ch =>
-                ch.name.toLowerCase().includes(decodedChannelId.toLowerCase()) ||
-                (decodedChannelId.toLowerCase().includes('nationals') &&
-                    ch.name.toLowerCase().includes('washington'))
-            );
-
-            if (channelByName) {
-                logWithColor('warn', `Found channel by name match instead of ID: ${channelByName.name}`, {
-                    requestedId: decodedChannelId,
-                    foundId: channelByName.tvgId
-                });
-                channel = channelByName;
-            } else {
-                logWithColor('error', `Channel not found: ${decodedChannelId}`, { sessionId });
-                return res.status(404).json({
-                    error: 'Channel not found',
-                    message: `Channel ID ${decodedChannelId} not found in session ${sessionId}. If this channel has EPG data, make sure you've matched it correctly.`
-                });
-            }
-        }
-
-        logWithColor('success', `Channel found: ${channel.name}`, {
-            channelName: channel.name,
-            groupTitle: channel.groupTitle,
-            url: channel.url
-        });
-
-        // When explicitly requesting TS format
-        if (forceFormat === 'ts') {
-            const { xtreamUsername, xtreamPassword, xtreamServer } = session;
-
-            try {
-                await streamTs(req, res, channel, xtreamUsername, xtreamPassword, xtreamServer);
+                
+                // If we get here, the URL is reachable
+                return res.status(200).end();
             } catch (error) {
-                logWithColor('error', 'Error streaming TS content', {
-                    error: error.message,
-                    stack: error.stack,
-                    channelId: channel.tvgId,
-                    url: channel.url
+                let statusCode = 502;
+                let errorMessage = 'Stream source unavailable';
+                
+                // DNS resolution errors
+                if (error.code === 'ENOTFOUND') {
+                    errorMessage = 'Stream source domain cannot be resolved';
+                    logger.error(`DNS resolution failed for stream URL: ${channel.url}`);
+                } else if (error.code === 'ETIMEDOUT' || error.cause?.code === 'ETIMEDOUT') {
+                    errorMessage = 'Stream source connection timed out';
+                } else if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
+                    errorMessage = 'Stream source connection was refused';
+                }
+                
+                logger.error(`Stream availability check failed: ${error.message}`, {
+                    channelId,
+                    url: channel.url,
+                    errorCode: error.code || error.cause?.code
                 });
-
-                // Send more informative error in proper format
-                res.status(500).json({
-                    error: 'Stream error',
-                    message: `Error streaming channel: ${error.message}`,
-                    details: {
-                        channelName: channel.name,
-                        channelId: channel.tvgId,
-                        // Don't include credentials in error response
-                        streamUrl: channel.url.replace(/\/\/.*?@/, '//<credentials>@')
-                    },
-                    suggestions: [
-                        "Try a different player type (HLS, TS, VLC)",
-                        "Check if your IPTV subscription is still active",
-                        "Try a different channel"
-                    ]
-                });
-            }
-        }
-        // For M3U8/HLS format (default)
-        else {
-            const tsStreamUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channel.tvgId)}?format=ts`;
-            try {
-                streamHls(req, res, tsStreamUrl);
-            } catch (error) {
-                logWithColor('error', 'Error streaming HLS content', {
-                    error: error.message,
-                    stack: error.stack,
-                    channelId: channel.tvgId
-                });
-
-                // Send more informative error
-                res.status(500).json({
-                    error: 'Stream error',
-                    message: `Error creating HLS stream: ${error.message}`,
-                    details: {
-                        channelName: channel.name,
-                        channelId: channel.tvgId
-                    },
-                    suggestions: [
-                        "Try a different player type (TS, VLC)",
-                        "Check if your IPTV subscription is still active"
-                    ]
+                
+                return res.status(statusCode).json({
+                    error: errorMessage,
+                    details: error.message
                 });
             }
         }
-    } catch (e) {
-        logWithColor('error', 'Unexpected error processing stream', {
-            error: e.message,
-            stack: e.stack,
-            sessionId,
-            channelId
+        
+        // Option 2: Proxy the stream with potential format conversion
+        // Stream video using pipe (more efficient for large data)
+        try {
+            // Set appropriate headers for streaming
+            res.setHeader('Content-Type', format === 'ts' ? 'video/mp2t' : 'video/mp4');
+            res.setHeader('Transfer-Encoding', 'chunked');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            
+            // Fetch and pipe the stream
+            const streamResponse = await fetch(channel.url, {
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
+                },
+                timeout: 60000, // Increase timeout to 60 seconds
+            });
+            
+            if (!streamResponse.ok) {
+                logger.error(`Failed to fetch stream: ${streamResponse.status} ${streamResponse.statusText}`);
+                return res.status(502).json({ 
+                    error: 'Failed to fetch stream from source',
+                    status: streamResponse.status,
+                    message: streamResponse.statusText
+                });
+            }
+            
+            // Create a pass-through stream for better error handling
+            const passThrough = new PassThrough();
+            
+            // Handle errors on the source stream
+            streamResponse.body.on('error', (err) => {
+                logger.error(`Source stream error for channel ${channelId}: ${err.message}`);
+                passThrough.destroy(err);
+            });
+            
+            // Handle errors on the response stream
+            res.on('error', (err) => {
+                logger.error(`Response stream error for channel ${channelId}: ${err.message}`);
+                streamResponse.body.destroy();
+                passThrough.destroy();
+            });
+            
+            // Handle client disconnect
+            req.on('close', () => {
+                try {
+                    logger.info(`Stream closed for channel ${channelId}`);
+                    streamResponse.body.destroy();
+                    passThrough.destroy();
+                } catch (err) {
+                    logger.error(`Error closing stream: ${err.message}`);
+                }
+            });
+            
+            // Pipe through our pass-through stream for better control
+            streamResponse.body.pipe(passThrough).pipe(res);
+            
+            // Set a timeout on the whole operation
+            const streamTimeout = setTimeout(() => {
+                logger.warn(`Stream timeout for channel ${channelId}`);
+                streamResponse.body.destroy(new Error('Stream timeout'));
+                passThrough.destroy(new Error('Stream timeout'));
+            }, 300000); // 5 minute timeout
+            
+            // Clear timeout when stream ends or errors
+            passThrough.on('end', () => {
+                logger.info(`Stream completed successfully for channel ${channelId}`);
+                clearTimeout(streamTimeout);
+            });
+            
+            passThrough.on('error', () => {
+                clearTimeout(streamTimeout);
+            });
+            
+        } catch (streamError) {
+            // Handle common stream errors
+            let errorMessage = 'Error streaming content';
+            let statusCode = 500;
+            
+            // Adjust error message based on specific error types
+            if (streamError.code === 'ENOTFOUND' || streamError.message.includes('ENOTFOUND')) {
+                errorMessage = 'Stream source cannot be found (DNS resolution failed)';
+                statusCode = 502;
+            } else if (streamError.code === 'ETIMEDOUT' || streamError.message.includes('ETIMEDOUT')) {
+                errorMessage = 'Stream source connection timed out';
+                statusCode = 504;
+            } else if (streamError.code === 'ECONNREFUSED' || streamError.message.includes('ECONNREFUSED')) {
+                errorMessage = 'Stream source connection was refused';
+                statusCode = 502;
+            }
+            
+            logger.error(`${errorMessage}: ${streamError.message}`, { 
+                error: streamError.message,
+                stack: streamError.stack,
+                channelId,
+                url: channel.url
+            });
+            
+            // If streaming has already started, we can't send a JSON response
+            if (!res.headersSent) {
+                return res.status(statusCode).json({ 
+                    error: errorMessage,
+                    details: streamError.message
+                });
+            }
+        }
+        
+    } catch (error) {
+        logger.error(`Stream error: ${error.message}`, { 
+            error: error.message,
+            stack: error.stack
         });
-
-        return res.status(500).json({
-            error: 'Server error',
-            message: e.message,
-            suggestions: [
-                "Try reloading the page",
-                "Check browser console for more details"
-            ]
-        });
+        
+        // Only send response if headers haven't been sent yet
+        if (!res.headersSent) {
+            return res.status(500).json({ error: error.message });
+        }
     }
 });
 
 /**
- * GET /api/stream-test/:sessionId/:channelId
- * Tests stream availability for a channel
+ * GET /xtream/:sessionId/:type/:id
+ * Special handler for Xtream format URLs
  */
-router.get('/test/:sessionId/:channelId', async (req, res) => {
-    const { sessionId, channelId } = req.params;
-
-    const session = getSession(sessionId);
-    if (!session) {
-        return res.json({ error: 'Session not found' });
-    }
-
+router.get('/xtream/:sessionId/:type/:id', async (req, res) => {
     try {
-        const decodedChannelId = decodeURIComponent(channelId);
-        const channel = session.channels.find(ch => ch.tvgId === decodedChannelId);
-
-        if (!channel) {
-            return res.json({
-                error: 'Channel not found',
-                message: `Channel ID ${decodedChannelId} not found in session ${sessionId}`
-            });
+        const { sessionId, type, id } = req.params;
+        const format = req.query.format || 'ts';
+        
+        logger.info(`Xtream stream request for session ${sessionId}, type ${type}, id ${id}`);
+        
+        // Get session data with Xtream credentials
+        const session = getSession(sessionId);
+        if (!session || !session.xtreamUsername || !session.xtreamPassword || !session.xtreamServer) {
+            return res.status(404).json({ error: 'Session not found or no Xtream credentials' });
         }
-
-        // Get original URL
-        let originalUrl = channel.url;
-
-        // Construct Xtream URL if needed
-        let xtreamUrl = originalUrl;
+        
         const { xtreamUsername, xtreamPassword, xtreamServer } = session;
-
-        if (xtreamUsername && xtreamPassword && xtreamServer) {
-            const baseUrl = xtreamServer.endsWith('/') ? xtreamServer : `${xtreamServer}/`;
-
-            if (originalUrl.startsWith('http')) {
-                if (originalUrl.includes(baseUrl)) {
-                    const channelPath = originalUrl.split(baseUrl)[1];
-                    xtreamUrl = `${baseUrl}${xtreamUsername}/${xtreamPassword}/${channelPath}`;
-                }
-            } else {
-                xtreamUrl = `${baseUrl}${xtreamUsername}/${xtreamPassword}/${originalUrl}`;
-            }
+        
+        // Construct the Xtream URL
+        const xtreamUrl = `${xtreamServer}/live/${xtreamUsername}/${xtreamPassword}/${id}.${format}`;
+        
+        logger.info(`Proxying Xtream stream: ${xtreamUrl}`);
+        
+        // Option 1: Simple redirect
+        if (req.query.redirect === 'true') {
+            return res.redirect(xtreamUrl);
         }
-
-        // Test URL accessibility
-        let urlTestResult;
+        
+        // Option 2: Proxy the stream
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-            const response = await fetch(xtreamUrl, {
-                method: 'HEAD',
-                signal: controller.signal,
+            // Set streaming headers
+            res.setHeader('Content-Type', format === 'ts' ? 'video/mp2t' : 'video/mp4');
+            res.setHeader('Transfer-Encoding', 'chunked');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            
+            // Fetch and pipe the stream
+            const streamResponse = await fetch(xtreamUrl, {
+                method: 'GET',
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
                 }
             });
-
-            clearTimeout(timeoutId);
-
-            urlTestResult = {
-                accessible: response.ok,
-                status: response.status,
-                statusText: response.statusText,
-                contentType: response.headers.get('Content-Type'),
-                contentLength: response.headers.get('Content-Length')
-            };
-        } catch (error) {
-            urlTestResult = {
-                accessible: false,
-                error: error.message
-            };
-        }
-
-        // Return all gathered information
-        res.json({
-            channelInfo: {
-                name: channel.name,
-                tvgId: channel.tvgId,
-                groupTitle: channel.groupTitle
-            },
-            urls: {
-                original: originalUrl,
-                xtream: xtreamUrl,
-                streamEndpoint: `http://localhost:5001/api/stream/${sessionId}/${channelId}`
-            },
-            urlTest: urlTestResult,
-            xtreamConfig: {
-                server: xtreamServer,
-                hasCredentials: !!(xtreamUsername && xtreamPassword)
+            
+            if (!streamResponse.ok) {
+                logger.error(`Failed to fetch Xtream stream: ${streamResponse.status} ${streamResponse.statusText}`);
+                return res.status(502).json({ 
+                    error: 'Failed to fetch stream from Xtream source',
+                    status: streamResponse.status,
+                    message: streamResponse.statusText
+                });
             }
-        });
+            
+            // Pipe the response directly
+            streamResponse.body.pipe(res);
+            
+            // Handle client disconnect
+            req.on('close', () => {
+                try {
+                    streamResponse.body.destroy();
+                    logger.info(`Xtream stream closed for id ${id}`);
+                } catch (err) {
+                    logger.error(`Error closing Xtream stream: ${err.message}`);
+                }
+            });
+            
+        } catch (streamError) {
+            logger.error(`Error streaming Xtream content: ${streamError.message}`, {
+                error: streamError.message,
+                stack: streamError.stack
+            });
+            
+            if (!res.headersSent) {
+                return res.status(500).json({ 
+                    error: 'Error streaming Xtream content',
+                    message: streamError.message
+                });
+            }
+        }
+        
     } catch (error) {
-        res.json({ error: error.message, stack: error.stack });
+        logger.error(`Xtream stream error: ${error.message}`, {
+            error: error.message,
+            stack: error.stack
+        });
+        
+        if (!res.headersSent) {
+            return res.status(500).json({ error: error.message });
+        }
     }
+});
+
+/**
+ * Routes for handling Server-Sent Events (SSE)
+ */
+const { registerSSEClient, removeSSEClient, broadcastSSEUpdate } = require('../utils/sseUtils');
+
+// Middleware to set SSE headers and prevent connection timeout
+function sseHeaders(req, res, next) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Prevent Nginx buffering
+  res.flushHeaders();
+  
+  // Set up a heartbeat to prevent connection timeout
+  const heartbeatInterval = setInterval(() => {
+    if (!res.finished) {
+      try {
+        res.write(`:heartbeat ${new Date().toISOString()}\n\n`);
+        // Don't use res.flush() here to avoid potential errors
+      } catch (error) {
+        logger.error(`Error sending heartbeat: ${error.message}`);
+        clearInterval(heartbeatInterval);
+      }
+    } else {
+      clearInterval(heartbeatInterval);
+    }
+  }, 30000); // Every 30 seconds
+  
+  // Clean up on client disconnect
+  req.on('close', () => {
+    clearInterval(heartbeatInterval);
+    
+    // Get the sessionId from params - check for null or invalid values
+    const sessionId = req.params.sessionId || null;
+    if (sessionId && sessionId !== 'null' && sessionId !== 'undefined') {
+      removeSSEClient(sessionId, res);
+    } else {
+      logger.warn('Client disconnected with invalid session ID');
+    }
+  });
+  
+  next();
+}
+
+/**
+ * GET /api/stream-updates/:sessionId
+ * Establishes an SSE connection for real-time updates
+ */
+router.get('/:sessionId', sseHeaders, (req, res) => {
+  const { sessionId } = req.params;
+  
+  // Validate session ID
+  if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
+    logger.error('Invalid session ID provided for SSE connection', { sessionId });
+    return res.status(400).json({ error: 'Invalid session ID' });
+  }
+  
+  try {
+    // Log the connection
+    logger.info(`New SSE connection established for session: ${sessionId}`);
+    
+    // Register the client
+    registerSSEClient(sessionId, res);
+    
+    // Send initial connection event
+    broadcastSSEUpdate({
+      type: 'connection',
+      message: 'SSE connection established',
+      sessionId
+    }, sessionId);
+    
+  } catch (error) {
+    logger.error(`Error establishing SSE connection: ${error.message}`, { 
+      sessionId, 
+      error: error.message 
+    });
+    res.status(500).end();
+  }
 });
 
 module.exports = router;

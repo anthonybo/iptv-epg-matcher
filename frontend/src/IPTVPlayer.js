@@ -92,8 +92,37 @@ const IPTVPlayer = ({
     if (!sessionId || !epgId) return;
     
     try {
-      log('info', `Fetching EPG data for ID: ${epgId}`);
-      const response = await fetch(`http://localhost:5001/api/epg/${sessionId}?channelId=${encodeURIComponent(epgId)}`);
+      // If epgId is an object, extract the actual ID with multiple fallbacks
+      let channelIdStr;
+      
+      if (typeof epgId === 'object') {
+        // Use multiple fallbacks for finding the ID
+        channelIdStr = epgId.epgId || epgId.id || '';
+        
+        // If we still don't have an ID but have an object, use a string representation as last resort
+        if (!channelIdStr) {
+          try {
+            channelIdStr = JSON.stringify(epgId);
+            log('warn', `Had to use JSON representation of epgId: ${channelIdStr}`);
+          } catch (err) {
+            log('error', 'Failed to stringify epgId object', { error: err.message });
+            return;
+          }
+        }
+      } else {
+        // Convert to string if it's a primitive value
+        channelIdStr = String(epgId);
+      }
+      
+      if (!channelIdStr) {
+        log('error', 'Invalid EPG ID: empty after extraction', { originalEpgId: epgId });
+        return;
+      }
+      
+      log('info', `Fetching EPG data for ID: ${channelIdStr}`);
+      
+      const response = await fetch(`http://localhost:5001/api/epg/${sessionId}?channelId=${encodeURIComponent(channelIdStr)}`);
+      
       if (response.ok) {
         const data = await response.json();
         log('info', 'EPG data received', { 
@@ -103,7 +132,8 @@ const IPTVPlayer = ({
         });
         setEpgData(data);
       } else {
-        log('error', `Failed to load EPG data: ${response.status} ${response.statusText}`);
+        const errorText = await response.text();
+        log('error', `Failed to load EPG data: ${response.status} ${response.statusText}`, { responseText: errorText });
         setEpgData(null);
       }
     } catch (error) {

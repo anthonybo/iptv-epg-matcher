@@ -71,12 +71,17 @@ function constructStreamUrl(channel, xtreamUsername, xtreamPassword, xtreamServe
  */
 function getStreamHeaders(xtreamServer) {
   return {
-    'User-Agent': 'VLC/3.0.16 LibVLC/3.0.16', // Using VLC user agent often helps
+    // Try different User-Agent that's more commonly accepted
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Referer': xtreamServer || 'http://localhost:5001/',
     'Accept': '*/*',
     'Connection': 'keep-alive',
     'Cache-Control': 'no-cache',
-    'Pragma': 'no-cache'
+    'Pragma': 'no-cache',
+    // Add these headers to improve compatibility
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Origin': xtreamServer || 'http://localhost:5001'
   };
 }
 
@@ -119,34 +124,66 @@ async function streamTs(req, res, channel, xtreamUsername, xtreamPassword, xtrea
   });
 
   try {
-    // Fetch the stream
-    const response = await fetchStream(streamUrl, headers);
-
-    // Set appropriate CORS headers - vital for browser playback
-    res.set('Access-Control-Allow-Origin', '*');
-    res.set('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Range');
-    
-    // Determine the content type - critical for browser playback
-    let contentType = response.headers.get('Content-Type');
-    if (!contentType || contentType === 'application/octet-stream') {
-      // If undefined or generic, set to video/mp2t for TS streams
-      contentType = 'video/mp2t';
+    // Fetch the stream with better error handling - directly try with node-fetch
+    try {
+      const fetch = require('node-fetch');
+      // Use direct fetch to avoid any middleware issues
+      const response = await fetch(streamUrl, { 
+        method: 'GET',
+        headers: headers,
+        timeout: 15000,
+        // Important: A lot of IPTV providers use self-signed certs
+        rejectUnauthorized: false,
+        // Redirect handling is important for IPTV providers
+        redirect: 'follow',
+        // Add more debugging info
+        compress: true
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+      }
+      
+      // Set appropriate CORS headers - vital for browser playback
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Range');
+      
+      // Determine the content type - critical for browser playback
+      let contentType = response.headers.get('Content-Type');
+      if (!contentType || contentType === 'application/octet-stream') {
+        // If undefined or generic, set to video/mp2t for TS streams
+        contentType = 'video/mp2t';
+      }
+      
+      logWithColor('success', 'Stream fetch successful', { 
+        contentType,
+        contentLength: response.headers.get('Content-Length') || 'unknown',
+        streamUrl
+      });
+      
+      // Set appropriate headers for the browser
+      res.set('Content-Type', contentType);
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      
+      // Set expiration
+      res.set('Expires', '0');
+      
+      // Pipe the stream to the response
+      response.body.pipe(res);
+    } catch (streamError) {
+      // Handle stream fetch errors gracefully
+      logWithColor('error', 'Stream fetch error', {
+        error: streamError.message,
+        streamUrl
+      });
+      
+      res.status(500).json({
+        error: 'Stream Error',
+        message: `Failed to fetch stream: ${streamError.message}`,
+        details: { streamUrl: streamUrl.replace(/\/\/.*?@/, '//<credentials>@') }
+      });
     }
-    
-    logWithColor('success', 'Stream fetch successful', { 
-      contentType,
-      contentLength: response.headers.get('Content-Length') || 'unknown',
-      streamUrl
-    });
-    
-    // Set appropriate headers for the browser
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    
-    // Pipe the stream to the client
-    response.body.pipe(res);
     
     // Handle client disconnect
     req.on('close', () => {
