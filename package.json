@@ -1,0 +1,12 @@
+{
+  "name": "iptv-epg-matcher",
+  "private": true,
+  "scripts": {
+    "start": "concurrently --names backend,frontend --prefix-colors blue,magenta \"npm run start:backend\" \"npm run start:frontend\"",
+    "start:frontend": "npm start --prefix frontend",
+    "start:backend": "npm start --prefix backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

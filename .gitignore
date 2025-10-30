@@ -62,7 +62,10 @@ backend/cache/temp/*
 *.zip
 *.xml.gz
 *.m3u
+# JSON data files (allow package manifests below)
 *.json
+!/package.json
+!/package-lock.json
 backend/uploads/*
 backend/uploads/*.xml
 backend/cache/*/*

@@ -341,7 +341,10 @@ async function downloadAndParseEpg(url, progressCallback = null) {
     const fetch = require('node-fetch');
     const logger = require('../config/logger');
     const constants = require('../config/constants');
-    const { AbortController } = require('node-fetch/externals');
+    let AbortControllerImpl = globalThis.AbortController;
+    if (!AbortControllerImpl) {
+        AbortControllerImpl = require('abort-controller');
+    }
     
     try {
         // Start download
@@ -363,7 +366,7 @@ async function downloadAndParseEpg(url, progressCallback = null) {
         const isGzipped = url.toLowerCase().endsWith('.gz');
         
         // Create abort controller with a long timeout
-        const controller = new AbortController();
+        const controller = new AbortControllerImpl();
         const timeout = setTimeout(() => {
             controller.abort();
             logger.error(`Download timeout for ${url} after ${constants.STREAM_TIMEOUT || 180000}ms`);

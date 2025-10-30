@@ -65,6 +65,17 @@ npm install
 npm start
 ```
 
+### Run Frontend and Backend Together
+
+Once dependencies are installed, install the root-level tooling (first run only) and launch both services from the project root:
+
+```bash
+npm install
+npm start
+```
+
+This command uses `concurrently` to run the backend API and the frontend dev server side by side in the same terminal, with prefixed logs for each service. Use `Ctrl+C` (or the equivalent interrupt signal) to stop both processes at once.
+
 ## Database & EPG Data
 
 The application now uses a SQLite database for efficient EPG data storage and retrieval, which significantly improves performance when handling large EPG datasets.
@@ -99,7 +110,7 @@ python epg_parser.py --source https://example.com/epg.xml.gz
 
 ## Usage
 
-1. Start both the backend and frontend servers
+1. Start both the backend and frontend servers with `npm start` in the project root
 2. Navigate to http://localhost:3000 in your browser
 3. Load your IPTV channels using one of the available methods
 4. Browse, search, and match channels with EPG data
