@@ -8,12 +8,12 @@
  * Configuration object for the application
  */
 const resolveDefaultApiUrl = () => {
-  if (process.env.REACT_APP_API_URL) {
-    return process.env.REACT_APP_API_URL;
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
   }
 
-  // In development we rely on the CRA proxy by using relative /api routes
-  if (process.env.NODE_ENV !== 'production') {
+  // In development we rely on Vite proxy by using relative /api routes
+  if (import.meta.env.DEV) {
     return '';
   }
 
@@ -27,15 +27,15 @@ const resolveDefaultApiUrl = () => {
 const config = {
   // API Base URL - Backend server
   apiUrl: resolveDefaultApiUrl(),
-  
+
   // Debug mode
-  debugMode: process.env.REACT_APP_DEBUG === 'true' || process.env.NODE_ENV !== 'production',
-  
+  debugMode: import.meta.env.VITE_DEBUG === 'true' || import.meta.env.DEV,
+
   // Environment
-  environment: process.env.NODE_ENV || 'development',
-  
+  environment: import.meta.env.MODE || 'development',
+
   // Version
-  version: process.env.REACT_APP_VERSION || '1.0.0'
+  version: import.meta.env.VITE_VERSION || '1.0.0'
 };
 
 // Export API base URL for services
@@ -55,7 +55,7 @@ export const MAX_CHANNELS_PER_PAGE = 100;
 export const DEFAULT_CATEGORY = 'all';
 
 // Debug mode
-export const DEBUG_MODE = process.env.NODE_ENV !== 'production';
+export const DEBUG_MODE = import.meta.env.DEV;
 
 // Session storage keys
 export const SESSION_ID_KEY = 'currentSessionId';

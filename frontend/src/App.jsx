@@ -6,7 +6,7 @@ import AppRoutes from './routes';
 import { ThemeProvider } from './theme/ThemeProvider';
 import { sseManager, getSessionId } from './api/apiSlice'; // Import getSessionId function
 import { Box, CircularProgress, Typography } from '@mui/material';
-import ChannelList from './components/Channels/ChannelList';
+import ChannelsView from './components/ChannelsView';
 import LoadData from './pages/LoadData/LoadData';
 import { getCurrentSession, setCurrentSession } from './services/ApiService';
 import SimpleCategories from './SimpleCategories'; // Import the new component
@@ -72,7 +72,7 @@ function App() {
           <Router>
             <Routes>
               <Route path="/" element={<LoadData onSessionUpdate={updateSessionId} />} />
-              <Route path="/channels" element={<ChannelList page={1} limit={1000} />} />
+              <Route path="/channels" element={<ChannelsView sessionId={sessionId} />} />
               <Route path="/categories" element={<SimpleCategories />} />
             </Routes>
           </Router>

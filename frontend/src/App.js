@@ -4,6 +4,17 @@ import React, { useState, useEffect } from 'react';
 import apiClient from './utils/apiClient';
 import SessionManager from './utils/sessionManager';
 import { API_BASE_URL } from './config';
+// Import modular components
+import Sidebar from './Sidebar';
+import Configuration from './Configuration';
+import CategoryManager from './CategoryManager';
+import ChannelList from './ChannelList';
+import ChannelsView from './components/ChannelsView';
+import PlayerView from './PlayerView';
+import ResultView from './ResultView';
+import SessionDebugger from './components/SessionDebugger';
+import DirectEpgSourcesLoader from './DirectEpgSourcesLoader';
+import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 
 const resolveApiBase = () => {
   if (API_BASE_URL) {
@@ -16,17 +27,6 @@ const resolveApiBase = () => {
 
   return 'http://localhost:5001';
 };
-
-// Import modular components
-import Sidebar from './Sidebar';
-import Configuration from './Configuration';
-import CategoryManager from './CategoryManager';
-import ChannelList from './ChannelList';
-import PlayerView from './PlayerView';
-import ResultView from './ResultView';
-import SessionDebugger from './components/SessionDebugger';
-import DirectEpgSourcesLoader from './DirectEpgSourcesLoader';
-import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 
 /**
  * Main application component with modernized UI and modular architecture
@@ -811,128 +811,12 @@ function App() {
         );
       case 'channels':
         return (
-          <div style={{ padding: '20px' }}>
-            <SessionDebugger />
-            
-            {/* Add emergency category display for debugging */}
-            <button
-              onClick={() => {
-                console.log('[DEBUG] Session information:', {
-                  appSessionId: sessionId,
-                  sessionManagerId: SessionManager.getSessionId(),
-                  categoriesLength: categories?.length || 0,
-                  categoriesType: typeof categories
-                });
-                setShowEmergencyCategories(!showEmergencyCategories);
-              }}
-              style={{
-                backgroundColor: '#ff9800',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                padding: '8px 12px',
-                margin: '10px 0',
-                cursor: 'pointer'
-              }}
-            >
-              {showEmergencyCategories ? 'Hide' : 'Show'} Emergency Category Display
-            </button>
-            
-            {showEmergencyCategories && <EmergencyCategoryDisplay />}
-
-            {/* Debug log for categories */}
-            {console.log('[App.renderActiveTabContent] Categories being passed to CategoryManager:', {
-              count: categories?.length || 0, 
-              isEmpty: categories?.length === 0,
-              isArray: Array.isArray(categories),
-              sample: categories?.slice(0, 3),
-              type: typeof categories
-            })}
-            <h2 style={{
-              marginTop: 0,
-              color: '#333',
-              fontWeight: '500',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between'
-            }}>
-              <span>Channels</span>
-
-              <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                <div style={{
-                  fontSize: '14px',
-                  color: '#666',
-                  backgroundColor: '#f5f5f5',
-                  padding: '5px 10px',
-                  borderRadius: '30px'
-                }}>
-                  {channels.filter(ch => !hiddenCategories.includes(ch.groupTitle)).length} of {totalChannels} channels
-                </div>
-
-                {selectedCategory && (
-                  <button
-                    onClick={() => { setSelectedCategory(null); handleCategorySelect(null); }}
-                    style={{
-                      padding: '6px 12px',
-                      backgroundColor: '#f5f5f5',
-                      color: '#333',
-                      border: '1px solid #ddd',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      fontSize: '14px'
-                    }}
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-                      <polyline points="9 22 9 12 15 12 15 22"></polyline>
-                    </svg>
-                    Show All
-                  </button>
-                )}
-              </div>
-            </h2>
-
-            <div style={{ display: 'flex', gap: '20px' }}>
-              {/* Categories */}
-              <div style={{ width: '250px' }}>
-                {showEmergencyCategories ? (
-                  <DirectCategoryManager
-                    onCategorySelect={handleCategorySelect}
-                    onVisibilityChange={handleCategoryVisibilityChange}
-                    hiddenCategories={hiddenCategories}
-                    selectedCategory={selectedCategory}
-                    sessionId={sessionId || SessionManager.getSessionId()}
-                  />
-                ) : (
-                  <CategoryManagerWithFallback
-                    categories={categories || []}
-                    onCategorySelect={handleCategorySelect}
-                    onVisibilityChange={handleCategoryVisibilityChange}
-                    hiddenCategories={hiddenCategories}
-                    selectedCategory={selectedCategory}
-                    sessionId={sessionId || SessionManager.getSessionId()}
-                  />
-                )}
-              </div>
-              
-              {/* Channel list */}
-              <ChannelList 
-                channels={channels} 
-                totalChannels={totalChannels}
-                onChannelSelect={handleChannelSelect}
-                selectedChannel={selectedChannel}
-                matchedChannels={matchedChannels}
-                hiddenCategories={hiddenCategories}
-                selectedCategory={selectedCategory}
-                sessionId={sessionId}
-                isLoading={isLoading}
-                loadMoreChannels={loadMoreChannels}
-              />
-            </div>
-          </div>
+          <ChannelsView
+            sessionId={sessionId}
+            onChannelSelect={handleChannelSelect}
+            selectedChannel={selectedChannel}
+            matchedChannels={matchedChannels}
+          />
         );
       case 'epg':
         return (
