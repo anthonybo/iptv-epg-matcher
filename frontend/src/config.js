@@ -7,12 +7,29 @@
 /**
  * Configuration object for the application
  */
+const resolveDefaultApiUrl = () => {
+  if (process.env.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL;
+  }
+
+  // In development we rely on the CRA proxy by using relative /api routes
+  if (process.env.NODE_ENV !== 'production') {
+    return '';
+  }
+
+  if (typeof window !== 'undefined' && window.location) {
+    return `${window.location.protocol}//${window.location.host}`;
+  }
+
+  return '';
+};
+
 const config = {
   // API Base URL - Backend server
-  apiUrl: process.env.REACT_APP_API_URL || 'http://localhost:5001',
+  apiUrl: resolveDefaultApiUrl(),
   
   // Debug mode
-  debugMode: process.env.REACT_APP_DEBUG === 'true' || true,
+  debugMode: process.env.REACT_APP_DEBUG === 'true' || process.env.NODE_ENV !== 'production',
   
   // Environment
   environment: process.env.NODE_ENV || 'development',

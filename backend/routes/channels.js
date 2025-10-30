@@ -179,12 +179,27 @@ router.get('/:sessionId/categories', (req, res) => {
     const session = sessionStorage.getSession(sessionId);
     
     if (!session || !session.data || !session.data.categories) {
-      return res.status(404).json({ 
-        error: 'Categories not found', 
-        message: 'No categories found for this session'
+    // Try to synthesize categories from cached channels before failing 
+    const inferredCategories = generateCategories(session?.data?.channels || []);
+    if (inferredCategories.length > 0) {
+      logger.info(`Synthesized ${inferredCategories.length} categories for session ${sessionId} from cached channels`);
+      sessionStorage.updateSession(sessionId, {
+        data: {
+          ...(session?.data || {}),
+          categories: inferredCategories
+        }
       });
+      return res.json(inferredCategories);
     }
-    
+
+    logger.warn(`No categories present for session ${sessionId}`);
+    return res.status(200).json({
+      categories: [],
+      channelCount: session?.data?.channels?.length || 0,
+      message: 'Categories not yet available for this session'
+    });
+  }
+  
     // Ensure categories are in the expected format
     const rawCategories = session.data.categories;
     let formattedCategories;

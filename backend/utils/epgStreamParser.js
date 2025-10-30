@@ -13,6 +13,7 @@ const { pipeline } = require('stream/promises');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const { promisify } = require('util');
+const https = require('https');
 const constants = require('../config/constants');
 
 /**
@@ -55,15 +56,47 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
         };
         
         // Create a read stream from the file
-        let readStream = fs.createReadStream(filePath, {
+        const fileStream = fs.createReadStream(filePath, {
             highWaterMark: constants.STREAM_PARSER_BUFFER_SIZE || 16 * 1024 // Configurable buffer size
         });
-        
+
+        const cleanupStreams = () => {
+            fileStream.off('error', handleStreamError);
+            if (gunzipStream) {
+                gunzipStream.off('error', handleStreamError);
+            }
+        };
+
+        let hasErrored = false;
+        const handleStreamError = (err) => {
+            if (hasErrored) {
+                return;
+            }
+            hasErrored = true;
+            cleanupStreams();
+            try {
+                fileStream.destroy();
+            } catch (_) {}
+            if (gunzipStream) {
+                try {
+                    gunzipStream.destroy();
+                } catch (_) {}
+            }
+            logger.error(`Stream error while reading ${filePath}: ${err.message}`);
+            reject(err);
+        };
+
+        fileStream.on('error', handleStreamError);
+
         // If gzipped, pipe through zlib decompression
+        let readStream = fileStream;
+        let gunzipStream = null;
         if (isGzipped) {
-            readStream = readStream.pipe(zlib.createGunzip({
+            gunzipStream = zlib.createGunzip({
                 chunkSize: constants.STREAM_PARSER_BUFFER_SIZE || 16 * 1024
-            }));
+            });
+            gunzipStream.on('error', handleStreamError);
+            readStream = fileStream.pipe(gunzipStream);
         }
         
         // SAX parser configuration
@@ -260,6 +293,7 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
         
         // Handle end of document
         parser.on('end', () => {
+            cleanupStreams();
             // Process any remaining programs
             processProgramBatch();
             
@@ -323,7 +357,7 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
         // Handle errors
         parser.on('error', (err) => {
             logger.error(`XML parsing error: ${err.message}`);
-            reject(err);
+            handleStreamError(err);
         });
         
         // Start parsing
@@ -340,12 +374,20 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
 async function downloadAndParseEpg(url, progressCallback = null) {
     const fetch = require('node-fetch');
     const logger = require('../config/logger');
-    const constants = require('../config/constants');
     let AbortControllerImpl = globalThis.AbortController;
     if (!AbortControllerImpl) {
         AbortControllerImpl = require('abort-controller');
     }
+
+    const insecureHosts = constants.INSECURE_EPG_SOURCES || [];
+    let httpsAgent;
+    if (insecureHosts.some((host) => host && url.includes(host))) {
+        httpsAgent = new https.Agent({ rejectUnauthorized: false });
+        logger.warn(`Skipping TLS verification for ${url}`);
+    }
     
+    let tempFile = null;
+
     try {
         // Start download
         logger.info(`Starting streaming download of ${url}`);
@@ -360,7 +402,7 @@ async function downloadAndParseEpg(url, progressCallback = null) {
         }
         
         // Create temp file for storing download
-        const tempFile = createTempFile();
+        tempFile = createTempFile();
         
         // Detect if URL ends with .gz to determine if gzipped
         const isGzipped = url.toLowerCase().endsWith('.gz');
@@ -380,7 +422,8 @@ async function downloadAndParseEpg(url, progressCallback = null) {
                 'Accept-Encoding': 'gzip, deflate'
             },
             signal: controller.signal,
-            compress: true // Allow automatic compression handling
+            compress: true, // Allow automatic compression handling
+            agent: httpsAgent
         });
         
         // Clear timeout as fetch completed
@@ -500,20 +543,43 @@ async function downloadAndParseEpg(url, progressCallback = null) {
         }
         
         logger.info(`Download complete, parsing EPG data from ${tempFile.path}`);
-        
-        // Now parse the downloaded file using streaming
-        const result = await parseEpgStream(tempFile.path, isActuallyGzipped, (parseProgress) => {
-            if (progressCallback) {
-                // Map parse progress to overall progress (30-95%)
-                const scaledPercent = 30 + Math.floor((parseProgress.percent || 0) * 0.65);
-                
-                progressCallback({
-                    ...parseProgress,
-                    percent: Math.min(scaledPercent, 95)
+
+        const gzipRecoverableError = /(incorrect header check|invalid stored block lengths|unexpected end of file)/i;
+        let result;
+        try {
+            // Now parse the downloaded file using streaming
+            result = await parseEpgStream(tempFile.path, isActuallyGzipped, (parseProgress) => {
+                if (progressCallback) {
+                    const progressData = parseProgress || {};
+                    // Map parse progress to overall progress (30-95%)
+                    const scaledPercent = 30 + Math.floor((progressData.percent || 0) * 0.65);
+
+                    progressCallback({
+                        ...progressData,
+                        percent: Math.min(scaledPercent, 95)
+                    });
+                }
+            });
+        } catch (parseError) {
+            if (isActuallyGzipped && gzipRecoverableError.test(parseError.message || '')) {
+                logger.warn(`Failed to parse ${url} as gzip (${parseError.message}). Retrying as plain XML.`);
+                result = await parseEpgStream(tempFile.path, false, (parseProgress) => {
+                    if (progressCallback) {
+                        const progressData = parseProgress || {};
+                        const scaledPercent = 30 + Math.floor((progressData.percent || 0) * 0.65);
+
+                        progressCallback({
+                            ...progressData,
+                            percent: Math.min(scaledPercent, 95),
+                            message: `Retrying parse without gzip: ${progressData.message || ''}`.trim()
+                        });
+                    }
                 });
+            } else {
+                throw parseError;
             }
-        });
-        
+        }
+
         // Report completion
         if (progressCallback) {
             // Calculate total program count
@@ -530,7 +596,7 @@ async function downloadAndParseEpg(url, progressCallback = null) {
             } else {
                 programCount = result.programs.length;
             }
-            
+
             progressCallback({
                 stage: 'complete',
                 percent: 100,
@@ -543,7 +609,7 @@ async function downloadAndParseEpg(url, progressCallback = null) {
                 }
             });
         }
-        
+
         // Clean up temp file
         try {
             fs.unlinkSync(tempFile.path);
@@ -551,13 +617,19 @@ async function downloadAndParseEpg(url, progressCallback = null) {
         } catch (cleanupError) {
             logger.warn(`Failed to clean up temporary file: ${cleanupError.message}`);
         }
-        
+
         return result;
     } catch (error) {
         logger.error(`Failed to download and parse EPG: ${error.message}`, { 
             stack: error.stack,
             url
         });
+
+        try {
+            if (tempFile && tempFile.path && fs.existsSync(tempFile.path)) {
+                fs.unlinkSync(tempFile.path);
+            }
+        } catch (_) {}
         
         if (progressCallback) {
             progressCallback({

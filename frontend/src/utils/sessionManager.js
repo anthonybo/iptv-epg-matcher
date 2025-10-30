@@ -10,6 +10,7 @@ const SessionManager = {
     _validationAttempts: {},
     _maxValidationAttempts: 3,
     _validationCooldown: 10000, // 10 seconds
+    _pendingRequest: null,
 
     /**
      * Get the current session ID from localStorage
@@ -52,10 +53,14 @@ const SessionManager = {
         // If no session or invalid format, create a new one
         if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
           console.log('[SessionManager] No valid session found, creating new one');
-          
-          // Try to create a new session
+
+          // Serialise concurrent creation attempts
+          if (!SessionManager._pendingRequest) {
+            SessionManager._pendingRequest = axios.post(`${API_BASE_URL}/api/session/create`);
+          }
+
           try {
-            const response = await axios.post(`${API_BASE_URL}/api/session/create`);
+            const response = await SessionManager._pendingRequest;
             
             if (response.data && response.data.sessionId) {
               sessionId = response.data.sessionId;
@@ -72,6 +77,7 @@ const SessionManager = {
             SessionManager.saveSessionId(sessionId);
             console.log(`[SessionManager] Created fallback client-side session: ${sessionId}`);
           }
+          SessionManager._pendingRequest = null;
         } else {
           // Validate existing session
           console.log(`[SessionManager] Validating existing session: ${sessionId}`);
@@ -81,8 +87,12 @@ const SessionManager = {
             console.log(`[SessionManager] Session ${sessionId} is invalid, creating new one`);
             
             // Try to create a new session
+            if (!SessionManager._pendingRequest) {
+              SessionManager._pendingRequest = axios.post(`${API_BASE_URL}/api/session/create`);
+            }
+
             try {
-              const response = await axios.post(`${API_BASE_URL}/api/session/create`);
+              const response = await SessionManager._pendingRequest;
               
               if (response.data && response.data.sessionId) {
                 sessionId = response.data.sessionId;
@@ -99,12 +109,14 @@ const SessionManager = {
               SessionManager.saveSessionId(sessionId);
               console.log(`[SessionManager] Created fallback client-side session: ${sessionId}`);
             }
+            SessionManager._pendingRequest = null;
           }
         }
         
         // Try to register session with the backend
         try {
-          await axios.post(`${API_BASE_URL}/api/session/register`, { sessionId });
+          const baseUrl = resolveApiBase();
+          await axios.post(`${baseUrl}/api/session/register`, { sessionId });
           console.log(`[SessionManager] Registered session with backend: ${sessionId}`);
         } catch (registerError) {
           console.warn('[SessionManager] Failed to register session with backend:', registerError);
@@ -219,7 +231,8 @@ const SessionManager = {
       console.log(`[SessionManager] Validating session: ${sessionId} (attempt ${validationInfo.count + 1})`);
       
       try {
-        const response = await axios.get(`${API_BASE_URL}/api/status/session/${sessionId}`);
+        const baseUrl = resolveApiBase();
+        const response = await axios.get(`${baseUrl}/api/status/session/${sessionId}`);
         const isValid = response.data && response.data.valid;
         
         console.log(`[SessionManager] Session validation result for ${sessionId}: ${isValid ? 'valid' : 'invalid'}`);
@@ -290,3 +303,14 @@ const SessionManager = {
   };
   
   export default SessionManager;
+const resolveApiBase = () => {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:5001`;
+  }
+
+  return 'http://localhost:5001';
+};

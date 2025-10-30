@@ -45,9 +45,33 @@ const LoadingProgress = ({
         addLog(`Setting up event stream for session: ${currentSessionId}`);
         
         // Set up event source for Server-Sent Events
-        const evtSource = new EventSource(`${API_BASE_URL}/api/events/${currentSessionId}`);
+        const resolveApiBase = () => {
+            if (API_BASE_URL) {
+                return API_BASE_URL;
+            }
+
+            if (typeof window !== 'undefined') {
+                return `${window.location.protocol}//${window.location.hostname}:5001`;
+            }
+
+            return 'http://localhost:5001';
+        };
+
+        const baseUrl = resolveApiBase();
+        const evtSource = new EventSource(`${baseUrl}/api/stream-updates/${currentSessionId}`);
         eventSourceRef.current = evtSource;
         
+        const handleEvent = (eventType, rawData) => {
+            try {
+                const payload = rawData ? JSON.parse(rawData) : {};
+                const data = { ...payload, type: eventType };
+                handleEventData(data);
+            } catch (err) {
+                console.error('[LoadingProgress] Error parsing SSE message:', err, rawData);
+                addLog(`Error parsing server message: ${err.message}`);
+            }
+        };
+
         // Event handler for when connection opens
         evtSource.onopen = () => {
             console.log('[LoadingProgress] SSE Connection opened');
@@ -77,28 +101,25 @@ const LoadingProgress = ({
                     eventSourceRef.current.close();
                     
                     // Create a new connection
-                    const newEvtSource = new EventSource(`${API_BASE_URL}/api/events/${currentSessionId}`);
+                    const newEvtSource = new EventSource(`${baseUrl}/api/stream-updates/${currentSessionId}`);
                     eventSourceRef.current = newEvtSource;
                     
-                    // Set up handlers for the new connection
                     newEvtSource.onopen = evtSource.onopen;
-                    newEvtSource.onmessage = evtSource.onmessage;
                     newEvtSource.onerror = evtSource.onerror;
+                    const newNamedEvents = ['progress', 'complete', 'error', 'channels_available', 'channels-available', 'epg_source_available', 'epg-source-available', 'register'];
+                    newNamedEvents.forEach(eventType => {
+                        newEvtSource.addEventListener(eventType, (event) => handleEvent(eventType, event.data));
+                    });
+                    newEvtSource.onmessage = (event) => handleEvent('message', event.data);
                 }
             }, 5000);
         };
-        
-        // Event handler for incoming messages
-        evtSource.onmessage = (e) => {
-            try {
-                // Parse the incoming data
-                const data = JSON.parse(e.data);
-                handleEventData(data);
-            } catch (err) {
-                console.error('[LoadingProgress] Error parsing SSE message:', err, e.data);
-                addLog(`Error parsing server message: ${err.message}`);
-            }
-        };
+
+        const namedEvents = ['progress', 'complete', 'error', 'channels_available', 'channels-available', 'epg_source_available', 'epg-source-available', 'register'];
+        namedEvents.forEach(eventType => {
+            evtSource.addEventListener(eventType, (event) => handleEvent(eventType, event.data));
+        });
+        evtSource.onmessage = (event) => handleEvent('message', event.data);
         
         // Cleanup function to close the event source when unmounting
         return () => {
@@ -109,6 +130,26 @@ const LoadingProgress = ({
         };
     }, [sessionId]);
 
+    const toNumericProgress = (value) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric)) : 0;
+    };
+
+    const updateProgress = (data) => {
+        const numericProgress =
+            data.progress !== undefined
+                ? toNumericProgress(data.progress)
+                : data.percentage !== undefined
+                    ? toNumericProgress(data.percentage)
+                    : data.percent !== undefined
+                        ? toNumericProgress(data.percent)
+                        : progress; // retain previous if nothing provided
+
+        setProgress(numericProgress);
+        setStatus(data.message || data.stage || 'Processing...');
+        addLog(data.message || data.stage || 'Progress update received');
+    };
+
     // Handle different types of event data
     const handleEventData = (data) => {
         console.log('[LoadingProgress] Received event data:', data);
@@ -116,10 +157,7 @@ const LoadingProgress = ({
         // Handle different event types
         switch (data.type) {
             case 'progress':
-                // Update progress percentage
-                setProgress(data.percentage || 0);
-                setStatus(data.message || 'Processing...');
-                addLog(data.message || 'Progress update received');
+                updateProgress(data);
                 break;
                 
             case 'complete':
@@ -151,8 +189,9 @@ const LoadingProgress = ({
                 break;
                 
             case 'channels-available':
+            case 'channels_available':
                 // Channels are available
-                addLog(`Channels available: ${data.count} channels`);
+                addLog(`Channels available: ${data.channelCount || data.count || 0} channels`);
                 
                 // Call the onChannelsAvailable callback
                 if (onChannelsAvailable && typeof onChannelsAvailable === 'function') {
@@ -161,6 +200,7 @@ const LoadingProgress = ({
                 break;
                 
             case 'epg-source-available':
+            case 'epg_source_available':
                 // EPG source is available
                 addLog(`EPG source available: ${data.url || 'Unknown URL'}`);
                 
@@ -170,6 +210,28 @@ const LoadingProgress = ({
                 }
                 break;
                 
+            case 'message':
+                // Default (unnamed) SSE events come through as "message"
+                if (data.progress !== undefined || data.percentage !== undefined || data.percent !== undefined) {
+                    updateProgress(data);
+                } else if (data.stage) {
+                    if (data.stage === 'complete') {
+                        updateProgress({ ...data, progress: 100 });
+                    } else {
+                        addLog(data.message || `Stage update: ${data.stage}`);
+                        setStatus(data.message || data.stage);
+                    }
+                } else if (data.message) {
+                    addLog(data.message);
+                    if (data.message.toLowerCase().includes('completed')) {
+                        updateProgress({ ...data, progress: 100 });
+                        setStatus(data.message);
+                    }
+                } else {
+                    addLog('Received server message event');
+                }
+                break;
+
             default:
                 // Unknown event type
                 addLog(`Unknown event type: ${data.type}`);
@@ -184,35 +246,112 @@ const LoadingProgress = ({
     };
 
     return (
-        <div className="loading-progress">
-            <h3>{status}</h3>
-            
-            {/* Progress bar */}
-            <div className="progress-bar-container">
-                <div 
-                    className="progress-bar" 
-                    style={{ width: `${progress}%` }}
-                ></div>
-                <div className="progress-text">{progress.toFixed(0)}%</div>
+        <div
+            style={{
+                background: 'linear-gradient(135deg, #1e293b, #0f172a)',
+                color: '#e2e8f0',
+                borderRadius: '16px',
+                padding: '24px',
+                margin: '24px 0',
+                boxShadow: '0 30px 60px rgba(15, 23, 42, 0.35)',
+                border: '1px solid rgba(148, 163, 184, 0.25)',
+                maxWidth: '900px'
+            }}
+        >
+            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+                <div>
+                    <div style={{ fontSize: '14px', opacity: 0.7 }}>Session</div>
+                    <div style={{ fontSize: '16px', fontWeight: 600 }}>{sessionId || SessionManager.getSessionId() || 'Unknown session'}</div>
+                </div>
+                <div style={{
+                    minWidth: '120px',
+                    background: 'rgba(15, 118, 110, 0.15)',
+                    border: '1px solid rgba(45, 212, 191, 0.35)',
+                    color: '#5eead4',
+                    padding: '6px 14px',
+                    borderRadius: '40px',
+                    fontSize: '13px',
+                    textAlign: 'center'
+                }}>
+                    {progress.toFixed(0)}% complete
+                </div>
+            </header>
+
+            <div style={{
+                background: 'rgba(15, 23, 42, 0.6)',
+                borderRadius: '12px',
+                padding: '18px',
+                marginBottom: '20px',
+                border: '1px solid rgba(148, 163, 184, 0.25)'
+            }}>
+                <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px' }}>{status}</div>
+                <div style={{
+                    position: 'relative',
+                    height: '10px',
+                    borderRadius: '999px',
+                    background: 'rgba(148, 163, 184, 0.25)'
+                }}>
+                    <div
+                        style={{
+                            width: `${progress}%`,
+                            height: '100%',
+                            borderRadius: '999px',
+                            background: 'linear-gradient(90deg, #22d3ee, #38bdf8)',
+                            transition: 'width 250ms ease'
+                        }}
+                    />
+                </div>
             </div>
-            
-            {/* Error message */}
+
             {error && (
-                <div className="error-message">
-                    <p>Error: {error}</p>
+                <div style={{
+                    background: 'rgba(254, 226, 226, 0.15)',
+                    border: '1px solid rgba(248, 113, 113, 0.45)',
+                    color: '#fecaca',
+                    padding: '12px 16px',
+                    borderRadius: '10px',
+                    marginBottom: '18px'
+                }}>
+                    Error: {error}
                 </div>
             )}
-            
-            {/* Logs */}
-            <div className="logs-container">
-                <h4>Processing Logs</h4>
-                <div className="logs">
+
+            <section style={{
+                background: 'rgba(15, 23, 42, 0.55)',
+                borderRadius: '12px',
+                padding: '18px',
+                border: '1px solid rgba(148, 163, 184, 0.25)'
+            }}>
+                <div style={{
+                    fontSize: '13px',
+                    letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    color: 'rgba(226, 232, 240, 0.65)',
+                    marginBottom: '12px'
+                }}>
+                    Processing Logs
+                </div>
+                <div
+                    style={{
+                        maxHeight: '220px',
+                        overflowY: 'auto',
+                        fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                        fontSize: '12px',
+                        lineHeight: 1.6,
+                        background: 'rgba(15, 23, 42, 0.55)',
+                        borderRadius: '10px',
+                        padding: '12px 14px',
+                        border: '1px solid rgba(148, 163, 184, 0.15)'
+                    }}
+                >
                     {logs.map((log, index) => (
-                        <div key={index} className="log-entry">{log}</div>
+                        <div key={index} style={{ marginBottom: '6px', color: 'rgba(226, 232, 240, 0.85)' }}>
+                            {log}
+                        </div>
                     ))}
                     <div ref={logsEndRef} />
                 </div>
-            </div>
+            </section>
         </div>
     );
 };

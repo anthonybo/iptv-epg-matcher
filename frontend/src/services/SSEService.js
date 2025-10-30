@@ -65,6 +65,18 @@ function getConnectionStatus() {
  * @param {string} sessionId - The session ID to register
  * @returns {Promise<boolean>} - Promise resolving to true if registration was successful
  */
+const resolveApiBase = () => {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:5001`;
+  }
+
+  return 'http://localhost:5001';
+};
+
 async function registerSession(sessionId) {
   if (!sessionId) {
     console.error('[SSEService] Cannot register without a session ID');
@@ -73,7 +85,8 @@ async function registerSession(sessionId) {
   
   try {
     console.log(`[SSEService] Registering session: ${sessionId}`);
-    const response = await axios.post(`${API_BASE_URL}/api/session/register`, { sessionId });
+    const baseUrl = resolveApiBase();
+    const response = await axios.post(`${baseUrl}/api/session/register`, { sessionId });
     
     if (response.status === 200 && response.data.success) {
       console.log(`[SSEService] Successfully registered session: ${sessionId}`);
@@ -170,11 +183,44 @@ function setupSSE(sessionId) {
     updateConnectionStatus('connecting');
     
     // Create a new EventSource
-    const url = `${API_BASE_URL}/api/events/${sessionId}`;
+    const baseUrl = resolveApiBase();
+    const url = `${baseUrl}/api/stream-updates/${sessionId}`;
     console.log(`[SSEService] Connecting to: ${url}`);
     
     eventSource = new EventSource(url);
-    
+
+    const handleEvent = (eventType, rawData) => {
+      try {
+        const payload = rawData ? JSON.parse(rawData) : {};
+        const data = { ...payload, type: eventType };
+
+        if (eventType && listeners[eventType]) {
+          listeners[eventType].forEach(callback => {
+            try {
+              callback(data);
+            } catch (callbackError) {
+              console.error(`[SSEService] Error in listener callback for ${eventType}:`, callbackError);
+            }
+          });
+        }
+
+        window.dispatchEvent(new CustomEvent('sseMessage', {
+          detail: {
+            type: eventType,
+            data
+          }
+        }));
+
+        if (eventType === 'complete') {
+          window.dispatchEvent(new CustomEvent('sseComplete', {
+            detail: data
+          }));
+        }
+      } catch (parseError) {
+        console.error('[SSEService] Error parsing event data:', parseError, rawData);
+      }
+    };
+
     // Set up event handlers
     eventSource.onopen = () => {
       console.log('[SSEService] Connection opened successfully');
@@ -189,26 +235,14 @@ function setupSSE(sessionId) {
       // Handle reconnection
       handleConnectionError();
     };
-    
+
+    const namedEvents = ['progress', 'complete', 'error', 'channels_available', 'channels-available', 'epg_source_available', 'epg-source-available', 'register'];
+    namedEvents.forEach(eventType => {
+      eventSource.addEventListener(eventType, (event) => handleEvent(eventType, event.data));
+    });
+
     eventSource.onmessage = (event) => {
-      // Generic message handler
-      try {
-        const data = JSON.parse(event.data);
-        console.log(`[SSEService] Received message: ${data.type}`, data);
-        
-        // Dispatch to specific listeners
-        if (data.type && listeners[data.type]) {
-          listeners[data.type].forEach(callback => {
-            try {
-              callback(data);
-            } catch (callbackError) {
-              console.error(`[SSEService] Error in listener callback for ${data.type}:`, callbackError);
-            }
-          });
-        }
-      } catch (parseError) {
-        console.error('[SSEService] Error parsing event data:', parseError, event.data);
-      }
+      handleEvent('message', event.data);
     };
 
     return eventSource;

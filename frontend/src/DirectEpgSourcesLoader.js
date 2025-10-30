@@ -5,7 +5,7 @@ import SessionManager from './utils/sessionManager';
  * Component to directly load and display EPG sources
  * This component handles its own state and API calls
  */
-const DirectEpgSourcesLoader = () => {
+const DirectEpgSourcesLoader = ({ hideSourceList = false }) => {
   const [epgSources, setEpgSources] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -461,30 +461,36 @@ const DirectEpgSourcesLoader = () => {
       backgroundColor: '#e8f5e9'
     }}>
       {header}
-      <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
-        {epgSources.map((source, index) => (
-          <div key={index} style={{
-            padding: '6px 10px',
-            backgroundColor: 'white',
-            borderRadius: '4px',
-            marginBottom: '5px',
-            border: '1px solid #e0e0e0',
-            fontSize: '14px'
-          }}>
-            <strong>{source.name || 'Unnamed Source'}</strong>
-            {source.url && (
-              <div style={{ 
-                fontSize: '12px', 
-                color: '#666',
-                marginTop: '4px',
-                wordBreak: 'break-all'
-              }}>
-                {source.url}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
+      {hideSourceList ? (
+        <div style={{ fontSize: '13px', color: '#4b5563', marginTop: '8px' }}>
+          Manage your EPG sources with the actions above. Use the summary panel to review current sources.
+        </div>
+      ) : (
+        <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+          {epgSources.map((source, index) => (
+            <div key={index} style={{
+              padding: '6px 10px',
+              backgroundColor: 'white',
+              borderRadius: '4px',
+              marginBottom: '5px',
+              border: '1px solid #e0e0e0',
+              fontSize: '14px'
+            }}>
+              <strong>{source.name || 'Unnamed Source'}</strong>
+              {source.url && (
+                <div style={{ 
+                  fontSize: '12px', 
+                  color: '#666',
+                  marginTop: '4px',
+                  wordBreak: 'break-all'
+                }}>
+                  {source.url}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

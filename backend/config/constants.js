@@ -27,6 +27,11 @@ module.exports = {
         'https://i.mjh.nz/PlutoTV/us.xml.gz'
     ],
 
+    // Hosts with problematic TLS certificates
+    INSECURE_EPG_SOURCES: [
+        'strongepg.ip-ddns.com'
+    ],
+
     // Stream settings
     STREAM_TIMEOUT: 30000, // 30 seconds - increased from 15
 

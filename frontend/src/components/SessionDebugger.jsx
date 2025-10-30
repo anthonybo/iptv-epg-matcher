@@ -1,275 +1,309 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { API_BASE_URL } from '../config';
 
-const SessionDebugger = () => {
+const overlayStyle = {
+  position: 'fixed',
+  inset: 0,
+  background: 'rgba(15, 23, 42, 0.55)',
+  zIndex: 1300,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center'
+};
+
+const modalStyle = {
+  width: 'min(960px, 94vw)',
+  maxHeight: '92vh',
+  background: '#ffffff',
+  borderRadius: '16px',
+  boxShadow: '0 24px 80px rgba(15, 23, 42, 0.25)',
+  overflow: 'hidden',
+  display: 'flex',
+  flexDirection: 'column'
+};
+
+const headerStyle = {
+  padding: '20px 26px',
+  background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
+  color: '#ffffff',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between'
+};
+
+const bodyStyle = {
+  padding: '24px',
+  overflowY: 'auto',
+  flex: 1,
+  background: '#f8fafc'
+};
+
+const footerStyle = {
+  padding: '18px 24px',
+  borderTop: '1px solid rgba(148, 163, 184, 0.25)',
+  background: '#ffffff',
+  display: 'flex',
+  gap: '12px',
+  flexWrap: 'wrap'
+};
+
+const cardStyle = {
+  padding: '18px',
+  borderRadius: '12px',
+  background: '#ffffff',
+  boxShadow: '0 14px 36px rgba(15, 23, 42, 0.08)'
+};
+
+const resolveApiBase = () => {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:5001`;
+  }
+
+  return 'http://localhost:5001';
+};
+
+const SessionDebugger = ({ isOpen, onClose }) => {
   const [sessionInfo, setSessionInfo] = useState({
-    fromProps: null,
     fromLocalStorage: null,
     fromSessionManager: null,
-    fromWindow: null,
-    fromAPI: null
+    fromWindow: null
   });
   const [categoriesCount, setCategoriesCount] = useState(0);
-  const [apiResponse, setApiResponse] = useState(null);
+  const [apiResponse, setApiResponse] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const activeSessionId = useMemo(() => (
+    sessionInfo.fromSessionManager || sessionInfo.fromLocalStorage || sessionInfo.fromWindow || ''
+  ), [sessionInfo]);
+
   useEffect(() => {
-    // Collection of session ID from multiple sources
-    const getSessions = async () => {
+    if (!isOpen) {
+      return () => {};
+    }
+
+    let isMounted = true;
+
+    const gatherSessionInfo = async () => {
       try {
-        // 1. From localStorage directly
-        const fromLocalStorage = localStorage.getItem('currentSessionId') || 
-                                 localStorage.getItem('sessionId');
-        
-        // 2. From window.sessionManager if it exists
-        const fromWindow = window.sessionManager?.getCurrentSession?.() || null;
-        
-        // 3. From the SessionManager module if imported properly
+        const fromLocalStorage = localStorage.getItem('currentSessionId') || localStorage.getItem('sessionId');
+
         let fromSessionManager = null;
         try {
-          // Dynamic import to avoid circular dependencies
           const SessionManagerModule = await import('../utils/sessionManager');
           fromSessionManager = SessionManagerModule.default.getSessionId();
-          console.log('[DEBUG] Session from SessionManager:', fromSessionManager);
-        } catch (e) {
-          console.error('[DEBUG] Error getting session from SessionManager:', e);
+        } catch (moduleError) {
+          console.error('[SessionDebugger] Unable to load SessionManager:', moduleError);
         }
 
-        setSessionInfo({
-          fromProps: null, // Will be updated if passed as prop
-          fromLocalStorage,
-          fromSessionManager,
-          fromWindow
-        });
+        const fromWindow = window.sessionManager?.getCurrentSession?.() || null;
 
-        // If we have a session ID from any source, try to fetch categories
-        const activeSessionId = fromSessionManager || fromLocalStorage || fromWindow;
-        
-        if (activeSessionId) {
-          try {
-            console.log(`[DEBUG] Attempting to fetch categories with session: ${activeSessionId}`);
-            const response = await fetch(`${API_BASE_URL}/api/channels/${activeSessionId}/categories`);
-            console.log(`[DEBUG] Categories API response status: ${response.status}`);
-            
-            // Get the raw text
-            const text = await response.text();
-            setApiResponse(text);
-            
-            try {
-              // Parse the data
-              const data = JSON.parse(text);
-              console.log('[DEBUG] Categories data:', data);
-              
-              if (Array.isArray(data)) {
-                setCategoriesCount(data.length);
-                console.log(`[DEBUG] Found ${data.length} categories`);
-              } else {
-                console.warn('[DEBUG] API response is not an array:', data);
-              }
-            } catch (parseError) {
-              console.error('[DEBUG] Failed to parse categories response:', parseError);
-              setError(`JSON parse error: ${parseError.message}`);
-            }
-          } catch (fetchError) {
-            console.error('[DEBUG] Error fetching categories:', fetchError);
-            setError(`API fetch error: ${fetchError.message}`);
-          }
-        } else {
-          console.warn('[DEBUG] No session ID found in any source');
+        if (!isMounted) return;
+        setSessionInfo({ fromLocalStorage, fromSessionManager, fromWindow });
+
+        const candidateSession = fromSessionManager || fromLocalStorage || fromWindow;
+        if (!candidateSession) {
+          setCategoriesCount(0);
+          setApiResponse('No session detected in local sources.');
+          setLoading(false);
+          return;
         }
-        
+
+        const baseUrl = resolveApiBase();
+        const response = await fetch(`${baseUrl}/api/channels/${candidateSession}/categories?_t=${Date.now()}`);
+        const text = await response.text();
+        if (!isMounted) return;
+
+        setApiResponse(text);
+
+        try {
+          const parsed = JSON.parse(text);
+          const categoriesArray = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.categories) ? parsed.categories : [];
+          setCategoriesCount(categoriesArray.length);
+        } catch (parseError) {
+          console.error('[SessionDebugger] Failed to parse category response:', parseError);
+          setError(`Parse error: ${parseError.message}`);
+        }
         setLoading(false);
-      } catch (e) {
-        console.error('[DEBUG] Error in session debug component:', e);
-        setError(`General error: ${e.message}`);
+      } catch (fetchError) {
+        if (!isMounted) return;
+        console.error('[SessionDebugger] Error fetching session data:', fetchError);
+        setError(fetchError.message);
         setLoading(false);
       }
     };
 
-    getSessions();
+    gatherSessionInfo();
+    const interval = setInterval(gatherSessionInfo, 5000);
 
-    // Poll every 5 seconds to check for session changes
-    const interval = setInterval(getSessions, 5000);
-    
-    return () => clearInterval(interval);
-  }, []);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [isOpen]);
 
-  const triggerManualRefresh = async () => {
+  const handleRefresh = async () => {
+    if (!activeSessionId) {
+      setError('No session ID available for refresh');
+      return;
+    }
+
     setLoading(true);
-    
+    setError(null);
+
     try {
-      // Attempt to get the most reliable session ID
-      const sessionId = sessionInfo.fromSessionManager || 
-                       sessionInfo.fromLocalStorage || 
-                       sessionInfo.fromWindow;
-                       
-      if (sessionId) {
-        // Log the attempt
-        console.log(`[DEBUG] Manual refresh with session ID: ${sessionId}`);
-        
-        // Force browser to reload cached script files
-        const timestamp = new Date().getTime();
-        const response = await fetch(`${API_BASE_URL}/api/channels/${sessionId}/categories?_t=${timestamp}`);
-        const text = await response.text();
-        setApiResponse(text);
-        
-        try {
-          const data = JSON.parse(text);
-          if (Array.isArray(data)) {
-            setCategoriesCount(data.length);
-            console.log(`[DEBUG] Refreshed: Found ${data.length} categories`);
-          }
-        } catch (e) {
-          console.error('[DEBUG] Parse error on refresh:', e);
-        }
-      } else {
-        console.error('[DEBUG] Cannot refresh - no session ID available');
-        setError('No session ID available for refresh');
-      }
-    } catch (e) {
-      console.error('[DEBUG] Error during manual refresh:', e);
-      setError(`Refresh error: ${e.message}`);
+      const baseUrl = resolveApiBase();
+      const response = await fetch(`${baseUrl}/api/channels/${activeSessionId}/categories?_t=${Date.now()}`);
+      const text = await response.text();
+      setApiResponse(text);
+      const parsed = JSON.parse(text);
+      const categoriesArray = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.categories) ? parsed.categories : [];
+      setCategoriesCount(categoriesArray.length);
+    } catch (refreshError) {
+      console.error('[SessionDebugger] Refresh error:', refreshError);
+      setError(refreshError.message);
     } finally {
       setLoading(false);
     }
   };
 
+  if (!isOpen) {
+    return null;
+  }
+
+  const statusMessage = loading
+    ? 'Syncing session data…'
+    : error
+      ? `Error: ${error}`
+      : categoriesCount > 0
+        ? `Active categories: ${categoriesCount}`
+        : 'No categories found';
+
   return (
-    <div style={{ 
-      border: '3px solid red', 
-      borderRadius: '8px',
-      padding: '15px',
-      margin: '20px 0',
-      backgroundColor: '#fff0f0',
-      fontFamily: 'monospace',
-      fontSize: '13px',
-      maxWidth: '800px'
-    }}>
-      <h2 style={{ margin: '0 0 15px 0', color: '#d32f2f' }}>
-        🚨 Session Debugger 🚨
-      </h2>
-      
-      <div style={{ marginBottom: '15px' }}>
-        <strong>Status:</strong> {loading ? 
-          '⏳ Loading...' : 
-          error ? 
-            `❌ Error: ${error}` : 
-            categoriesCount > 0 ? 
-              `✅ Found ${categoriesCount} categories` : 
-              '⚠️ No categories found'
-        }
-      </div>
-      
-      <table style={{ 
-        width: '100%', 
-        borderCollapse: 'collapse',
-        marginBottom: '15px',
-        backgroundColor: 'white'
-      }}>
-        <thead>
-          <tr>
-            <th style={{ textAlign: 'left', padding: '8px', border: '1px solid #ddd', backgroundColor: '#f5f5f5' }}>Source</th>
-            <th style={{ textAlign: 'left', padding: '8px', border: '1px solid #ddd', backgroundColor: '#f5f5f5' }}>Session ID</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td style={{ padding: '8px', border: '1px solid #ddd' }}>localStorage</td>
-            <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: sessionInfo.fromLocalStorage ? 'bold' : 'normal' }}>
-              {sessionInfo.fromLocalStorage || 'Not found'}
-            </td>
-          </tr>
-          <tr>
-            <td style={{ padding: '8px', border: '1px solid #ddd' }}>SessionManager</td>
-            <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: sessionInfo.fromSessionManager ? 'bold' : 'normal' }}>
-              {sessionInfo.fromSessionManager || 'Not found'}
-            </td>
-          </tr>
-          <tr>
-            <td style={{ padding: '8px', border: '1px solid #ddd' }}>Window global</td>
-            <td style={{ padding: '8px', border: '1px solid #ddd', fontWeight: sessionInfo.fromWindow ? 'bold' : 'normal' }}>
-              {sessionInfo.fromWindow || 'Not found'}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      
-      <div style={{ marginBottom: '15px' }}>
-        <h3 style={{ margin: '5px 0', fontSize: '15px' }}>API Response Preview:</h3>
-        <pre style={{ 
-          maxHeight: '150px',
-          overflow: 'auto',
-          backgroundColor: '#f8f8f8',
-          padding: '10px',
-          border: '1px solid #ddd',
-          borderRadius: '4px',
-          fontSize: '12px',
-          whiteSpace: 'pre-wrap'
-        }}>
-          {apiResponse ? (apiResponse.length > 500 ? apiResponse.substr(0, 500) + '...' : apiResponse) : 'No data'}
-        </pre>
-      </div>
-      
-      <div>
-        <button 
-          onClick={triggerManualRefresh}
-          disabled={loading}
-          style={{
-            backgroundColor: '#2196f3',
-            color: 'white',
-            border: 'none',
-            padding: '8px 16px',
-            borderRadius: '4px',
-            cursor: loading ? 'not-allowed' : 'pointer',
-            opacity: loading ? 0.7 : 1
-          }}
-        >
-          {loading ? '⏳ Refreshing...' : '🔄 Refresh Now'}
-        </button>
-        
-        <button 
-          onClick={() => {
-            // Clear localStorage values related to sessions
-            localStorage.removeItem('currentSessionId');
-            localStorage.removeItem('sessionId');
-            console.log('[DEBUG] Session cleared from localStorage');
-            
-            // Reload the page to reset everything
-            window.location.reload();
-          }}
-          style={{
-            backgroundColor: '#f44336',
-            color: 'white',
-            border: 'none',
-            padding: '8px 16px',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            marginLeft: '10px'
-          }}
-        >
-          🗑️ Clear Session & Reload
-        </button>
-      </div>
-      
-      <div style={{ 
-        marginTop: '15px', 
-        padding: '10px', 
-        backgroundColor: '#fffde7', 
-        border: '1px solid #fff59d',
-        borderRadius: '4px',
-        fontSize: '12px'
-      }}>
-        <strong>Troubleshooting:</strong>
-        <ul style={{ margin: '5px 0 0 0', paddingLeft: '20px' }}>
-          <li>Check browser console for detailed logs</li>
-          <li>Verify localStorage has a valid session ID</li>
-          <li>Make sure the backend server is running</li>
-          <li>Try clearing your browser cache</li>
-        </ul>
+    <div style={overlayStyle}>
+      <div style={modalStyle} role="dialog" aria-modal="true" aria-labelledby="session-debugger-title">
+        <div style={headerStyle}>
+          <div>
+            <div id="session-debugger-title" style={{ fontSize: '18px', fontWeight: 600 }}>Session Debugger</div>
+            <div style={{ fontSize: '13px', opacity: 0.85 }}>{statusMessage}</div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close debugger"
+            style={{
+              border: 'none',
+              background: 'rgba(255,255,255,0.18)',
+              color: '#ffffff',
+              width: '34px',
+              height: '34px',
+              borderRadius: '50%',
+              fontSize: '18px',
+              cursor: 'pointer'
+            }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={bodyStyle}>
+          <section style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gap: '16px',
+            marginBottom: '20px'
+          }}>
+            <div style={cardStyle}>
+              <div style={{ fontSize: '13px', color: '#64748b', marginBottom: '6px' }}>localStorage</div>
+              <div style={{ fontWeight: 600, wordBreak: 'break-word', color: '#0f172a' }}>{sessionInfo.fromLocalStorage || 'Not found'}</div>
+            </div>
+            <div style={cardStyle}>
+              <div style={{ fontSize: '13px', color: '#64748b', marginBottom: '6px' }}>SessionManager</div>
+              <div style={{ fontWeight: 600, wordBreak: 'break-word', color: '#0f172a' }}>{sessionInfo.fromSessionManager || 'Not found'}</div>
+            </div>
+            <div style={cardStyle}>
+              <div style={{ fontSize: '13px', color: '#64748b', marginBottom: '6px' }}>Window global</div>
+              <div style={{ fontWeight: 600, wordBreak: 'break-word', color: '#0f172a' }}>{sessionInfo.fromWindow || 'Not found'}</div>
+            </div>
+          </section>
+
+          <section style={{
+            background: '#ffffff',
+            borderRadius: '14px',
+            boxShadow: '0 18px 40px rgba(15, 23, 42, 0.1)'
+          }}>
+            <header style={{
+              padding: '14px 18px',
+              borderBottom: '1px solid rgba(148, 163, 184, 0.2)',
+              background: '#eef2ff',
+              fontWeight: 600,
+              fontSize: '14px',
+              color: '#312e81'
+            }}>
+              API Response Preview
+            </header>
+            <pre style={{
+              maxHeight: '260px',
+              overflow: 'auto',
+              margin: 0,
+              padding: '18px',
+              background: '#0f172a',
+              color: '#cbd5f5',
+              fontSize: '12px',
+              lineHeight: 1.6,
+              fontFamily: 'SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+            }}>
+              {apiResponse || 'No data'}
+            </pre>
+          </section>
+        </div>
+
+        <div style={footerStyle}>
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            style={{
+              padding: '10px 18px',
+              borderRadius: '8px',
+              border: 'none',
+              background: '#2563eb',
+              color: '#ffffff',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              fontWeight: 500
+            }}
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+
+          <button
+            onClick={() => {
+              localStorage.removeItem('sessionId');
+              localStorage.removeItem('currentSessionId');
+              window.location.reload();
+            }}
+            style={{
+              padding: '10px 18px',
+              borderRadius: '8px',
+              border: '1px solid rgba(239,68,68,0.5)',
+              background: '#fee2e2',
+              color: '#b91c1c',
+              cursor: 'pointer',
+              fontWeight: 500
+            }}
+          >
+            Clear Session & Reload
+          </button>
+
+          <div style={{ marginLeft: 'auto', fontSize: '12px', color: '#64748b' }}>
+            Tips: check the console, verify the backend, or clear browser cache.
+          </div>
+        </div>
       </div>
     </div>
   );
 };
 
-export default SessionDebugger; 
+export default SessionDebugger;

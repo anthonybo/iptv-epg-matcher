@@ -156,7 +156,7 @@ router.get('/status/session/:sessionId', (req, res) => {
  * POST /api/session/register
  * Register a session without loading channels/EPG
  */
-router.post('/api/session/register', (req, res) => {
+router.post('/session/register', (req, res) => {
     const { sessionId } = req.body;
     
     if (!sessionId) {
@@ -200,7 +200,7 @@ router.post('/api/session/register', (req, res) => {
  * POST /api/session/create
  * Create a new session and return the session ID
  */
-router.post('/api/session/create', (req, res) => {
+router.post('/session/create', (req, res) => {
     // Generate a unique session ID
     const sessionId = 'session_' + Math.random().toString(36).substring(2, 15);
     logger.info(`Creating new session: ${sessionId}`);

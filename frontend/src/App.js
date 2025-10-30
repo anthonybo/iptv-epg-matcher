@@ -3,10 +3,22 @@ import React, { useState, useEffect } from 'react';
 // Import our custom apiClient instead of axios directly
 import apiClient from './utils/apiClient';
 import SessionManager from './utils/sessionManager';
+import { API_BASE_URL } from './config';
+
+const resolveApiBase = () => {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.protocol}//${window.location.hostname}:5001`;
+  }
+
+  return 'http://localhost:5001';
+};
 
 // Import modular components
 import Sidebar from './Sidebar';
-import StatusDisplay from './StatusDisplay';
 import Configuration from './Configuration';
 import CategoryManager from './CategoryManager';
 import ChannelList from './ChannelList';
@@ -14,6 +26,7 @@ import PlayerView from './PlayerView';
 import ResultView from './ResultView';
 import SessionDebugger from './components/SessionDebugger';
 import DirectEpgSourcesLoader from './DirectEpgSourcesLoader';
+import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 
 /**
  * Main application component with modernized UI and modular architecture
@@ -38,6 +51,7 @@ function App() {
   const [loadingError, setLoadingError] = useState(null);
   const [activeTab, setActiveTab] = useState('configure'); // 'configure', 'channels', 'player', or 'result'
   const [showSidebar, setShowSidebar] = useState(true);
+  const [sessionDebuggerOpen, setSessionDebuggerOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusType, setStatusType] = useState('info'); // 'info', 'success', 'error', 'warning'
   const [showEmergencyCategories, setShowEmergencyCategories] = useState(true);
@@ -105,6 +119,73 @@ function App() {
     setMatchedChannels(savedMatches);
   }, []);
 
+  useEffect(() => {
+    const handleSseMessage = (event) => {
+      if (!event?.detail?.data) {
+        return;
+      }
+
+      const payload = event.detail.data;
+      const channelCount = Number(
+        payload.totalChannels ??
+        payload.channelCount ??
+        (Array.isArray(payload.channels) ? payload.channels.length : undefined)
+      );
+
+      if (Number.isFinite(channelCount) && channelCount > 0) {
+        console.log('[App] SSE update provided channel count:', channelCount);
+        setTotalChannels(channelCount);
+      }
+    };
+
+    window.addEventListener('sseMessage', handleSseMessage);
+    return () => window.removeEventListener('sseMessage', handleSseMessage);
+  }, []);
+
+  const computeChannelCount = () => {
+    const numeric = (value) => {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : 0;
+    };
+
+    const fromTotal = numeric(totalChannels);
+    const fromChannels = Array.isArray(channels) ? numeric(channels.length) : 0;
+    const fromCategories = Array.isArray(categories)
+      ? categories.reduce((sum, cat) => sum + numeric(cat?.count ?? cat?.channelCount ?? 0), 0)
+      : 0;
+
+    const result = fromTotal || fromChannels || fromCategories || 0;
+    console.log('[App] computeChannelCount', { fromTotal, fromChannels, fromCategories, result });
+    return result;
+  };
+
+  // Keep status text aligned with loaded channel/EPG counts once loading completes
+  useEffect(() => {
+    console.log('[App] Status sync effect triggered', {
+      isLoading,
+      totalChannels,
+      channelsLength: channels.length,
+      epgSourceCount: epgSources.length,
+      currentStatus: status
+    });
+
+    if (isLoading) {
+      return;
+    }
+
+    const channelCount = computeChannelCount();
+
+    const desiredStatus = epgSources.length > 0
+      ? `${channelCount} channels loaded with ${epgSources.length} EPG ${epgSources.length === 1 ? 'source' : 'sources'} available`
+      : `${channelCount} channels loaded successfully`;
+
+    if (status !== desiredStatus) {
+      console.log('[App] Updating status banner:', desiredStatus);
+      setStatus(desiredStatus);
+      setStatusType('success');
+    }
+  }, [isLoading, totalChannels, channels, categories, epgSources.length, status]);
+
   // Update active tab based on app state, but only in specific conditions
   useEffect(() => {
     // Only change to configure tab if we're loading for the first time
@@ -124,7 +205,21 @@ function App() {
         console.log('[App] Updating EPG sources using session ID:', effectiveSessionId);
         
         // Use the correct API endpoint format with /api prefix
-        fetch(`/api/epg/${effectiveSessionId}/sources?_t=${Date.now()}`)
+        const resolveApiBase = () => {
+          if (API_BASE_URL) {
+            return API_BASE_URL;
+          }
+
+          if (typeof window !== 'undefined') {
+            return `${window.location.protocol}//${window.location.hostname}:5001`;
+          }
+
+          return 'http://localhost:5001';
+        };
+
+        const baseUrl = resolveApiBase();
+
+        fetch(`${baseUrl}/api/epg/${effectiveSessionId}/sources?_t=${Date.now()}`)
           .then(response => {
             if (!response.ok) {
               console.error('Error fetching EPG sources:', response.status, response.statusText);
@@ -139,7 +234,18 @@ function App() {
               
               // Update status with EPG source info
               if (data.sources.length > 0) {
-                const message = `${totalChannels} channels loaded with ${data.sources.length} EPG ${data.sources.length === 1 ? 'source' : 'sources'} available`;
+                const reportedCount = Number(
+                  data.totalChannels ??
+                  data.channelCount ??
+                  (Array.isArray(data.channels) ? data.channels.length : undefined)
+                );
+
+                if (Number.isFinite(reportedCount) && reportedCount > 0 && reportedCount !== totalChannels) {
+                  setTotalChannels(reportedCount);
+                }
+
+                const channelCount = reportedCount > 0 ? reportedCount : computeChannelCount();
+                const message = `${channelCount} channels loaded with ${data.sources.length} EPG ${data.sources.length === 1 ? 'source' : 'sources'} available`;
                 setStatus(message);
                 setStatusType('success');
               }
@@ -183,6 +289,17 @@ function App() {
     setLoadingError(null);
 
     try {
+      if (data && typeof data === 'object') {
+        const prefetchCount = Number(
+          data.totalChannels ?? data.channelCount ?? (Array.isArray(data.channels) ? data.channels.length : undefined)
+        );
+        if (Number.isFinite(prefetchCount) && prefetchCount > 0) {
+          setTotalChannels(prefetchCount);
+          setStatus(`${prefetchCount} channels loaded with ${epgSources.length || (data.sources?.length ?? 0)} EPG ${((epgSources.length || (data.sources?.length ?? 0)) === 1) ? 'source' : 'sources'} available`);
+          setStatusType('success');
+        }
+      }
+
       // Initialize or get existing session
       let sid;
       if (sessionId) {
@@ -197,10 +314,11 @@ function App() {
       console.log(`[App] Set up session: ${sid}`);
       setSessionId(sid);
 
-      // Ensure we always create an EPG session with the same session ID
+      const baseUrl = resolveApiBase();
+
       try {
         console.log('[App] Explicitly initializing EPG session');
-        const epgInitResponse = await fetch('/api/epg/init', {
+        const epgInitResponse = await fetch(`${baseUrl}/api/epg/init`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -218,10 +336,11 @@ function App() {
       }
 
       // Get EPG sources
+      let fetchedSources = [];
+
       try {
         console.log(`[App] Fetching EPG sources for session: ${sid}`);
-        // Use the correct API endpoint format
-        const epgResponse = await fetch(`/api/epg/${sid}/sources`);
+        const epgResponse = await fetch(`${baseUrl}/api/epg/${sid}/sources`);
         
         if (!epgResponse.ok) {
           console.warn(`[App] EPG sources request failed: ${epgResponse.status} ${epgResponse.statusText}`);
@@ -230,7 +349,7 @@ function App() {
           if (epgResponse.status === 404) {
             try {
               console.log('[App] Creating test EPG source after 404');
-              await fetch(`/api/epg/${sid}/sources`, {
+              await fetch(`${baseUrl}/api/epg/${sid}/sources`, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json'
@@ -250,24 +369,37 @@ function App() {
         }
         
         const epgData = await epgResponse.json();
-        setEpgSources(epgData.sources || []);
-        console.log(`[App] Successfully loaded ${epgData.sources?.length || 0} EPG sources`);
+        fetchedSources = Array.isArray(epgData.sources) ? epgData.sources : [];
+        setEpgSources(fetchedSources);
+        console.log(`[App] Successfully loaded ${fetchedSources.length} EPG sources`);
       } catch (e) {
         console.log('[App] Error loading EPG sources:', e);
       }
 
       // Fetch channels data if not provided
+      let resolvedChannelCount = 0;
+
       if (!data || !data.channels) {
         console.log(`[App] Fetching channels for session: ${sid}`);
         const response = await apiClient.get(`/channels/${sid}`);
-        console.log(`[App] Received ${response.data.channels?.length || 0} channels`);
+        console.log(`[App] Received ${response.data.channels?.length || 0} channels (total reported: ${response.data.totalChannels})`);
+        const reportedTotal = Number(response.data.totalChannels ?? response.data.channelCount);
+        resolvedChannelCount = Number.isFinite(reportedTotal) && reportedTotal > 0
+          ? reportedTotal
+          : response.data.channels?.length || 0;
+        console.log('[App] Resolved channel count after fetch:', resolvedChannelCount);
         setChannels(response.data.channels || []);
-        setTotalChannels(response.data.totalChannels || 0);
+        setTotalChannels(resolvedChannelCount);
       } else {
         // Use the provided data
         console.log(`[App] Using provided channel data: ${data.channels?.length || 0} channels`);
+        const providedTotal = Number(data.totalChannels ?? data.channelCount);
+        resolvedChannelCount = Number.isFinite(providedTotal) && providedTotal > 0
+          ? providedTotal
+          : data.channels?.length || 0;
+        console.log('[App] Resolved channel count from provided data:', resolvedChannelCount);
         setChannels(data.channels || []);
-        setTotalChannels(data.totalChannels || data.channels?.length || 0);
+        setTotalChannels(resolvedChannelCount);
       }
 
       // Fetch categories if not provided
@@ -286,10 +418,12 @@ function App() {
       }
 
       // Set status with EPG count info if available
-      if (epgSources.length > 0) {
-        setStatus(`${totalChannels} channels loaded with ${epgSources.length} EPG ${epgSources.length === 1 ? 'source' : 'sources'} available`);
+      const finalChannelCount = resolvedChannelCount || computeChannelCount();
+
+      if (fetchedSources.length > 0) {
+        setStatus(`${finalChannelCount} channels loaded with ${fetchedSources.length} EPG ${fetchedSources.length === 1 ? 'source' : 'sources'} available`);
       } else {
-        setStatus(`${totalChannels} channels loaded successfully`);
+        setStatus(`${finalChannelCount} channels loaded successfully`);
       }
       setStatusType('success');
 
@@ -670,9 +804,8 @@ function App() {
             <SessionDebugger />
             <Configuration 
               onLoad={handleLoad} 
-              isLoading={isLoading} 
               error={loadingError}
-              sessionId={sessionId}
+              allowedTabs={['xtream']}
             />
           </div>
         );
@@ -707,9 +840,6 @@ function App() {
             
             {showEmergencyCategories && <EmergencyCategoryDisplay />}
 
-            {/* Direct EPG Sources Loader */}
-            <DirectEpgSourcesLoader />
-            
             {/* Debug log for categories */}
             {console.log('[App.renderActiveTabContent] Categories being passed to CategoryManager:', {
               count: categories?.length || 0, 
@@ -804,6 +934,34 @@ function App() {
             </div>
           </div>
         );
+      case 'epg':
+        return (
+          <div style={{ padding: '20px' }}>
+            <h2 style={{ marginTop: 0, color: '#0f172a', fontWeight: 600 }}>EPG Sources</h2>
+            <p style={{ color: '#475569', maxWidth: '720px' }}>
+              Review default sources from the backend and add provider-specific feeds without leaving this view.
+              These sources populate guide data across the rest of the app.
+            </p>
+
+            <EpgSourcesSummary sources={epgSources} />
+
+            <div style={{ marginTop: '24px' }}>
+              <DirectEpgSourcesLoader hideSourceList />
+            </div>
+
+            <div style={{ marginTop: '24px' }}>
+              <Configuration
+                onLoad={handleLoad}
+                error={loadingError}
+                allowedTabs={['epg']}
+                showFooter={false}
+                showSummaryButton={false}
+                heading="Add Or Refresh EPG Sources"
+                description="Submit XMLTV or gzipped URLs to import or refresh guide data for this session."
+              />
+            </div>
+          </div>
+        );
       case 'player':
         return (
           <PlayerView
@@ -826,12 +984,10 @@ function App() {
       default:
         return (
           <div className="tab-content">
-            <SessionDebugger />
             <Configuration 
               onLoad={handleLoad} 
-              isLoading={isLoading} 
               error={loadingError}
-              sessionId={sessionId}
+              allowedTabs={['xtream']}
             />
           </div>
         );
@@ -873,11 +1029,27 @@ function App() {
         
         console.log(`[App.fetchCategories] Setting ${response.data.length} categories from array`);
         setCategories(response.data);
+        const derivedTotal = response.data.reduce(
+          (sum, cat) => sum + Number(cat?.count ?? cat?.channelCount ?? 0),
+          0
+        );
+        if (derivedTotal > 0 && derivedTotal !== totalChannels) {
+          console.log('[App.fetchCategories] Derived total channel count from categories:', derivedTotal);
+          setTotalChannels(derivedTotal);
+        }
         return response.data;
       } else if (response.data && typeof response.data === 'object') {
         if (Array.isArray(response.data.categories)) {
           console.log(`[App.fetchCategories] Setting ${response.data.categories.length} categories from object property`);
           setCategories(response.data.categories);
+          const derivedTotal = response.data.categories.reduce(
+            (sum, cat) => sum + Number(cat?.count ?? cat?.channelCount ?? 0),
+            0
+          );
+          if (derivedTotal > 0 && derivedTotal !== totalChannels) {
+            console.log('[App.fetchCategories] Derived total channel count from categories object:', derivedTotal);
+            setTotalChannels(derivedTotal);
+          }
           return response.data.categories;
         } else {
           console.warn(`[App.fetchCategories] Response object doesn't contain categories array:`, response.data);
@@ -1514,7 +1686,7 @@ function App() {
   };
 
   // Server Status Button component
-  const ServerStatusButton = () => {
+  const ServerStatusButton = ({ onOpenSessionDebugger }) => {
     const [isChecking, setIsChecking] = useState(false);
     const [statusData, setStatusData] = useState(null);
     const [showDetails, setShowDetails] = useState(false);
@@ -1533,7 +1705,8 @@ function App() {
           }
           
           // First initialize the EPG session
-          const initResponse = await fetch('/api/epg/init', {
+          const baseUrl = resolveApiBase();
+          const initResponse = await fetch(`${baseUrl}/api/epg/init`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json'
@@ -1549,7 +1722,7 @@ function App() {
           console.log('[EPG Reload] Init result:', initData);
           
           // Refresh EPG sources
-          const epgResponse = await fetch(`/api/epg/${sessionId}/sources?_t=${Date.now()}`);
+          const epgResponse = await fetch(`${baseUrl}/api/epg/${sessionId}/sources?_t=${Date.now()}`);
           if (!epgResponse.ok) {
             throw new Error(`Failed to get EPG sources: ${epgResponse.status}`);
           }
@@ -1575,7 +1748,8 @@ function App() {
     const checkServerStatus = async () => {
       setIsChecking(true);
       try {
-        const response = await fetch('/api/status');
+        const baseUrl = resolveApiBase();
+        const response = await fetch(`${baseUrl}/api/status`);
         if (response.ok) {
           const data = await response.json();
           setStatusData(data);
@@ -1594,7 +1768,8 @@ function App() {
       if (window.confirm('Are you sure you want to trigger server cleanup?')) {
         setIsChecking(true);
         try {
-          const response = await fetch('/api/status/cleanup', {
+          const baseUrl = resolveApiBase();
+          const response = await fetch(`${baseUrl}/api/status/cleanup`, {
             method: 'POST'
           });
           
@@ -1706,29 +1881,47 @@ function App() {
           </div>
         )}
         
-        <button
-          onClick={() => {
-            if (statusData && !showDetails) {
-              setShowDetails(true);
-            } else {
-              checkServerStatus();
-              setShowDetails(true);
-            }
-          }}
-          disabled={isChecking}
-          style={{
-            padding: '8px 12px',
-            backgroundColor: isChecking ? '#6c757d' : '#17a2b8',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: isChecking ? 'wait' : 'pointer',
-            fontSize: '12px',
-            opacity: 0.8
-          }}
-        >
-          {isChecking ? 'Checking...' : (statusData ? 'Status ●' : 'Status')}
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <button
+            onClick={() => {
+              if (statusData && !showDetails) {
+                setShowDetails(true);
+              } else {
+                checkServerStatus();
+                setShowDetails(true);
+              }
+            }}
+            disabled={isChecking}
+            style={{
+              padding: '8px 12px',
+              backgroundColor: isChecking ? '#6c757d' : '#17a2b8',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: isChecking ? 'wait' : 'pointer',
+              fontSize: '12px',
+              opacity: 0.85
+            }}
+          >
+            {isChecking ? 'Checking…' : statusData ? 'Status ●' : 'Status'}
+          </button>
+
+          <button
+            onClick={onOpenSessionDebugger}
+            style={{
+              padding: '8px 12px',
+              backgroundColor: '#1d4ed8',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '12px',
+              opacity: 0.9
+            }}
+          >
+            Session Debugger
+          </button>
+        </div>
       </div>
     );
   };
@@ -1872,14 +2065,6 @@ function App() {
           overflowY: 'auto',
           maxHeight: 'calc(100vh - 60px)'
         }}>
-          {/* Status message */}
-          {status && (
-            <StatusDisplay
-              message={status}
-              type={statusType}
-            />
-          )}
-
           {/* Tab content */}
           {renderActiveTabContent()}
         </main>
@@ -1900,7 +2085,12 @@ function App() {
       }} />
 
       {/* Server status button */}
-      <ServerStatusButton />
+      <SessionDebugger
+        isOpen={sessionDebuggerOpen}
+        onClose={() => setSessionDebuggerOpen(false)}
+      />
+
+      <ServerStatusButton onOpenSessionDebugger={() => setSessionDebuggerOpen(true)} />
     </div>
   );
 }

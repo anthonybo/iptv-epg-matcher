@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { loadChannelsAndEpg } from '../../services/api';
 import { setupSSE } from '../../services/SSEService';
-import { storeSessionId, getSessionId } from '../../services/sessionService';
+import { getSessionId } from '../../services/sessionService';
 import { useNavigate } from 'react-router-dom';
 import './LoadData.css';
 
@@ -16,6 +16,7 @@ const LoadData = () => {
   const [progress, setProgress] = useState(0);
   const [processingStage, setProcessingStage] = useState('starting');
   const [currentSessionId, setCurrentSessionId] = useState(getSessionId());
+  const [activeTab, setActiveTab] = useState('xtream');
   
   const eventSourceRef = useRef(null);
   const navigate = useNavigate();
@@ -56,12 +57,12 @@ const LoadData = () => {
     return () => window.removeEventListener('sessionChange', handleSessionChange);
   }, []);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e, submissionType = 'xtream') => {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setProgress(0);
-    setProcessingStage('starting');
+    setProcessingStage(submissionType === 'epg' ? 'loading_epg' : 'starting');
     
     try {
       // Close any existing SSE connection
@@ -124,69 +125,123 @@ const LoadData = () => {
     }
   };
 
+  const handleXtreamSubmit = (e) => handleSubmit(e, 'xtream');
+  const handleEpgSubmit = (e) => handleSubmit(e, 'epg');
+
   return (
     <div className="load-container">
-      <h2>Load IPTV Data</h2>
-      <form onSubmit={handleSubmit} className="load-form">
-        <div className="form-group">
-          <label>M3U URL (Optional)</label>
-          <input
-            type="text"
-            value={m3uUrl}
-            onChange={(e) => setM3uUrl(e.target.value)}
-            placeholder="Enter M3U URL"
-            disabled={loading}
-          />
-        </div>
-        
-        <div className="form-group">
-          <label>EPG URL (Optional)</label>
-          <input
-            type="text"
-            value={epgUrl}
-            onChange={(e) => setEpgUrl(e.target.value)}
-            placeholder="Enter EPG URL"
-            disabled={loading}
-          />
-        </div>
-        
-        <div className="form-group">
-          <label>Xtream Username</label>
-          <input
-            type="text"
-            value={xtreamUsername}
-            onChange={(e) => setXtreamUsername(e.target.value)}
-            placeholder="Enter Xtream username"
-            disabled={loading}
-          />
-        </div>
-        
-        <div className="form-group">
-          <label>Xtream Password</label>
-          <input
-            type="password"
-            value={xtreamPassword}
-            onChange={(e) => setXtreamPassword(e.target.value)}
-            placeholder="Enter Xtream password"
-            disabled={loading}
-          />
-        </div>
-        
-        <div className="form-group">
-          <label>Xtream Server URL</label>
-          <input
-            type="text"
-            value={xtreamServer}
-            onChange={(e) => setXtreamServer(e.target.value)}
-            placeholder="Enter Xtream server URL"
-            disabled={loading}
-          />
-        </div>
-        
-        <button type="submit" disabled={loading} className="submit-button">
-          {loading ? 'Processing...' : 'Load Data'}
+      <h2 className="page-title">Load IPTV Data</h2>
+      <p className="page-subtitle">
+        Connect to your provider, then manage EPG sources separately for a cleaner setup.
+      </p>
+
+      <div className="tab-header">
+        <button
+          type="button"
+          className={`tab-button ${activeTab === 'xtream' ? 'active' : ''}`}
+          onClick={() => setActiveTab('xtream')}
+          disabled={loading && activeTab !== 'xtream'}
+        >
+          Xtream Login
         </button>
-      </form>
+        <button
+          type="button"
+          className={`tab-button ${activeTab === 'epg' ? 'active' : ''}`}
+          onClick={() => setActiveTab('epg')}
+          disabled={loading && activeTab !== 'epg'}
+        >
+          EPG Sources
+        </button>
+      </div>
+
+      {activeTab === 'xtream' && (
+        <form onSubmit={handleXtreamSubmit} className="tab-panel">
+          <div className="form-grid">
+            <div className="form-field">
+              <label>Xtream Username</label>
+              <input
+                type="text"
+                value={xtreamUsername}
+                onChange={(e) => setXtreamUsername(e.target.value)}
+                placeholder="Enter Xtream username"
+                disabled={loading}
+              />
+            </div>
+            <div className="form-field">
+              <label>Xtream Password</label>
+              <input
+                type="password"
+                value={xtreamPassword}
+                onChange={(e) => setXtreamPassword(e.target.value)}
+                placeholder="Enter Xtream password"
+                disabled={loading}
+              />
+            </div>
+            <div className="form-field">
+              <label>Xtream Server URL</label>
+              <input
+                type="text"
+                value={xtreamServer}
+                onChange={(e) => setXtreamServer(e.target.value)}
+                placeholder="http://example.com:25461"
+                disabled={loading}
+              />
+            </div>
+          </div>
+
+          <div className="section-divider">
+            <span>Playlist Options</span>
+          </div>
+
+          <div className="form-grid">
+            <div className="form-field full-width">
+              <label>M3U URL (Optional)</label>
+              <input
+                type="text"
+                value={m3uUrl}
+                onChange={(e) => setM3uUrl(e.target.value)}
+                placeholder="Enter playlist URL if provided by your provider"
+                disabled={loading}
+              />
+              <div className="field-help">
+                Include your provider&apos;s M3U URL if you prefer to load channels from a playlist.
+              </div>
+            </div>
+          </div>
+
+          <div className="form-actions">
+            <button type="submit" disabled={loading} className="primary-button">
+              {loading ? 'Processing...' : 'Load Xtream Data'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {activeTab === 'epg' && (
+        <form onSubmit={handleEpgSubmit} className="tab-panel">
+          <div className="form-grid">
+            <div className="form-field full-width">
+              <label>EPG URL</label>
+              <input
+                type="text"
+                value={epgUrl}
+                onChange={(e) => setEpgUrl(e.target.value)}
+                placeholder="Enter XMLTV or gzipped EPG URL"
+                disabled={loading}
+              />
+              <div className="field-help">
+                Manage your guide data independently. You can come back here any time to refresh it.
+              </div>
+            </div>
+          </div>
+
+          <div className="form-actions">
+            <button type="submit" disabled={loading} className="primary-button">
+              {loading ? 'Processing...' : 'Load EPG Sources'}
+            </button>
+          </div>
+        </form>
+      )}
       
       {loading && (
         <div className="progress-container">
