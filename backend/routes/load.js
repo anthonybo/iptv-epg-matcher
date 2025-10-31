@@ -26,9 +26,60 @@ const {
 const { finalizeProcessing } = require('../services/dataProcessingService');
 const { broadcastSSEUpdate } = require('../utils/sseUtils'); // Import the broadcastSSEUpdate function
 const { processWithDetailedUpdates } = require('../services/detailedProgressService');
+const iptvDatabaseService = require('../services/iptvDatabaseService');
 
 // Set up upload middleware
 const upload = multer({ dest: 'uploads/' });
+
+/**
+ * Save channels to IPTV database for persistence
+ * @param {string} sessionId - Session ID
+ * @param {Array} channels - Array of channel objects
+ * @param {Object} sourceInfo - Source information (url, username, password, type)
+ * @returns {Promise<number>} Source ID
+ */
+async function saveChannelsToDatabase(sessionId, channels, sourceInfo) {
+  try {
+    logger.info(`Saving ${channels.length} channels to IPTV database for session ${sessionId}`);
+
+    // Create or update source
+    const { url, username, password, type = 'm3u', name } = sourceInfo;
+    const sourceId = await iptvDatabaseService.saveSource({
+      name: name || `Source for ${sessionId}`,
+      url: url || sessionId,
+      username: username || '',
+      password: password || '',
+      type
+    });
+
+    logger.info(`Source saved with ID: ${sourceId}`);
+
+    // Transform channels to match database format
+    const dbChannels = channels.map(ch => ({
+      id: ch.tvgId || ch.id || ch.name,
+      name: ch.name,
+      logo: ch.tvgLogo || ch.logo || '',
+      url: ch.url,
+      group: { title: ch.groupTitle || ch.group?.title || '' },
+      tvg: { id: ch.tvgId || '' },
+      categories: ch.categories || []
+    }));
+
+    // Save channels in batches
+    await iptvDatabaseService.saveChannels(sourceId, dbChannels);
+    logger.info(`Saved ${dbChannels.length} channels to database`);
+
+    // Associate session with source
+    await iptvDatabaseService.associateSourceWithSession(sessionId, sourceId);
+    logger.info(`Associated session ${sessionId} with source ${sourceId}`);
+
+    return sourceId;
+  } catch (error) {
+    logger.error(`Error saving channels to database: ${error.message}`, { stack: error.stack });
+    // Don't throw - we'll fall back to in-memory storage
+    return null;
+  }
+}
 
 /**
  * Debug helper to log status in a highly visible way

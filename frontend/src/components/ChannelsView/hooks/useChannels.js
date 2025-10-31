@@ -82,24 +82,6 @@ export const useChannels = (sessionId) => {
           setChannels(prev => page === 1 ? data.channels : [...prev, ...data.channels]);
           setHasMore(data.channels.length === limit);
         }
-
-        // Fallback: if categories weren't fetched, generate from channels
-        if (categories.length === 0 && data.channels) {
-          const categoryMap = new Map();
-          data.channels.forEach(channel => {
-            if (channel.groupTitle) {
-              const count = categoryMap.get(channel.groupTitle) || 0;
-              categoryMap.set(channel.groupTitle, count + 1);
-            }
-          });
-
-          const generatedCategories = Array.from(categoryMap.entries()).map(([name, count]) => ({
-            name,
-            count
-          })).sort((a, b) => a.name.localeCompare(b.name));
-
-          setCategories(generatedCategories);
-        }
       } catch (err) {
         console.error('Error fetching channels:', err);
         setError(err.message);

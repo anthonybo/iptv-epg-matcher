@@ -7,6 +7,7 @@ const sessionStorage = require('../utils/sessionStorage');
 const { broadcastSSEUpdate } = require('../utils/sseUtils');
 const { fetchURL } = require('../utils/fetchUtils');
 const m3uService = require('../services/m3uService');
+const iptvDatabaseService = require('../services/iptvDatabaseService');
 const path = require('path');
 const fs = require('fs');
 
@@ -283,6 +284,52 @@ async function processChannels(sessionId, channels) {
     logger.error(`Error finalizing session: ${finalizeError.message}`);
   }
   
+  // Save channels to database for persistence
+  try {
+    if (channels && channels.length > 0) {
+      logger.info(`Saving ${channels.length} channels to database for persistence`);
+
+      // Get source info from session data
+      const session = sessionStorage.getSession(sessionId);
+      const options = session?.data?.options || {};
+      const { xtreamServer, xtreamUsername, xtreamPassword, m3uUrl } = options;
+
+      // Create source info
+      const sourceInfo = {
+        name: xtreamServer ? `Xtream: ${xtreamServer}` : m3uUrl ? `M3U: ${m3uUrl}` : `Session ${sessionId}`,
+        url: xtreamServer || m3uUrl || sessionId,
+        username: xtreamUsername || '',
+        password: xtreamPassword || '',
+        type: xtreamServer ? 'xtream' : m3uUrl ? 'm3u' : 'unknown'
+      };
+
+      // Save source
+      const sourceId = await iptvDatabaseService.saveSource(sourceInfo);
+      logger.info(`Source saved with ID: ${sourceId}`);
+
+      // Transform and save channels
+      const dbChannels = channels.map(ch => ({
+        id: ch.tvgId || ch.id || ch.name,
+        name: ch.name,
+        logo: ch.tvgLogo || ch.logo || '',
+        url: ch.url,
+        group: { title: ch.groupTitle || ch.group?.title || '' },
+        tvg: { id: ch.tvgId || '' },
+        categories: ch.categories || []
+      }));
+
+      await iptvDatabaseService.saveChannels(sourceId, dbChannels);
+      logger.info(`Successfully saved ${dbChannels.length} channels to database`);
+
+      // Associate session with source
+      await iptvDatabaseService.associateSourceWithSession(sessionId, sourceId);
+      logger.info(`Associated session ${sessionId} with source ${sourceId}`);
+    }
+  } catch (dbError) {
+    logger.error(`Error saving to database: ${dbError.message}`, { stack: dbError.stack });
+    // Don't fail the whole process if database save fails
+  }
+
   // Send completion event with more detailed info
   broadcastSSEUpdate({
     type: 'complete',
@@ -291,7 +338,7 @@ async function processChannels(sessionId, channels) {
     channelCount: channels.length,
     sessionId
   }, sessionId);
-  
+
   logger.info(`Completed detailed processing for session ${sessionId}`);
 }
 
