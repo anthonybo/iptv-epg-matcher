@@ -12,6 +12,7 @@ import ChannelList from './ChannelList';
 import ChannelsView from './components/ChannelsView';
 import PlayerView from './PlayerView';
 import ResultView from './ResultView';
+import GuideView from './GuideView';
 import SessionDebugger from './components/SessionDebugger';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 
@@ -823,6 +824,13 @@ function App() {
             onChannelSelect={handleChannelSelect}
             selectedChannel={selectedChannel}
             matchedChannels={matchedChannels}
+          />
+        );
+      case 'guide':
+        return (
+          <GuideView
+            sessionId={sessionId}
+            onChannelSelect={handleChannelSelect}
           />
         );
       case 'epg':

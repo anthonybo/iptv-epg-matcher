@@ -1201,36 +1201,36 @@ router.post('/:sessionId/match', async (req, res) => {
   try {
     const { sessionId } = req.params;
     const { epgChannel, m3uChannel } = req.body;
-    
+
     logger.info(`Matching EPG channel to M3U channel in session ${sessionId}`);
-    
+
     if (!sessionId) {
       return res.status(400).json({ error: 'Session ID is required' });
     }
-    
+
     if (!epgChannel || !m3uChannel) {
-      return res.status(400).json({ 
-        error: 'Both epgChannel and m3uChannel are required', 
+      return res.status(400).json({
+        error: 'Both epgChannel and m3uChannel are required',
         received: { hasEpgChannel: !!epgChannel, hasM3uChannel: !!m3uChannel }
       });
     }
-    
+
     // Get session
     const session = sessionStorage.getSession(sessionId);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
-    
+
     // Initialize matched channels array if not exists
     if (!session.data.matches) {
       session.data.matches = [];
     }
-    
+
     // Check if match already exists and update or add new
     const existingMatchIndex = session.data.matches.findIndex(
       match => match.m3uChannel.id === m3uChannel.id
     );
-    
+
     if (existingMatchIndex !== -1) {
       // Update existing match
       session.data.matches[existingMatchIndex] = { epgChannel, m3uChannel };
@@ -1240,10 +1240,40 @@ router.post('/:sessionId/match', async (req, res) => {
       session.data.matches.push({ epgChannel, m3uChannel });
       logger.info(`Added new match for channel ${m3uChannel.name} with EPG ${epgChannel.name}`);
     }
-    
+
     // Update session
     sessionStorage.updateSession(sessionId, session);
-    
+
+    // Save match to database for persistence
+    try {
+      const iptvDatabaseService = require('../services/iptvDatabaseService');
+      const iptvDb = await iptvDatabaseService.connect();
+
+      await new Promise((resolve, reject) => {
+        iptvDb.run(`
+          INSERT OR REPLACE INTO epg_matches
+          (session_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `, [
+          sessionId,
+          m3uChannel.id,
+          m3uChannel.name,
+          epgChannel.id,
+          epgChannel.name,
+          epgChannel.source_name || 'Unknown',
+          epgChannel.source_id || ''
+        ], (err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+
+      logger.info(`Saved match to database: ${m3uChannel.name} -> ${epgChannel.name}`);
+    } catch (dbError) {
+      logger.error(`Failed to save match to database: ${dbError.message}`);
+      // Don't fail the request if database save fails
+    }
+
     return res.json({
       success: true,
       sessionId,
@@ -1252,9 +1282,151 @@ router.post('/:sessionId/match', async (req, res) => {
     });
   } catch (error) {
     logger.error(`Error matching channels: ${error.message}`);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: `Failed to match channels: ${error.message}`,
       success: false
+    });
+  }
+});
+
+/**
+ * GET /:sessionId/matched-channels
+ * Get all channels that have been matched with EPG data, along with their programs
+ */
+router.get('/:sessionId/matched-channels', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    logger.info(`Getting matched channels for session ${sessionId}`);
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    // Get matched channels from database
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    const dbMatches = await new Promise((resolve, reject) => {
+      iptvDb.all(`
+        SELECT
+          iptv_channel_id,
+          iptv_channel_name,
+          epg_channel_id,
+          epg_channel_name,
+          epg_source_name,
+          epg_source_id
+        FROM epg_matches
+        WHERE session_id = ?
+        ORDER BY iptv_channel_name
+      `, [sessionId], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+
+    if (dbMatches.length === 0) {
+      return res.json({
+        success: true,
+        sessionId,
+        channels: [],
+        count: 0,
+        message: 'No matched channels found'
+      });
+    }
+
+    // Initialize database
+    await initDb();
+
+    // Fetch EPG data for each matched channel
+    const channelsWithEpg = [];
+
+    for (const match of dbMatches) {
+      try {
+        const epgChannelId = match.epg_channel_id;
+        const iptvChannelId = match.iptv_channel_id;
+        const iptvChannelName = match.iptv_channel_name;
+        const epgSourceName = match.epg_source_name;
+
+        if (!epgChannelId) {
+          logger.warn(`No EPG ID found for channel ${iptvChannelId}`);
+          continue;
+        }
+
+        // Get IPTV channel info (including logo) from IPTV database
+        let iptvChannelLogo = null;
+        try {
+          const iptvChannel = await new Promise((resolve, reject) => {
+            iptvDb.all(`
+              SELECT logo FROM iptv_channels WHERE channel_id = ?
+            `, [iptvChannelId], (err, rows) => {
+              if (err) reject(err);
+              else resolve(rows && rows.length > 0 ? rows[0] : null);
+            });
+          });
+          iptvChannelLogo = iptvChannel?.logo || null;
+        } catch (logoError) {
+          logger.warn(`Could not fetch logo for IPTV channel ${iptvChannelId}: ${logoError.message}`);
+        }
+
+        // Get channel info from EPG database
+        const channelInfo = await getChannelById(epgChannelId);
+
+        if (!channelInfo) {
+          logger.warn(`No EPG data found for channel ${epgChannelId}`);
+          continue;
+        }
+
+        // Get programs for this channel (next 24 hours)
+        const programsSql = `
+          SELECT id, title, description, start, stop, channel_id
+          FROM programs
+          WHERE channel_id = ?
+            AND start IS NOT NULL
+            AND stop IS NOT NULL
+            AND stop > strftime('%Y%m%d%H%M%S +0000', 'now')
+          ORDER BY start
+          LIMIT 50
+        `;
+
+        const programs = await runQuery(programsSql, [epgChannelId]);
+
+        // Convert program timestamps to ISO format
+        const formattedPrograms = programs.map(p => ({
+          id: p.id,
+          title: p.title,
+          description: p.description,
+          start: convertEPGTimestampToISO(p.start),
+          stop: convertEPGTimestampToISO(p.stop)
+        }));
+
+        channelsWithEpg.push({
+          id: iptvChannelId,
+          name: iptvChannelName || channelInfo.name,
+          logo: iptvChannelLogo || channelInfo.icon,
+          epgId: epgChannelId,
+          epgSource: epgSourceName || channelInfo.source_name,
+          programs: formattedPrograms
+        });
+      } catch (channelError) {
+        logger.error(`Error fetching EPG for channel ${iptvChannelId}: ${channelError.message}`);
+      }
+    }
+
+    // Sort channels by name
+    channelsWithEpg.sort((a, b) => a.name.localeCompare(b.name));
+
+    return res.json({
+      success: true,
+      sessionId,
+      channels: channelsWithEpg,
+      count: channelsWithEpg.length,
+      message: `Found ${channelsWithEpg.length} channels with EPG data`
+    });
+  } catch (error) {
+    logger.error(`Error getting matched channels: ${error.message}`);
+    return res.status(500).json({
+      error: `Failed to get matched channels: ${error.message}`
     });
   }
 });
