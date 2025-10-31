@@ -122,25 +122,91 @@ const getDatabaseStats = async () => {
 };
 
 // Search for channels in the database
+// Helper function to convert EPG timestamp format to ISO string
+// Converts "YYYYMMDDHHMMSS +TZTZ" to ISO format
+const convertEPGTimestampToISO = (timestamp) => {
+  if (!timestamp) return null;
+
+  try {
+    // Format: "YYYYMMDDHHMMSS +TZTZ" e.g., "20251030103000 +0000"
+    const match = timestamp.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{4})$/);
+    if (!match) return null;
+
+    const [, year, month, day, hour, minute, second, tz] = match;
+
+    // Parse timezone offset
+    const tzSign = tz[0];
+    const tzHours = parseInt(tz.substring(1, 3));
+    const tzMinutes = parseInt(tz.substring(3, 5));
+    const tzOffsetMinutes = (tzSign === '+' ? 1 : -1) * (tzHours * 60 + tzMinutes);
+
+    // Create date in the specified timezone
+    const date = new Date(Date.UTC(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      parseInt(second)
+    ));
+
+    // Adjust for timezone offset (subtract because EPG timestamps are in local time)
+    date.setMinutes(date.getMinutes() - tzOffsetMinutes);
+
+    return date.toISOString();
+  } catch (error) {
+    logger.error(`Error converting timestamp ${timestamp}: ${error.message}`);
+    return null;
+  }
+};
+
 const searchChannels = async (query) => {
   try {
     await initDb();
-    
+
     // Normalize the search term
     const searchTerm = query.toLowerCase().trim();
-    
+
     // Use SQLite's LIKE operator for partial matching
+    // Also fetch the current program for each channel
+    // Use SQLite's strftime to get current time in the same format as the database
     const sql = `
       SELECT c.id, c.name, c.icon, s.name as source_name,
-             (SELECT COUNT(*) FROM programs WHERE channel_id = c.id) as program_count
+             (SELECT COUNT(*) FROM programs WHERE channel_id = c.id) as program_count,
+             p.id as current_program_id,
+             p.title as current_program_title,
+             p.description as current_program_description,
+             p.start as current_program_start,
+             p.stop as current_program_stop
       FROM channels c
       JOIN sources s ON c.source_id = s.id
-      WHERE LOWER(c.name) LIKE ? 
+      LEFT JOIN programs p ON c.id = p.channel_id
+        AND p.start IS NOT NULL
+        AND p.stop IS NOT NULL
+        AND p.start < strftime('%Y%m%d%H%M%S +0000', 'now')
+        AND p.stop > strftime('%Y%m%d%H%M%S +0000', 'now')
+      WHERE LOWER(c.name) LIKE ?
       ORDER BY c.name
       LIMIT 100
     `;
-    
-    return await runQuery(sql, [`%${searchTerm}%`]);
+
+    const results = await runQuery(sql, [`%${searchTerm}%`]);
+
+    // Transform results to include current program as nested object
+    return results.map(row => ({
+      id: row.id,
+      name: row.name,
+      icon: row.icon,
+      source_name: row.source_name,
+      program_count: row.program_count,
+      currentProgram: row.current_program_id ? {
+        id: row.current_program_id,
+        title: row.current_program_title,
+        description: row.current_program_description,
+        start: convertEPGTimestampToISO(row.current_program_start),
+        stop: convertEPGTimestampToISO(row.current_program_stop)
+      } : null
+    }));
   } catch (error) {
     logger.error(`Error searching channels: ${error.message}`);
     return [];
