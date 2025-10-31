@@ -4,11 +4,11 @@ import React from 'react';
  * Skeleton loader for channel cards
  */
 const ChannelCardSkeleton = () => (
-  <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden animate-pulse">
-    <div className="h-16 bg-gray-300"></div>
-    <div className="p-3 space-y-2">
-      <div className="h-4 bg-gray-300 rounded w-3/4"></div>
-      <div className="h-3 bg-gray-200 rounded w-1/2"></div>
+  <div className="animate-pulse overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-900/80">
+    <div className="h-16 bg-slate-800/80"></div>
+    <div className="space-y-2 p-3">
+      <div className="h-4 w-3/4 rounded bg-slate-800/70"></div>
+      <div className="h-3 w-1/2 rounded bg-slate-800/60"></div>
     </div>
   </div>
 );
@@ -44,7 +44,7 @@ const ChannelGrid = ({
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <svg
-          className="w-16 h-16 text-gray-400 mb-4"
+          className="mb-4 h-16 w-16 text-slate-600"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
@@ -56,10 +56,10 @@ const ChannelGrid = ({
             d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
           />
         </svg>
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">
+        <h3 className="mb-2 text-lg font-semibold text-slate-200">
           No channels found
         </h3>
-        <p className="text-gray-500 text-sm">
+        <p className="text-sm text-slate-500">
           Try adjusting your filters or search term
         </p>
       </div>
@@ -69,9 +69,9 @@ const ChannelGrid = ({
   return (
     <div className="space-y-4">
       {/* Channel grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-        {channels.map((channel) => (
-          <ChannelCard key={channel.id || channel.uuid} channel={channel} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+        {channels.map((channel, index) => (
+          <ChannelCard key={channel.id || channel.uuid || `channel-${index}`} channel={channel} />
         ))}
       </div>
 
@@ -82,19 +82,18 @@ const ChannelGrid = ({
             onClick={onLoadMore}
             disabled={loading}
             className={`
-              px-6 py-3 rounded-lg font-medium text-white
-              transition-all duration-200
+              rounded-xl px-6 py-3 text-sm font-semibold text-white transition-all duration-200
               ${loading
-                ? 'bg-gray-400 cursor-not-allowed'
-                : 'bg-blue-600 hover:bg-blue-700 hover:shadow-lg active:scale-95'
+                ? 'cursor-not-allowed bg-slate-600/60'
+                : 'bg-blue-600 hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-900/40 active:scale-95'
               }
-              focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+              focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-950
             `}
           >
             {loading ? (
               <span className="flex items-center">
                 <svg
-                  className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
+                  className="-ml-1 mr-3 h-5 w-5 animate-spin text-white"
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
                   viewBox="0 0 24 24"

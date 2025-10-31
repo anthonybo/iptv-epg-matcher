@@ -79,7 +79,17 @@ export const useChannels = (sessionId) => {
         const data = await response.json();
 
         if (data.channels) {
-          setChannels(prev => page === 1 ? data.channels : [...prev, ...data.channels]);
+          setChannels(prev => {
+            if (page === 1) {
+              return data.channels;
+            }
+
+            // Deduplicate channels by ID to prevent duplicate key warnings
+            const existingIds = new Set(prev.map(ch => ch.id || ch.uuid));
+            const newChannels = data.channels.filter(ch => !existingIds.has(ch.id || ch.uuid));
+
+            return [...prev, ...newChannels];
+          });
           setHasMore(data.channels.length === limit);
         }
       } catch (err) {
@@ -95,7 +105,7 @@ export const useChannels = (sessionId) => {
 
   // Filter channels based on selected categories and search term
   const filteredChannels = useMemo(() => {
-    return channels.filter(channel => {
+    const filtered = channels.filter(channel => {
       // Category filter
       const categoryMatch = selectedCategories.size === 0 ||
         (channel.groupTitle && selectedCategories.has(channel.groupTitle));
@@ -105,6 +115,17 @@ export const useChannels = (sessionId) => {
         (channel.name && channel.name.toLowerCase().includes(searchTerm.toLowerCase()));
 
       return categoryMatch && searchMatch;
+    });
+
+    // Deduplicate by ID as a final safety layer
+    const seen = new Set();
+    return filtered.filter(channel => {
+      const id = channel.id || channel.uuid;
+      if (seen.has(id)) {
+        return false;
+      }
+      seen.add(id);
+      return true;
     });
   }, [channels, selectedCategories, searchTerm]);
 

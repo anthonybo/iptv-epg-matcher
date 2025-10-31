@@ -174,35 +174,61 @@ const initializeTables = () => {
 const saveSource = (source) => {
     return new Promise((resolve, reject) => {
         const { name, url, username, password, type } = source;
-        
-        db.run(
-            `INSERT INTO iptv_sources (name, url, username, password, type, last_updated) 
-             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-             ON CONFLICT(url, username, password) 
-             DO UPDATE SET last_updated = CURRENT_TIMESTAMP, name = ?, type = ?
-             RETURNING id`,
-            [name, url, username, password, type, name, type],
-            function(err) {
-                if (err) {
-                    logger.error(`Error saving IPTV source: ${err.message}`);
-                    reject(err);
+
+        // First check if source already exists
+        db.get(
+            `SELECT id FROM iptv_sources WHERE url = ? AND username = ? AND password = ?`,
+            [url, username, password],
+            (checkErr, existingSource) => {
+                if (checkErr) {
+                    logger.error(`Error checking existing source: ${checkErr.message}`);
+                    reject(checkErr);
                     return;
                 }
-                
-                // Get the source ID (either new or existing)
-                db.get(
-                    `SELECT id FROM iptv_sources WHERE url = ? AND username = ? AND password = ?`,
-                    [url, username, password],
-                    (getErr, row) => {
-                        if (getErr) {
-                            logger.error(`Error getting source ID: ${getErr.message}`);
-                            reject(getErr);
-                            return;
+
+                // If source exists, delete its old data before we update
+                if (existingSource) {
+                    logger.info(`Source already exists (ID: ${existingSource.id}), deleting old data to prepare for refresh`);
+
+                    // Delete old channels AND categories
+                    db.serialize(() => {
+                        db.run(`DELETE FROM iptv_channels WHERE source_id = ?`, [existingSource.id]);
+                        db.run(`DELETE FROM iptv_categories WHERE source_id = ?`, [existingSource.id]);
+
+                        // Update the source metadata
+                        db.run(
+                            `UPDATE iptv_sources
+                             SET last_updated = CURRENT_TIMESTAMP, name = ?, type = ?
+                             WHERE id = ?`,
+                            [name, type, existingSource.id],
+                            (updateErr) => {
+                                if (updateErr) {
+                                    logger.error(`Error updating source: ${updateErr.message}`);
+                                    reject(updateErr);
+                                    return;
+                                }
+                                logger.info(`Refreshed source ${existingSource.id}, ready for new data`);
+                                resolve(existingSource.id);
+                            }
+                        );
+                    });
+                } else {
+                    // Source doesn't exist, create it
+                    db.run(
+                        `INSERT INTO iptv_sources (name, url, username, password, type, last_updated)
+                         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+                        [name, url, username, password, type],
+                        function(insertErr) {
+                            if (insertErr) {
+                                logger.error(`Error inserting new source: ${insertErr.message}`);
+                                reject(insertErr);
+                                return;
+                            }
+                            logger.info(`Created new source with ID: ${this.lastID}`);
+                            resolve(this.lastID);
                         }
-                        
-                        resolve(row.id);
-                    }
-                );
+                    );
+                }
             }
         );
     });
@@ -422,10 +448,10 @@ const getChannelsForSession = (sessionId, options = {}) => {
                     reject(err);
                     return;
                 }
-                
-                // Get total count for pagination
+
+                // Get total count for pagination - deduplicated by channel_id
                 db.get(
-                    `SELECT COUNT(*) as total FROM iptv_channels c
+                    `SELECT COUNT(DISTINCT c.channel_id) as total FROM iptv_channels c
                      JOIN session_iptv_mappings m ON c.source_id = m.source_id
                      WHERE ${sessionWhereClause} ${whereClause}`,
                     params,
@@ -435,7 +461,7 @@ const getChannelsForSession = (sessionId, options = {}) => {
                             reject(countErr);
                             return;
                         }
-                        
+
                         resolve({
                             channels: rows.map(row => ({
                                 id: row.channel_id,
@@ -468,7 +494,7 @@ const getChannelsForSession = (sessionId, options = {}) => {
 const getCategoriesForSession = (sessionId) => {
     return new Promise((resolve, reject) => {
         db.all(
-            `SELECT DISTINCT c.group_title as name, COUNT(*) as channel_count
+            `SELECT DISTINCT c.group_title as name, COUNT(DISTINCT c.channel_id) as channel_count
              FROM iptv_channels c
              JOIN session_iptv_mappings m ON c.source_id = m.source_id
              WHERE m.session_id = ? AND c.group_title != ''
@@ -481,7 +507,7 @@ const getCategoriesForSession = (sessionId) => {
                     reject(err);
                     return;
                 }
-                
+
                 resolve(rows.map(row => ({
                     id: row.name,
                     name: row.name,
@@ -503,7 +529,8 @@ const getChannelById = (sessionId, channelId) => {
         db.get(
             `SELECT c.* FROM iptv_channels c
              JOIN session_iptv_mappings m ON c.source_id = m.source_id
-             WHERE m.session_id = ? AND c.channel_id = ?`,
+             WHERE m.session_id = ? AND c.channel_id = ?
+             LIMIT 1`,
             [sessionId, channelId],
             (err, row) => {
                 if (err) {
@@ -511,12 +538,12 @@ const getChannelById = (sessionId, channelId) => {
                     reject(err);
                     return;
                 }
-                
+
                 if (!row) {
                     resolve(null);
                     return;
                 }
-                
+
                 resolve({
                     id: row.channel_id,
                     name: row.name,
@@ -591,7 +618,7 @@ const searchChannels = (sessionId, query, limit = 100) => {
             `SELECT c.* FROM iptv_channels c
              JOIN session_iptv_mappings m ON c.source_id = m.source_id
              WHERE m.session_id = ? AND (${conditions})
-             ORDER BY 
+             ORDER BY
                 CASE WHEN LOWER(c.name) = LOWER(?) THEN 1
                      WHEN LOWER(c.name) LIKE LOWER(?) THEN 2
                      ELSE 3
@@ -605,7 +632,7 @@ const searchChannels = (sessionId, query, limit = 100) => {
                     reject(err);
                     return;
                 }
-                
+
                 resolve(rows.map(row => ({
                     id: row.channel_id,
                     name: row.name,

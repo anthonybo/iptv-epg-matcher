@@ -45,14 +45,14 @@ const ChannelCard = ({ channel, onClick, isSelected, isMatched }) => {
   return (
     <button
       onClick={onClick}
-      className={`w-full text-left bg-white rounded-lg shadow-sm hover:shadow-lg transition-all duration-200 border-2 overflow-hidden group ${
+      className={`group w-full overflow-hidden rounded-2xl border transition-all duration-200 text-left shadow-lg shadow-slate-950/20 ${
         isSelected
-          ? 'border-blue-500 ring-2 ring-blue-200'
-          : 'border-gray-200 hover:border-blue-300'
-      }`}
+          ? 'border-blue-500/70 ring-2 ring-blue-400/60'
+          : 'border-slate-800/80 hover:-translate-y-0.5 hover:border-blue-500/40'
+      } bg-slate-900/80`}
     >
       {/* Logo/Placeholder */}
-      <div className="relative h-16 bg-gray-100">
+      <div className="relative h-16 bg-slate-900/90">
         {channel.tvgLogo && !imageError ? (
           <img
             src={channel.tvgLogo}
@@ -61,15 +61,15 @@ const ChannelCard = ({ channel, onClick, isSelected, isMatched }) => {
             onError={() => setImageError(true)}
           />
         ) : (
-          <div className={`w-full h-full flex items-center justify-center ${placeholderColor} text-white text-2xl font-bold`}>
+          <div className={`flex h-full w-full items-center justify-center text-2xl font-bold text-white ${placeholderColor}`}>
             {firstLetter}
           </div>
         )}
 
         {/* Match indicator badge */}
         {isMatched && (
-          <div className="absolute top-1 right-1 bg-green-500 rounded-full p-1">
-            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="absolute right-1 top-1 rounded-full bg-green-500 p-1 shadow shadow-green-900/40">
+            <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
             </svg>
           </div>
@@ -79,14 +79,16 @@ const ChannelCard = ({ channel, onClick, isSelected, isMatched }) => {
       {/* Channel info */}
       <div className="p-3">
         {/* Channel name */}
-        <h3 className={`text-sm font-semibold truncate transition-colors ${
-          isSelected ? 'text-blue-700' : 'text-gray-900 group-hover:text-blue-600'
-        }`}>
+        <h3
+          className={`truncate text-sm font-semibold transition-colors ${
+            isSelected ? 'text-blue-200' : 'text-slate-100 group-hover:text-blue-200'
+          }`}
+        >
           {displayName}
         </h3>
 
         {/* Category */}
-        <p className="text-xs text-gray-500 truncate mt-1">
+        <p className="mt-1 truncate text-xs text-slate-400">
           {channel.groupTitle || 'No Category'}
         </p>
       </div>

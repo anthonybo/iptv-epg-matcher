@@ -28,10 +28,10 @@ const AuthWrapper = ({ children }) => {
   // If loading, show loading spinner
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+      <div className="flex min-h-screen items-center justify-center bg-slate-950">
         <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <p className="text-white">Loading...</p>
+          <div className="mb-4 inline-block h-12 w-12 animate-spin rounded-full border-b-2 border-blue-500"></div>
+          <p className="text-slate-300">Loading...</p>
         </div>
       </div>
     );
@@ -43,7 +43,7 @@ const AuthWrapper = ({ children }) => {
       <>
         {/* Show user info badge if authenticated */}
         {isAuthenticated && user && (
-          <div className="fixed top-4 right-4 z-50">
+          <div className="fixed right-4 top-4 z-50">
             <UserBadge user={user} />
           </div>
         )}
@@ -89,14 +89,14 @@ const UserBadge = ({ user }) => {
     <div className="relative">
       <button
         onClick={() => setShowMenu(!showMenu)}
-        className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg shadow-lg transition-colors"
+        className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-slate-100 shadow-lg shadow-slate-950/30 transition-colors hover:bg-slate-800"
       >
-        <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-sm font-bold">
+        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-sm font-bold text-white">
           {user.username.charAt(0).toUpperCase()}
         </div>
         <span className="text-sm font-medium">{user.username}</span>
         <svg
-          className={`w-4 h-4 transition-transform ${showMenu ? 'rotate-180' : ''}`}
+          className={`h-4 w-4 transition-transform ${showMenu ? 'rotate-180' : ''}`}
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
@@ -107,16 +107,16 @@ const UserBadge = ({ user }) => {
 
       {/* Dropdown Menu */}
       {showMenu && (
-        <div className="absolute right-0 mt-2 w-48 bg-gray-800 rounded-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-700">
-            <p className="text-sm text-gray-400">Signed in as</p>
-            <p className="text-sm font-medium text-white truncate">{user.email}</p>
+        <div className="absolute right-0 mt-2 w-48 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30">
+          <div className="border-b border-slate-800 px-4 py-3">
+            <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Signed in as</p>
+            <p className="truncate text-sm font-semibold text-slate-100">{user.email}</p>
           </div>
           <button
             onClick={handleLogout}
-            className="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700 transition-colors flex items-center gap-2"
+            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-medium text-rose-300 transition-colors hover:bg-slate-800"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
             </svg>
             Logout

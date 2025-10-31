@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import '../../styles.css';
 import EpgRefreshModal from '../EpgRefreshModal';
 import SessionManager from '../../utils/sessionManager';
 
@@ -41,6 +40,18 @@ const formatDateTime = (value) => {
 };
 
 const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
+  const statusStyles = {
+    active: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200',
+    disabled: 'border-slate-700 bg-slate-900/80 text-slate-400',
+    pending: 'border-blue-500/40 bg-blue-500/15 text-blue-200',
+    refreshing: 'border-blue-500/40 bg-blue-500/15 text-blue-200',
+    complete: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200',
+    failed: 'border-rose-500/40 bg-rose-500/15 text-rose-200',
+    offline: 'border-amber-500/40 bg-amber-500/15 text-amber-200',
+    unverified: 'border-yellow-500/40 bg-yellow-500/15 text-yellow-200',
+    processing: 'border-blue-500/40 bg-blue-500/15 text-blue-200',
+  };
+
   const [refreshing, setRefreshing] = useState(false);
   const [showRefreshModal, setShowRefreshModal] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState({
@@ -372,12 +383,44 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
           onClose={closeRefreshModal}
           progress={refreshProgress}
         />
-        <div className="epg-summary">
-          <h3>Current EPG Sources</h3>
-          <div className="status-message">
-            No EPG sources loaded yet. Use the controls below to add one or load defaults from your provider.
-          </div>
-        </div>
+        <section className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40">
+          <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h3 className="text-2xl font-semibold text-slate-100">Current EPG Sources</h3>
+              <p className="mt-1 text-sm text-slate-400">
+                No EPG sources loaded yet. Add a source to generate guide data for your channels.
+              </p>
+            </div>
+            <button
+              onClick={refreshEpgData}
+              disabled={refreshing}
+              className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold text-white transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-950 ${
+                refreshing
+                  ? 'cursor-wait bg-slate-700/70'
+                  : 'bg-blue-600 hover:bg-blue-500 hover:shadow-lg hover:shadow-blue-900/40'
+              }`}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={refreshing ? 'animate-spin' : ''}
+              >
+                <path d="M23 4v6h-6"></path>
+                <path d="M1 20v-6h6"></path>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"></path>
+                <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+              {refreshing ? 'Refreshing…' : 'Refresh EPG Sources'}
+            </button>
+          </header>
+        </section>
       </>
     );
   }
@@ -423,13 +466,22 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
         onClose={closeRefreshModal}
         progress={refreshProgress}
       />
-      <div className="epg-summary">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h3 style={{ margin: 0 }}>Current EPG Sources</h3>
+      <section className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40">
+        <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h3 className="text-2xl font-semibold text-slate-100">Current EPG Sources</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Monitor source health and refresh whenever your guide data needs an update.
+            </p>
+          </div>
           <button
             onClick={refreshEpgData}
             disabled={refreshing}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-wait text-white rounded-lg font-medium transition-colors flex items-center gap-2"
+            className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold text-white transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-950 ${
+              refreshing
+                ? 'cursor-wait bg-slate-700/70'
+                : 'bg-blue-600 hover:bg-blue-500 hover:shadow-lg hover:shadow-blue-900/40'
+            }`}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -448,86 +500,80 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
               <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"></path>
               <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
             </svg>
-            {refreshing ? 'Refreshing...' : 'Refresh EPG Sources'}
+            {refreshing ? 'Refreshing…' : 'Refresh EPG Sources'}
           </button>
-        </div>
+        </header>
 
-        <div className="summary-stats">
-          <div className="stat-item">
-            <div className="stat-value">
+        <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-inner shadow-slate-950/30">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">Active Sources</p>
+            <p className="mt-3 text-3xl font-semibold text-slate-100">
               {formatNumber(activeSources.length)}
               {disabledSources.length > 0 && (
-                <span style={{ fontSize: '14px', color: '#6b7280', fontWeight: 'normal' }}>
+                <span className="ml-1 text-base font-medium text-slate-500">
                   /{formatNumber(sources.length)}
                 </span>
               )}
-            </div>
-            <div className="stat-label">
-              Active Sources
-              {disabledSources.length > 0 && (
-                <span style={{ fontSize: '11px', color: '#9ca3af', display: 'block', marginTop: '2px' }}>
-                  ({disabledSources.length} disabled)
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-value">{formatNumber(totals.channels)}</div>
-            <div className="stat-label">Total Channels</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-value">{formatNumber(totals.programs)}</div>
-            <div className="stat-label">Total Programs</div>
-          </div>
-          <div className="stat-item">
-            <div className="stat-value">{formatNumber(averageProgramsPerChannel)}</div>
-            <div className="stat-label">Avg Programs/Channel</div>
-          </div>
-        </div>
-
-        <div className="averages">
-          <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <div>
-              <strong>Sources with Data:</strong> {sourcesWithData.length} of {activeSources.length}
-            </div>
-            {mostRecentUpdate && (
-              <div>
-                <strong>Last Refreshed:</strong> {formatDateTime(mostRecentUpdate)}
-              </div>
+            </p>
+            {disabledSources.length > 0 && (
+              <p className="mt-2 text-xs text-slate-500">{disabledSources.length} disabled</p>
             )}
-            <div>
-              <strong>Avg Channels/Source:</strong> {formatNumber(averageChannels)}
-            </div>
+          </div>
+          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-inner shadow-slate-950/30">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">Total Channels</p>
+            <p className="mt-3 text-3xl font-semibold text-slate-100">{formatNumber(totals.channels)}</p>
+          </div>
+          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-inner shadow-slate-950/30">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">Total Programs</p>
+            <p className="mt-3 text-3xl font-semibold text-slate-100">{formatNumber(totals.programs)}</p>
+          </div>
+          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-inner shadow-slate-950/30">
+            <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-500">Avg Programs/Channel</p>
+            <p className="mt-3 text-3xl font-semibold text-slate-100">{formatNumber(averageProgramsPerChannel)}</p>
           </div>
         </div>
 
-        <h4>Source Details</h4>
-        <div className="source-list">
+        <div className="mt-8 flex flex-wrap gap-6 rounded-2xl border border-slate-800/70 bg-slate-900/60 p-6 text-sm text-slate-300">
+          <p className="flex items-center gap-2">
+            <span className="text-slate-400">Sources with data:</span>
+            <span className="font-semibold text-slate-100">{sourcesWithData.length}</span>
+            <span className="text-slate-500">of {activeSources.length}</span>
+          </p>
+          {mostRecentUpdate && (
+            <p className="flex items-center gap-2">
+              <span className="text-slate-400">Last refreshed:</span>
+              <span className="font-medium text-slate-100">{formatDateTime(mostRecentUpdate)}</span>
+            </p>
+          )}
+          <p className="flex items-center gap-2">
+            <span className="text-slate-400">Avg channels/source:</span>
+            <span className="font-medium text-slate-100">{formatNumber(averageChannels)}</span>
+          </p>
+        </div>
+
+        <h4 className="mt-10 text-lg font-semibold text-slate-200">Source Details</h4>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
           {sources.map((source, index) => {
             const channels = pickNumeric(source, ['channelCount', 'channel_count', 'channels']);
             const programs = pickNumeric(source, ['programCount', 'program_count', 'programs', 'program_total']);
             const lastUpdated = source.last_updated || source.lastUpdated || source.updatedAt || source.updated_at;
 
             // Determine source status
-            let sourceStatus = 'active';
-            let statusColor = 'green';
-            let statusText = 'Active';
+            let statusKey = 'active';
+            let statusLabel = 'Active';
 
             if (source.enabled === false) {
-              sourceStatus = 'disabled';
-              statusColor = 'gray';
-              statusText = 'Disabled';
+              statusKey = 'disabled';
+              statusLabel = 'Disabled';
             } else if (refreshing) {
               // During refresh, don't show failed/offline status
               // Sources are temporarily at 0 while being processed
               if (channels > 0 || programs > 0) {
-                sourceStatus = 'active';
-                statusColor = 'green';
-                statusText = 'Active';
+                statusKey = 'active';
+                statusLabel = 'Active';
               } else {
-                sourceStatus = 'pending';
-                statusColor = 'blue';
-                statusText = 'Processing';
+                statusKey = 'processing';
+                statusLabel = 'Processing';
               }
             } else if (channels === 0 && programs === 0) {
               // Check if it was recently updated but still has no data (failed)
@@ -536,66 +582,64 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
               const hoursSinceUpdate = updated ? (now - updated) / (1000 * 60 * 60) : null;
 
               if (hoursSinceUpdate !== null && hoursSinceUpdate < 24) {
-                sourceStatus = 'failed';
-                statusColor = 'red';
-                statusText = 'Failed';
+                statusKey = 'failed';
+                statusLabel = 'Failed';
               } else {
-                sourceStatus = 'offline';
-                statusColor = 'orange';
-                statusText = 'Offline';
+                statusKey = 'offline';
+                statusLabel = 'Offline';
               }
             } else if (source.verified === false) {
-              sourceStatus = 'unverified';
-              statusColor = 'yellow';
-              statusText = 'Unverified';
+              statusKey = 'unverified';
+              statusLabel = 'Unverified';
             }
 
             return (
-              <div key={source.id || source.url || index} className="source-item" style={{ opacity: sourceStatus === 'disabled' ? 0.6 : 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                  <div className="source-name">
-                    {source.name || source.title || 'Unnamed Source'}
+              <article
+                key={source.id || source.url || index}
+                className={`rounded-2xl border border-slate-800/80 bg-slate-900/70 p-5 shadow-lg shadow-slate-950/20 transition-colors hover:border-slate-700 hover:bg-slate-900 ${
+                  statusKey === 'disabled' ? 'opacity-60' : ''
+                }`}
+              >
+                <header className="mb-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-100">
+                      {source.name || source.title || 'Unnamed Source'}
+                    </p>
+                    {source.url && (
+                      <p className="mt-1 break-words text-xs font-mono text-slate-500">
+                        {source.url}
+                      </p>
+                    )}
                   </div>
                   <span
-                    className={`px-2 py-0.5 rounded text-xs font-medium`}
-                    style={{
-                      backgroundColor: statusColor === 'green' ? '#dcfce7' :
-                                     statusColor === 'red' ? '#fee2e2' :
-                                     statusColor === 'orange' ? '#fed7aa' :
-                                     statusColor === 'yellow' ? '#fef3c7' :
-                                     statusColor === 'blue' ? '#dbeafe' :
-                                     '#e5e7eb',
-                      color: statusColor === 'green' ? '#166534' :
-                             statusColor === 'red' ? '#991b1b' :
-                             statusColor === 'orange' ? '#9a3412' :
-                             statusColor === 'yellow' ? '#854d0e' :
-                             statusColor === 'blue' ? '#1e40af' :
-                             '#374151'
-                    }}
+                    className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[0.65rem] font-semibold uppercase tracking-wide ${
+                      statusStyles[statusKey] || statusStyles.active
+                    }`}
                   >
-                    {statusText}
+                    {statusLabel}
                   </span>
-                </div>
-                {source.url && (
-                  <div className="source-url">{source.url}</div>
+                </header>
+                {source.notes && statusKey !== 'active' && (
+                  <p className="mb-3 text-xs italic text-slate-500">{source.notes}</p>
                 )}
-                {source.notes && sourceStatus !== 'active' && (
-                  <div style={{ fontSize: '12px', color: '#6b7280', fontStyle: 'italic', marginTop: '4px' }}>
-                    {source.notes}
+                <dl className="flex items-center justify-between text-xs text-slate-400">
+                  <div>
+                    <dt className="font-medium text-slate-500">Channels</dt>
+                    <dd className="text-slate-200">{formatNumber(channels)}</dd>
                   </div>
-                )}
-                <div className="source-counts">
-                  <span>{formatNumber(channels)} channels</span>
-                  <span>{formatNumber(programs)} programs</span>
-                </div>
-                <div className="source-updated">
-                  Last updated: {formatDateTime(lastUpdated)}
-                </div>
-              </div>
+                  <div className="text-right">
+                    <dt className="font-medium text-slate-500">Programs</dt>
+                    <dd className="text-slate-200">{formatNumber(programs)}</dd>
+                  </div>
+                </dl>
+                <p className="mt-3 text-xs text-slate-500">
+                  Last updated: <span className="text-slate-300">{formatDateTime(lastUpdated)}</span>
+                </p>
+              </article>
             );
           })}
         </div>
-      </div>
+      </section>
     </>
   );
 };

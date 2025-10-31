@@ -1,1 +1,16 @@
 @import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased min-h-screen;
+    font-feature-settings: "liga" 1, "kern" 1;
+  }
+
+  ::selection {
+    @apply bg-blue-500/40 text-white;
+  }
+}

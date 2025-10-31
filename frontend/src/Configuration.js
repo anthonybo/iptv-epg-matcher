@@ -1,11 +1,17 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useEffect, useState } from 'react';
 import Dropzone from 'react-dropzone';
 import axios from 'axios';
 import LoadingProgress from './LoadingProgress';
 import SessionManager from './utils/sessionManager';
 import { API_BASE_URL } from './config';
 import { registerSession } from './services/SSEService';
-import './Configuration.css';
+
+const statusStyles = {
+  info: 'border-blue-500/40 bg-blue-500/15 text-blue-200',
+  success: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200',
+  error: 'border-rose-500/40 bg-rose-500/15 text-rose-200',
+};
 
 const Configuration = ({
   onLoad,
@@ -15,7 +21,7 @@ const Configuration = ({
   heading,
   description,
   showFooter = true,
-  showSummaryButton = true
+  showSummaryButton = true,
 }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [m3uFile, setM3uFile] = useState(null);
@@ -28,6 +34,7 @@ const Configuration = ({
   const [xtreamUsername, setXtreamUsername] = useState('');
   const [xtreamPassword, setXtreamPassword] = useState('');
   const [xtreamServer, setXtreamServer] = useState('');
+
   const normalizedTabs = Array.isArray(allowedTabs) && allowedTabs.length ? allowedTabs : ['xtream', 'epg'];
   const allowedTabKey = normalizedTabs.join('|');
   const [activeTab, setActiveTab] = useState(() => {
@@ -36,19 +43,23 @@ const Configuration = ({
     }
     return normalizedTabs[0] || 'xtream';
   });
+
   const isEpgAllowed = normalizedTabs.includes('epg');
   const isXtreamAllowed = normalizedTabs.includes('xtream');
   const isEpgOnly = isEpgAllowed && !isXtreamAllowed;
 
   useEffect(() => {
-    const preferredTab = (initialTab && normalizedTabs.includes(initialTab)) ? initialTab : (normalizedTabs[0] || 'xtream');
-    setActiveTab(prev => {
+    const preferredTab = initialTab && normalizedTabs.includes(initialTab)
+      ? initialTab
+      : normalizedTabs[0] || 'xtream';
+
+    setActiveTab((prev) => {
       if (prev && normalizedTabs.includes(prev)) {
         return prev;
       }
       return preferredTab;
     });
-  }, [allowedTabKey, initialTab]);
+  }, [allowedTabKey, initialTab, normalizedTabs]);
 
   useEffect(() => {
     let storedUsername = localStorage.getItem('xtreamUsername');
@@ -120,8 +131,8 @@ const Configuration = ({
 
       const response = await axios.post(`${API_BASE_URL}/api/load`, formData, {
         headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+          'Content-Type': 'multipart/form-data',
+        },
       });
 
       if (response.data?.success) {
@@ -167,7 +178,7 @@ const Configuration = ({
         if (m3uFile) {
           formData.append('m3uFile', m3uFile);
         }
-      }
+      },
     });
   };
 
@@ -182,7 +193,7 @@ const Configuration = ({
       successMessage: 'EPG sources are loading.',
       prepareFormData: (formData) => {
         formData.append('epgUrl', epgUrl.trim());
-      }
+      },
     });
   };
 
@@ -226,220 +237,257 @@ const Configuration = ({
     ? 'Load or refresh guide data without touching your channel list.'
     : 'Load channels with your Xtream credentials or playlist, then handle guide data in its own space.');
 
+  const tabButtonClasses = (tab) => {
+    const isActive = activeTab === tab;
+    return [
+      'flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-150',
+      'focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:ring-offset-2 focus:ring-offset-slate-950',
+      isActive
+        ? 'bg-blue-500/20 text-blue-100 shadow-inner ring-1 ring-inset ring-blue-400/60'
+        : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/70',
+      isLoading && !isActive ? 'cursor-not-allowed opacity-60' : '',
+    ].join(' ');
+  };
+
+  const inputClasses = 'w-full rounded-xl border border-slate-800/80 bg-slate-900/70 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-60';
+
+  if (isLoading && processingSessionId) {
+    return (
+      <LoadingProgress
+        sessionId={processingSessionId}
+        onComplete={handleProcessComplete}
+        onChannelsAvailable={handleChannelsAvailable}
+        onEpgSourceAvailable={handleEpgSourceAvailable}
+      />
+    );
+  }
+
+  const guidanceSteps = isEpgOnly
+    ? [
+        'Paste a new XMLTV or gzipped URL.',
+        'Load the source to fetch the latest guide data.',
+        'Use the summary panel to confirm imported sources.',
+        'Return to Channels or Player to match listings.',
+      ]
+    : [
+        'Enter Xtream credentials or point to an M3U playlist.',
+        'Load channels and let the progress screen finish.',
+        'Open the EPG tab to add or refresh guide data.',
+        'Match channels with guide entries and export what you need.',
+      ];
+
   return (
-    <div className="configuration-container">
+    <div className="mx-auto max-w-6xl px-4 py-12 text-slate-100">
       {error && (
-        <div className="config-alert config-alert--error">
-          <strong>Error:</strong> {error}
+        <div className="mb-6 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm font-medium text-rose-200">
+          <span className="font-semibold text-rose-100">Error:</span> {error}
         </div>
       )}
 
-      {isLoading && processingSessionId ? (
-        <LoadingProgress
-          sessionId={processingSessionId}
-          onComplete={handleProcessComplete}
-          onChannelsAvailable={handleChannelsAvailable}
-          onEpgSourceAvailable={handleEpgSourceAvailable}
-        />
-      ) : (
-        <div className="config-card">
-          <div className="config-header">
-            <h2>{effectiveHeading}</h2>
-            <p>{effectiveDescription}</p>
+      <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40 backdrop-blur">
+        <header className="space-y-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.35em] text-blue-400/70">Configuration</p>
+          <h2 className="text-3xl font-semibold text-slate-100">{effectiveHeading}</h2>
+          <p className="max-w-2xl text-sm text-slate-400">{effectiveDescription}</p>
+        </header>
+
+        {status && (
+          <div className={`mt-6 rounded-2xl border px-4 py-3 text-sm font-medium ${statusStyles[statusVariant] || statusStyles.info}`}>
+            {status}
           </div>
+        )}
 
-          {status && (
-            <div className={`config-status config-status--${statusVariant}`}>
-              {status}
-            </div>
-          )}
+        {normalizedTabs.length > 1 && (
+          <div className="mt-8 flex items-center gap-2 border-b border-slate-800/70 pb-2">
+            {isXtreamAllowed && (
+              <button
+                type="button"
+                className={tabButtonClasses('xtream')}
+                onClick={() => setActiveTab('xtream')}
+                disabled={isLoading && activeTab !== 'xtream'}
+              >
+                Xtream Login
+              </button>
+            )}
+            {isEpgAllowed && (
+              <button
+                type="button"
+                className={tabButtonClasses('epg')}
+                onClick={() => setActiveTab('epg')}
+                disabled={isLoading && activeTab !== 'epg'}
+              >
+                EPG Sources
+              </button>
+            )}
+          </div>
+        )}
 
-          {normalizedTabs.length > 1 && (
-            <div className="tab-header">
-              {isXtreamAllowed && (
-                <button
-                  type="button"
-                  className={`tab-button ${activeTab === 'xtream' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('xtream')}
+        {isXtreamAllowed && activeTab === 'xtream' && (
+          <div className="mt-8 space-y-10">
+            <section className="space-y-4">
+              <h3 className="text-lg font-semibold text-slate-100">Provider Credentials</h3>
+              <div className="grid gap-6 md:grid-cols-2">
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-200">Server URL</span>
+                  <input
+                    type="text"
+                    placeholder="http://example.com:8080"
+                    value={xtreamServer}
+                    onChange={(e) => setXtreamServer(e.target.value)}
+                    disabled={isLoading}
+                    className={inputClasses}
+                  />
+                </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-200">Username</span>
+                  <input
+                    type="text"
+                    placeholder="Your Xtream username"
+                    value={xtreamUsername}
+                    onChange={(e) => setXtreamUsername(e.target.value)}
+                    disabled={isLoading}
+                    className={inputClasses}
+                  />
+                </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-200">Password</span>
+                  <input
+                    type="password"
+                    placeholder="Your Xtream password"
+                    value={xtreamPassword}
+                    onChange={(e) => setXtreamPassword(e.target.value)}
+                    disabled={isLoading}
+                    className={inputClasses}
+                  />
+                </label>
+              </div>
+              <p className="text-xs text-slate-400">
+                Credentials stay in your browser&apos;s storage so you can reload quickly next time.
+              </p>
+            </section>
+
+            <section className="space-y-4">
+              <h3 className="text-lg font-semibold text-slate-100">Playlist Options (Optional)</h3>
+              <label className="flex flex-col gap-2">
+                <span className="text-sm font-semibold text-slate-200">M3U URL</span>
+                <input
+                  type="text"
+                  placeholder="https://example.com/playlist.m3u"
+                  value={m3uUrl}
+                  onChange={(e) => setM3uUrl(e.target.value)}
                   disabled={isLoading}
-                >
-                  Xtream Login
-                </button>
-              )}
-              {isEpgAllowed && (
-                <button
-                  type="button"
-                  className={`tab-button ${activeTab === 'epg' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('epg')}
-                  disabled={isLoading}
-                >
-                  EPG Sources
-                </button>
-              )}
-            </div>
-          )}
-
-          {isXtreamAllowed && activeTab === 'xtream' && (
-            <div className="tab-panel">
-              <div className="config-section">
-                <h3 className="section-title">Provider Credentials</h3>
-                <div className="form-grid">
-                  <div className="form-field">
-                    <label>Server URL</label>
-                    <input
-                      type="text"
-                      placeholder="http://example.com:8080"
-                      value={xtreamServer}
-                      onChange={(e) => setXtreamServer(e.target.value)}
-                      disabled={isLoading}
-                    />
-                  </div>
-                  <div className="form-field">
-                    <label>Username</label>
-                    <input
-                      type="text"
-                      placeholder="Your Xtream username"
-                      value={xtreamUsername}
-                      onChange={(e) => setXtreamUsername(e.target.value)}
-                      disabled={isLoading}
-                    />
-                  </div>
-                  <div className="form-field">
-                    <label>Password</label>
-                    <input
-                      type="password"
-                      placeholder="Your Xtream password"
-                      value={xtreamPassword}
-                      onChange={(e) => setXtreamPassword(e.target.value)}
-                      disabled={isLoading}
-                    />
-                  </div>
-                </div>
-                <p className="section-hint">
-                  Credentials stay in your browser&apos;s storage so you can reload quickly next time.
+                  className={inputClasses}
+                />
+                <p className="text-xs text-slate-400">
+                  Provide a playlist URL if you want to load channels from an M3U feed instead of Xtream.
                 </p>
-              </div>
+              </label>
 
-              <div className="config-section">
-                <h3 className="section-title">Playlist Options (Optional)</h3>
-                <div className="form-grid">
-                  <div className="form-field full-width">
-                    <label>M3U URL</label>
-                    <input
-                      type="text"
-                      placeholder="https://example.com/playlist.m3u"
-                      value={m3uUrl}
-                      onChange={(e) => setM3uUrl(e.target.value)}
-                      disabled={isLoading}
-                    />
-                    <div className="field-help">
-                      Provide a playlist URL if you want to load channels from an M3U feed instead of Xtream.
-                    </div>
-                  </div>
-                </div>
+              <Dropzone onDrop={(acceptedFiles) => setM3uFile(acceptedFiles[0])} disabled={isLoading}>
+                {({ getRootProps, getInputProps }) => {
+                  const dropzoneClasses = [
+                    'w-full rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-all duration-150',
+                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
+                    isLoading
+                      ? 'cursor-not-allowed border-slate-800/60 bg-slate-900/50 opacity-60'
+                      : 'cursor-pointer border-slate-700 bg-slate-900/60 hover:-translate-y-0.5 hover:border-blue-400/70 hover:bg-slate-900',
+                  ].join(' ');
 
-                <Dropzone onDrop={(acceptedFiles) => setM3uFile(acceptedFiles[0])} disabled={isLoading}>
-                  {({ getRootProps, getInputProps }) => {
-                    const rootProps = getRootProps({
-                      className: `upload-dropzone${isLoading ? ' upload-dropzone--disabled' : ''}`
-                    });
-                    return (
-                      <section {...rootProps}>
-                        <input {...getInputProps()} />
-                        {m3uFile ? (
-                          <div className="upload-dropzone__content">
-                            <span className="upload-dropzone__label">Selected file</span>
-                            <span className="upload-dropzone__value">{m3uFile.name}</span>
-                            <span className="upload-dropzone__hint">Drop or click to replace the file.</span>
-                          </div>
-                        ) : (
-                          <div className="upload-dropzone__content">
-                            <span className="upload-dropzone__label">Drop M3U file here or click to browse</span>
-                            <span className="upload-dropzone__hint">We upload it securely when you start loading.</span>
-                          </div>
-                        )}
-                      </section>
-                    );
-                  }}
-                </Dropzone>
-              </div>
+                  return (
+                    <section {...getRootProps({ className: dropzoneClasses })}>
+                      <input {...getInputProps()} />
+                      {m3uFile ? (
+                        <div className="flex flex-col items-center gap-2 text-sm">
+                          <span className="font-semibold text-slate-200">Selected file</span>
+                          <span className="rounded-full bg-slate-900/70 px-3 py-1 text-xs font-medium text-blue-200">
+                            {m3uFile.name}
+                          </span>
+                          <span className="text-xs text-slate-500">Drop or click to replace the file.</span>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-2 text-sm text-slate-300">
+                          <span className="font-semibold">Drop M3U file here or click to browse</span>
+                          <span className="text-xs text-slate-500">
+                            We upload it securely when you start loading.
+                          </span>
+                        </div>
+                      )}
+                    </section>
+                  );
+                }}
+              </Dropzone>
+            </section>
 
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleXtreamLoad}
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-blue-500 via-blue-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-900/40 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleXtreamLoad}
+                disabled={isLoading}
+              >
+                {isLoading ? 'Processing…' : 'Load Xtream Channels'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {isEpgAllowed && activeTab === 'epg' && (
+          <div className="mt-8 space-y-8">
+            <section className="space-y-3">
+              <h3 className="text-lg font-semibold text-slate-100">EPG Source</h3>
+              <label className="flex flex-col gap-2">
+                <span className="text-sm font-semibold text-slate-200">EPG URL</span>
+                <input
+                  type="text"
+                  placeholder="https://example.com/guide.xml or .gz"
+                  value={epgUrl}
+                  onChange={(e) => setEpgUrl(e.target.value)}
                   disabled={isLoading}
-                >
-                  {isLoading ? 'Processing...' : 'Load Xtream Channels'}
-                </button>
-              </div>
-            </div>
-          )}
+                  className={inputClasses}
+                />
+                <p className="text-xs text-slate-400">
+                  Use a direct XMLTV or gzipped URL. You can refresh it any time without reloading channels.
+                </p>
+              </label>
+            </section>
 
-          {isEpgAllowed && activeTab === 'epg' && (
-            <div className="tab-panel">
-              <div className="config-section">
-                <h3 className="section-title">EPG Source</h3>
-                <div className="form-grid">
-                  <div className="form-field full-width">
-                    <label>EPG URL</label>
-                    <input
-                      type="text"
-                      placeholder="https://example.com/guide.xml or .gz"
-                      value={epgUrl}
-                      onChange={(e) => setEpgUrl(e.target.value)}
-                      disabled={isLoading}
-                    />
-                    <div className="field-help">
-                      Use a direct XMLTV or gzipped URL. You can refresh it any time without reloading channels.
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="form-actions">
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleEpgLoad}
-                  disabled={isLoading}
-                >
-                  {isLoading ? 'Processing...' : 'Load EPG Sources'}
-                </button>
-              </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-sky-500 via-blue-500 to-blue-700 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-900/40 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleEpgLoad}
+                disabled={isLoading}
+              >
+                {isLoading ? 'Processing…' : 'Load EPG Sources'}
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-          {showFooter && (
-            <div className="config-footer">
-              <div className="info-card">
-                <h3>Getting Started</h3>
-                {isEpgOnly ? (
-                  <ol>
-                    <li>Paste a new XMLTV or gzipped URL.</li>
-                    <li>Load the source to fetch the latest guide data.</li>
-                    <li>Use the summary panel to confirm the imported sources.</li>
-                    <li>Return to Channels or Player to match listings.</li>
-                  </ol>
-                ) : (
-                  <ol>
-                    <li>Enter Xtream credentials or point to an M3U playlist.</li>
-                    <li>Load channels and let the progress screen finish.</li>
-                    <li>Open the EPG tab to add or refresh guide data.</li>
-                    <li>Match channels with guide entries and export what you need.</li>
-                  </ol>
-                )}
-              </div>
-              {isEpgAllowed && showSummaryButton && (
-                <button type="button" className="summary-button" onClick={loadEpgSummary} disabled={isLoading}>
-                  EPG Summary
-                </button>
-              )}
+        {showFooter && (
+          <footer className="mt-10 flex flex-col gap-6 lg:flex-row">
+            <div className="flex-1 rounded-2xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-inner shadow-slate-950/30">
+              <h3 className="text-lg font-semibold text-slate-100">Getting Started</h3>
+              <ol className="mt-4 list-decimal space-y-3 pl-5 text-sm text-slate-400">
+                {guidanceSteps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
             </div>
-          )}
-        </div>
-      )}
+
+            {isEpgAllowed && showSummaryButton && (
+              <button
+                type="button"
+                onClick={loadEpgSummary}
+                disabled={isLoading}
+                className="self-start rounded-2xl bg-gradient-to-r from-amber-500 via-amber-600 to-orange-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-amber-900/30 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                EPG Summary
+              </button>
+            )}
+          </footer>
+        )}
+      </div>
     </div>
   );
 };

@@ -1,94 +1,87 @@
 import React, { useState, useEffect, useContext } from 'react';
 import { SessionContext } from './App';
 
-// Simple direct categories component
+const normalizeCategory = (category) => {
+  if (typeof category === 'string') {
+    return { name: category, count: null };
+  }
+
+  return {
+    name: category?.name || category?.group || 'Unknown',
+    count:
+      category?.count ??
+      category?.channelCount ??
+      category?.channel_count ??
+      category?.channels ??
+      null,
+  };
+};
+
 const SimpleCategories = () => {
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedCategory, setSelectedCategory] = useState('all');
-  
-  // Try to get session ID from context
+  const [inputSessionId, setInputSessionId] = useState('');
+
   const sessionContext = useContext(SessionContext);
   const contextSessionId = sessionContext?.sessionId;
 
-  // Get session ID from all possible locations
   const getSessionId = () => {
-    // First try context
     if (contextSessionId) {
-      console.log('Using session ID from context:', contextSessionId);
       return contextSessionId;
     }
 
-    // Try different localStorage keys
     const keys = ['sessionId', 'currentSession', 'session', 'iptv-session-id'];
     for (const key of keys) {
       const savedSession = localStorage.getItem(key);
       if (savedSession) {
-        console.log(`Retrieved session ID from localStorage[${key}]:`, savedSession);
         return savedSession;
       }
     }
-    
-    // As a last resort, check for any key that might contain 'session'
-    for (let i = 0; i < localStorage.length; i++) {
+
+    for (let i = 0; i < localStorage.length; i += 1) {
       const key = localStorage.key(i);
-      if (key.toLowerCase().includes('session')) {
+      if (key && key.toLowerCase().includes('session')) {
         const value = localStorage.getItem(key);
-        console.log(`Found potential session ID in localStorage[${key}]:`, value);
-        return value;
+        if (value) {
+          return value;
+        }
       }
     }
-    
-    console.warn('No session ID found in any storage location');
+
     return null;
   };
 
-  // Add a direct manual fetch function
   const manualFetch = async (sid) => {
     if (!sid) {
-      alert('No session ID provided');
+      setError('No session ID provided');
       return;
     }
-    
+
     setLoading(true);
     setError(null);
-    
+
     try {
-      console.log(`Manual fetch - Using session ID: ${sid}`);
       const response = await fetch(`/api/channels/${sid}/categories`);
-      
+
       if (!response.ok) {
         throw new Error(`API error: ${response.status}`);
       }
-      
+
       const text = await response.text();
-      console.log('Manual fetch - Raw response:', text.substring(0, 200));
-      
-      try {
-        const data = JSON.parse(text);
-        console.log('Manual fetch - Parsed data:', data);
-        
-        if (Array.isArray(data)) {
-          setCategories(data);
-          setLoading(false);
-          return data;
-        } else {
-          console.error('Manual fetch - Response is not an array:', data);
-          setError('Invalid data format - not an array');
-        }
-      } catch (parseError) {
-        console.error('Manual fetch - Parse error:', parseError);
-        setError(`JSON parse error: ${parseError.message}`);
+      const data = JSON.parse(text);
+
+      if (Array.isArray(data)) {
+        setCategories(data);
+      } else {
+        setError('Invalid data format - expected an array of categories');
       }
     } catch (fetchError) {
-      console.error('Manual fetch - Network error:', fetchError);
       setError(`Network error: ${fetchError.message}`);
     } finally {
       setLoading(false);
     }
-    
-    return null;
   };
 
   useEffect(() => {
@@ -101,33 +94,21 @@ const SimpleCategories = () => {
       }
 
       try {
-        // Direct fetch to the API
-        console.log(`Fetching categories for session: ${sessionId}`);
         const response = await fetch(`/api/channels/${sessionId}/categories`);
-        console.log('Response status:', response.status);
-        
+
         if (!response.ok) {
           throw new Error(`Error fetching categories: ${response.status}`);
         }
-        
-        // Get text first for debugging
+
         const text = await response.text();
-        console.log('Raw response text (first 200 chars):', text.substring(0, 200));
-        
-        // Parse JSON
         const data = JSON.parse(text);
-        console.log('Parsed categories data:', data);
-        console.log('Categories count:', Array.isArray(data) ? data.length : 'not an array');
-        
-        // Set categories state
+
         if (Array.isArray(data)) {
           setCategories(data);
         } else {
-          console.error('Categories response is not an array:', data);
-          setError('Invalid categories format');
+          setError('Invalid categories format received from server');
         }
       } catch (err) {
-        console.error('Error fetching categories:', err);
         setError(`Failed to load categories: ${err.message}`);
       } finally {
         setLoading(false);
@@ -137,44 +118,58 @@ const SimpleCategories = () => {
     fetchCategories();
   }, [contextSessionId]);
 
-  if (loading) {
-    return <div>Loading categories...</div>;
-  }
+  const normalizedCategories = categories.map(normalizeCategory);
+  const displayedCategories =
+    selectedCategory === 'all'
+      ? normalizedCategories
+      : normalizedCategories.filter((category) => category.name === selectedCategory);
 
-  // Add session ID input for testing
-  const SessionIdInput = () => {
-    const [inputSessionId, setInputSessionId] = useState('');
-    
+  const SessionIdInput = () => (
+    <div className="mb-6 rounded-2xl border border-slate-800/70 bg-slate-900/60 p-5 shadow-lg shadow-slate-950/20">
+      <h3 className="text-sm font-semibold text-slate-200">Test with Custom Session ID</h3>
+      <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+        <input
+          type="text"
+          value={inputSessionId}
+          onChange={(e) => setInputSessionId(e.target.value)}
+          placeholder="Enter session ID to test"
+          className="flex-1 rounded-lg border border-slate-800/80 bg-slate-950/70 px-4 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+        />
+        <button
+          type="button"
+          onClick={() => manualFetch(inputSessionId)}
+          className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-950 hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          Fetch
+        </button>
+      </div>
+    </div>
+  );
+
+  if (loading) {
     return (
-      <div style={{ marginBottom: '20px', padding: '10px', border: '1px solid #ccc', borderRadius: '5px' }}>
-        <h3>Test with Custom Session ID</h3>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <input 
-            type="text" 
-            value={inputSessionId} 
-            onChange={(e) => setInputSessionId(e.target.value)}
-            placeholder="Enter session ID to test" 
-            style={{ flex: '1', padding: '8px' }}
-          />
-          <button 
-            onClick={() => manualFetch(inputSessionId)}
-            style={{ padding: '8px 15px', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '4px' }}
-          >
-            Fetch
-          </button>
+      <div className="flex min-h-[calc(100vh-5rem)] items-center justify-center bg-slate-950 text-slate-100">
+        <div className="flex flex-col items-center gap-3">
+          <span className="h-10 w-10 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></span>
+          <p className="text-sm text-slate-400">Loading categories…</p>
         </div>
       </div>
     );
-  };
+  }
 
   if (error) {
     return (
-      <div>
+      <div className="mx-auto max-w-3xl px-4 py-12 text-slate-100">
         <SessionIdInput />
-        <div style={{ color: 'red', marginBottom: '20px' }}>Error: {error}</div>
-        <button 
-          onClick={() => window.location.href = '/'}
-          style={{ padding: '10px', backgroundColor: '#f44336', color: 'white', border: 'none', borderRadius: '4px' }}
+        <div className="rounded-2xl border border-red-500/40 bg-red-500/10 p-4 text-sm font-medium text-red-200">
+          {error}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            window.location.href = '/';
+          }}
+          className="mt-6 inline-flex items-center justify-center rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-100 transition-all hover:bg-slate-700"
         >
           Go to Home
         </button>
@@ -183,103 +178,71 @@ const SimpleCategories = () => {
   }
 
   return (
-    <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
+    <div className="mx-auto max-w-4xl px-4 py-12 text-slate-100">
       <SessionIdInput />
-      <h2>Categories ({categories.length})</h2>
-      
-      {categories.length > 0 ? (
-        <div>
-          <select 
-            value={selectedCategory}
-            onChange={(e) => setSelectedCategory(e.target.value)}
-            style={{ width: '100%', padding: '10px', marginBottom: '20px' }}
-          >
-            <option value="all">All Categories</option>
-            {categories.map((category, index) => {
-              const name = typeof category === 'string' ? category : (category.name || 'Unknown');
-              const count = typeof category === 'object' && category.count ? ` (${category.count})` : '';
-              return (
-                <option key={index} value={name}>
-                  {name}{count}
+
+      <section className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40">
+        <header className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.35em] text-blue-400/70">Categories</p>
+          <h2 className="text-3xl font-semibold text-slate-100">Channel Categories</h2>
+          <p className="text-sm text-slate-400">
+            Select a category to focus the list below or browse all available groups from your provider.
+          </p>
+        </header>
+
+        <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-center">
+          <label className="flex-1 text-sm text-slate-300">
+            <span className="mb-2 block font-semibold text-slate-200">Filter Categories</span>
+            <select
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+              className="w-full rounded-xl border border-slate-800/80 bg-slate-900/70 px-4 py-2 text-sm text-slate-100 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+            >
+              <option value="all">All Categories</option>
+              {normalizedCategories.map((category) => (
+                <option key={category.name} value={category.name}>
+                  {category.name}
                 </option>
-              );
-            })}
-          </select>
-          
-          <h3>Categories List:</h3>
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', 
-            gap: '10px' 
-          }}>
-            {categories.map((category, index) => {
-              const name = typeof category === 'string' ? category : (category.name || 'Unknown');
-              const count = typeof category === 'object' && category.count ? category.count : '?';
-              
-              return (
-                <div key={index} style={{ 
-                  padding: '10px', 
-                  border: '1px solid #ccc', 
-                  borderRadius: '5px',
-                  backgroundColor: selectedCategory === name ? '#e6f7ff' : '#f5f5f5'
-                }}>
-                  <div><strong>{name}</strong></div>
-                  <div>{count} channels</div>
-                </div>
-              );
-            })}
+              ))}
+            </select>
+          </label>
+          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/60 px-4 py-3 text-sm text-slate-300">
+            <span className="font-semibold text-slate-100">Total:</span> {normalizedCategories.length}
           </div>
         </div>
-      ) : (
-        <div style={{ color: 'red', fontWeight: 'bold' }}>
-          No categories found!
+
+        <div className="mt-10 grid gap-4 md:grid-cols-2">
+          {displayedCategories.length === 0 ? (
+            <div className="rounded-2xl border border-slate-800/70 bg-slate-900/70 p-6 text-sm text-slate-400">
+              No categories match the selected filter.
+            </div>
+          ) : (
+            displayedCategories.map((category) => (
+              <article
+                key={`${category.name}-${category.count ?? 'unknown'}`}
+                className={`rounded-2xl border border-slate-800/80 bg-slate-900/70 p-6 shadow-lg shadow-slate-950/20 transition-colors hover:border-slate-700 hover:bg-slate-900 ${
+                  selectedCategory !== 'all' && category.name === selectedCategory
+                    ? 'ring-2 ring-blue-500/60'
+                    : ''
+                }`}
+              >
+                <h3 className="text-lg font-semibold text-slate-100">{category.name}</h3>
+                <p className="mt-2 text-sm text-slate-400">
+                  {category.count !== null ? (
+                    <>
+                      {category.count.toLocaleString()} channel{category.count === 1 ? '' : 's'}
+                    </>
+                  ) : (
+                    'Channel count unavailable'
+                  )}
+                </p>
+              </article>
+            ))
+          )}
         </div>
-      )}
-      
-      <div style={{ marginTop: '20px', padding: '10px', backgroundColor: '#f0f0f0', borderRadius: '5px' }}>
-        <h3>Debug Info</h3>
-        <p><strong>Current Session ID:</strong> {getSessionId() || 'None'}</p>
-        <p><strong>Categories Count:</strong> {categories.length}</p>
-        <p><strong>Categories Data Type:</strong> {typeof categories}</p>
-        <p><strong>Is Array:</strong> {String(Array.isArray(categories))}</p>
-        <p><strong>Selected Category:</strong> {selectedCategory}</p>
-        
-        {categories.length > 0 && (
-          <>
-            <p><strong>First Category Type:</strong> {typeof categories[0]}</p>
-            <p><strong>First Category Data:</strong> {JSON.stringify(categories[0])}</p>
-            <button 
-              onClick={() => console.log('Categories data:', categories)}
-              style={{ padding: '5px 10px', marginRight: '10px' }}
-            >
-              Log Categories
-            </button>
-            <button 
-              onClick={() => alert(JSON.stringify(categories.slice(0, 10), null, 2))}
-              style={{ padding: '5px 10px' }}
-            >
-              Show First 10
-            </button>
-          </>
-        )}
-        
-        <div style={{ marginTop: '20px' }}>
-          <button
-            onClick={() => window.location.href = '/'}
-            style={{ padding: '8px 15px', marginRight: '10px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '4px' }}
-          >
-            Home
-          </button>
-          <button
-            onClick={() => window.location.href = '/channels'}
-            style={{ padding: '8px 15px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '4px' }}
-          >
-            Channels
-          </button>
-        </div>
-      </div>
+      </section>
     </div>
   );
 };
 
-export default SimpleCategories; 
+export default SimpleCategories;

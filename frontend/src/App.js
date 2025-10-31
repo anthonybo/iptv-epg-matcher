@@ -811,13 +811,15 @@ function App() {
     switch (activeTab) {
       case 'configure':
         return (
-          <div style={{ padding: '20px' }}>
+          <div className="space-y-6 px-6 py-8">
             <SessionDebugger />
-            <Configuration 
-              onLoad={handleLoad} 
-              error={loadingError}
-              allowedTabs={['xtream']}
-            />
+            <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
+              <Configuration 
+                onLoad={handleLoad} 
+                error={loadingError}
+                allowedTabs={['xtream']}
+              />
+            </div>
           </div>
         );
       case 'channels':
@@ -838,16 +840,20 @@ function App() {
         );
       case 'epg':
         return (
-          <div style={{ padding: '20px' }}>
-            <h2 style={{ marginTop: 0, color: '#0f172a', fontWeight: 600 }}>EPG Sources</h2>
-            <p style={{ color: '#475569', maxWidth: '720px' }}>
-              Review default sources from the backend and add provider-specific feeds without leaving this view.
-              These sources populate guide data across the rest of the app.
-            </p>
+          <div className="space-y-6 px-6 py-8">
+            <header className="space-y-2">
+              <h2 className="text-3xl font-semibold text-slate-100">EPG Sources</h2>
+              <p className="max-w-3xl text-sm text-slate-400">
+                Review default sources from the backend and add provider-specific feeds without leaving this view.
+                These sources populate guide data across the rest of the app.
+              </p>
+            </header>
 
-            <EpgSourcesSummary sources={epgSources} onSourcesUpdated={handleEpgSourcesUpdated} />
+            <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
+              <EpgSourcesSummary sources={epgSources} onSourcesUpdated={handleEpgSourcesUpdated} />
+            </div>
 
-            <div style={{ marginTop: '24px' }}>
+            <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
               <Configuration
                 onLoad={handleLoad}
                 error={loadingError}
@@ -881,12 +887,14 @@ function App() {
         );
       default:
         return (
-          <div className="tab-content">
-            <Configuration 
-              onLoad={handleLoad} 
-              error={loadingError}
-              allowedTabs={['xtream']}
-            />
+          <div className="space-y-6 px-6 py-8">
+            <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
+              <Configuration 
+                onLoad={handleLoad} 
+                error={loadingError}
+                allowedTabs={['xtream']}
+              />
+            </div>
           </div>
         );
     }
@@ -1023,18 +1031,9 @@ function App() {
     // Show a loading state while we're fetching categories
     if (isLoading && !fetchAttempted && !effectiveCategories.length) {
       return (
-        <div style={{ padding: '20px', textAlign: 'center' }}>
-          <div style={{ margin: '20px 0' }}>
-            <span style={{
-              display: 'inline-block',
-              width: '20px',
-              height: '20px',
-              border: '3px solid #f3f3f3',
-              borderTop: '3px solid #3498db',
-              borderRadius: '50%',
-              animation: 'spin 1s linear infinite',
-              marginRight: '10px'
-            }}></span>
+        <div className="px-6 py-8 text-center text-slate-300">
+          <div className="inline-flex items-center gap-3 rounded-full border border-slate-800/80 bg-slate-900/70 px-5 py-2 text-sm">
+            <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-700 border-t-blue-400"></span>
             Loading categories directly...
           </div>
         </div>
@@ -1072,537 +1071,23 @@ function App() {
     loadCategoriesIfNeeded();
   }, [activeTab, categories.length, sessionId]);
 
-  // Emergency component that directly shows categories
-  const EmergencyCategoryDisplay = () => {
-    const [categories, setCategories] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
-    const sessionId = SessionManager.getSessionId();
-    
-    useEffect(() => {
-      const loadCategories = async () => {
-        // Ensure we have a valid session ID
-        const effectiveSessionId = sessionId;
-        
-        if (!effectiveSessionId) {
-          setError('No session ID available');
-          setLoading(false);
-          return;
-        }
-        
-        // Check if we should use cached categories
-        const now = Date.now();
-        const lastEmergencyCategoryFetch = window.lastEmergencyCategoryFetchTime || 0;
-        const CACHE_LIFETIME = 60000; // 1 minute
-        
-        if (now - lastEmergencyCategoryFetch < CACHE_LIFETIME) {
-          console.log(`[EMERGENCY] Using cached emergency categories (fetched ${(now - lastEmergencyCategoryFetch)/1000}s ago)`);
-          setLoading(false);
-          return;
-        }
-        
-        try {
-          console.log('[EMERGENCY] Attempting to fetch categories with session ID:', effectiveSessionId);
-          window.lastEmergencyCategoryFetchTime = now;
-          const response = await fetch(`/api/channels/${effectiveSessionId}/categories`);
-          
-          if (!response.ok) {
-            setError(`API error: ${response.status} ${response.statusText}`);
-            setLoading(false);
-            return;
-          }
-          
-          const text = await response.text();
-          console.log('[EMERGENCY] Raw response:', text.substring(0, 100) + '...');
-          
-          try {
-            const data = JSON.parse(text);
-            if (Array.isArray(data)) {
-              console.log(`[EMERGENCY] ✅ Parsed ${data.length} categories`);
-              setCategories(data);
-            } else {
-              console.error('[EMERGENCY] Response is not an array:', data);
-              setError('API response is not an array');
-            }
-          } catch (parseError) {
-            console.error('[EMERGENCY] JSON parse error:', parseError);
-            setError(`JSON parse error: ${parseError.message}`);
-          }
-        } catch (fetchError) {
-          console.error('[EMERGENCY] Fetch error:', fetchError);
-          setError(`Fetch error: ${fetchError.message}`);
-        } finally {
-          setLoading(false);
-        }
-      };
-      
-      loadCategories();
-    }, [sessionId]);
-    
-    if (loading) {
-      return <div>Loading categories directly...</div>;
-    }
-    
-    if (error) {
-      return (
-        <div style={{ color: 'red', padding: '10px' }}>
-          <div>{error}</div>
-          <button 
-            onClick={() => window.location.reload()}
-            style={{
-              marginTop: '10px',
-              padding: '8px 16px',
-              backgroundColor: '#f44336',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            Reload Page
-          </button>
-        </div>
-      );
-    }
-    
-    return (
-      <div style={{ 
-        border: '3px solid #4caf50', 
-        borderRadius: '8px', 
-        padding: '15px',
-        margin: '15px 0',
-        backgroundColor: '#f1f8e9'
-      }}>
-        <h3 style={{ margin: '0 0 10px 0', color: '#2e7d32' }}>
-          📋 Emergency Category Display ({categories.length})
-        </h3>
-        
-        <div style={{ 
-          maxHeight: '300px', 
-          overflowY: 'auto',
-          border: '1px solid #c5e1a5',
-          borderRadius: '4px',
-          backgroundColor: 'white' 
-        }}>
-          {categories.length > 0 ? (
-            <div style={{ display: 'flex', flexWrap: 'wrap', padding: '10px' }}>
-              {categories.slice(0, 100).map((cat, index) => (
-                <div 
-                  key={`${cat.name}-${index}`}
-                  style={{
-                    margin: '4px',
-                    padding: '6px 12px',
-                    backgroundColor: '#f5f5f5',
-                    borderRadius: '30px',
-                    fontSize: '13px',
-                    border: '1px solid #e0e0e0',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}
-                >
-                  <span>{cat.name}</span>
-                  <span style={{ 
-                    backgroundColor: '#e8f5e9', 
-                    color: '#2e7d32',
-                    padding: '2px 6px',
-                    borderRadius: '20px',
-                    fontSize: '11px',
-                    minWidth: '20px',
-                    textAlign: 'center'
-                  }}>
-                    {cat.count}
-                  </span>
-                </div>
-              ))}
-              {categories.length > 100 && (
-                <div style={{ 
-                  margin: '4px', 
-                  padding: '6px 12px',
-                  backgroundColor: '#fffde7',
-                  border: '1px solid #fff59d',
-                  borderRadius: '30px',
-                  fontSize: '13px'
-                }}>
-                  ...and {categories.length - 100} more
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>
-              No categories available
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // DirectCategoryManager - Completely bypasses the original components
-  const DirectCategoryManager = (props) => {
-    const { onCategorySelect, onVisibilityChange, hiddenCategories, selectedCategory, sessionId: propsSessionId } = props;
-    const [categories, setCategories] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState(null);
-    const [categoryFilter, setCategoryFilter] = useState('');
-    
-    // Load categories directly from API
-    useEffect(() => {
-      const loadCategories = async () => {
-        // Get session ID from props or from SessionManager as fallback
-        const effectiveSessionId = propsSessionId || SessionManager.getSessionId();
-        
-        if (!effectiveSessionId) {
-          setError('No session ID available');
-          setLoading(false);
-          return;
-        }
-        
-        // Check if we should use cached categories
-        const now = Date.now();
-        const lastDirectCategoryFetch = window.lastDirectCategoryFetchTime || 0;
-        const CACHE_LIFETIME = 60000; // 1 minute
-        
-        // Skip fetching if we recently fetched and already have categories
-        if (categories.length > 0 && now - lastDirectCategoryFetch < CACHE_LIFETIME) {
-          console.log(`[DIRECT] Using cached categories (fetched ${(now - lastDirectCategoryFetch)/1000}s ago)`);
-          setLoading(false);
-          return;
-        }
-        
-        try {
-          console.log('[DIRECT] Loading categories for session:', effectiveSessionId);
-          window.lastDirectCategoryFetchTime = now;
-          const response = await fetch(`/api/channels/${effectiveSessionId}/categories`);
-          
-          if (!response.ok) {
-            setError(`API error: ${response.status} ${response.statusText}`);
-            setLoading(false);
-            return;
-          }
-          
-          const text = await response.text();
-          try {
-            const data = JSON.parse(text);
-            if (Array.isArray(data)) {
-              console.log(`[DIRECT] ✅ Loaded ${data.length} categories`);
-              
-              // Format categories to ensure consistent structure
-              const formatted = data.map(cat => {
-                if (typeof cat === 'string') return { name: cat, count: 0 };
-                return {
-                  name: cat.name || cat.category || cat.title || cat.groupTitle || 'Unknown',
-                  count: parseInt(cat.count) || 0
-                };
-              });
-              
-              // Sort alphabetically
-              formatted.sort((a, b) => a.name.localeCompare(b.name));
-              setCategories(formatted);
-            } else {
-              console.error('[DIRECT] Response is not an array:', data);
-              setError('API response is not an array');
-            }
-          } catch (parseError) {
-            console.error('[DIRECT] JSON parse error:', parseError);
-            setError(`JSON parse error: ${parseError.message}`);
-          }
-        } catch (fetchError) {
-          console.error('[DIRECT] Fetch error:', fetchError);
-          setError(`Fetch error: ${fetchError.message}`);
-        } finally {
-          setLoading(false);
-        }
-      };
-      
-      loadCategories();
-    }, [propsSessionId]);
-    
-    // Filter categories based on search
-    const filteredCategories = categoryFilter
-      ? categories.filter(cat => 
-          cat.name.toLowerCase().includes(categoryFilter.toLowerCase())
-        )
-      : categories;
-    
-    // Toggle category visibility
-    const toggleCategory = (category) => {
-      const updatedHiddenCategories = hiddenCategories.includes(category)
-        ? hiddenCategories.filter(c => c !== category)
-        : [...hiddenCategories, category];
-      
-      onVisibilityChange(updatedHiddenCategories);
-    };
-    
-    // Hide all categories
-    const hideAllCategories = () => {
-      const allCategoryNames = categories.map(cat => cat.name);
-      onVisibilityChange(allCategoryNames);
-    };
-    
-    // Show all categories
-    const showAllCategories = () => {
-      onVisibilityChange([]);
-      onCategorySelect(null);
-    };
-    
-    if (loading) {
-      return (
-        <div style={{ padding: '20px', textAlign: 'center' }}>
-          <div style={{ margin: '20px 0' }}>
-            <span style={{
-              display: 'inline-block',
-              width: '20px',
-              height: '20px',
-              border: '3px solid #f3f3f3',
-              borderTop: '3px solid #3498db',
-              borderRadius: '50%',
-              animation: 'spin 1s linear infinite',
-              marginRight: '10px'
-            }}></span>
-            Loading categories...
-          </div>
-        </div>
-      );
-    }
-    
-    if (error) {
-      return (
-        <div style={{ padding: '20px', color: 'red' }}>
-          <div>Error: {error}</div>
-          <button 
-            onClick={() => window.location.reload()}
-            style={{
-              marginTop: '10px',
-              padding: '8px 16px',
-              backgroundColor: '#f44336',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            Reload Page
-          </button>
-        </div>
-      );
-    }
-    
-    return (
-      <div>
-        <div style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center',
-          marginBottom: '10px'
-        }}>
-          <h3 style={{ 
-            margin: 0, 
-            fontSize: '16px', 
-            color: '#444',
-            fontWeight: '500'
-          }}>
-            Categories ({categories.length})
-          </h3>
-          
-          <div style={{ display: 'flex', gap: '5px' }}>
-            <button 
-              onClick={hideAllCategories} 
-              style={{ 
-                padding: '4px 8px', 
-                fontSize: '12px',
-                background: 'transparent',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                color: '#666'
-              }}
-            >
-              Hide All
-            </button>
-            <button 
-              onClick={showAllCategories} 
-              style={{ 
-                padding: '4px 8px', 
-                fontSize: '12px',
-                background: 'transparent',
-                border: '1px solid #ddd',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                color: '#666'
-              }}
-            >
-              Show All
-            </button>
-          </div>
-        </div>
-        
-        {/* Category filter input */}
-        <div style={{ marginBottom: '10px', position: 'relative' }}>
-          <svg 
-            style={{ 
-              position: 'absolute', 
-              left: '8px', 
-              top: '50%', 
-              transform: 'translateY(-50%)',
-              color: '#666' 
-            }} 
-            xmlns="http://www.w3.org/2000/svg" 
-            width="14" 
-            height="14" 
-            viewBox="0 0 24 24" 
-            fill="none" 
-            stroke="currentColor" 
-            strokeWidth="2" 
-            strokeLinecap="round" 
-            strokeLinejoin="round"
-          >
-            <circle cx="11" cy="11" r="8"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
-          <input
-            type="text"
-            placeholder="Filter categories..."
-            value={categoryFilter}
-            onChange={(e) => setCategoryFilter(e.target.value)}
-            style={{ 
-              width: '100%',
-              padding: '8px 10px 8px 30px',
-              borderRadius: '6px',
-              border: '1px solid #ddd',
-              fontSize: '13px'
-            }}
-          />
-          {categoryFilter && (
-            <button
-              onClick={() => setCategoryFilter('')}
-              style={{
-                position: 'absolute',
-                right: '8px',
-                top: '50%',
-                transform: 'translateY(-50%)',
-                background: 'transparent',
-                border: 'none',
-                cursor: 'pointer',
-                padding: '2px',
-                color: '#999'
-              }}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-            </button>
-          )}
-        </div>
-        
-        <div style={{ 
-          maxHeight: 'calc(100vh - 240px)', 
-          overflowY: 'auto', 
-          border: '1px solid #eee', 
-          borderRadius: '8px',
-          padding: '5px',
-          backgroundColor: 'white'
-        }}>
-          {filteredCategories.length > 0 ? (
-            filteredCategories.map((cat, index) => (
-              <div 
-                key={`${cat.name}-${index}`} 
-                style={{ 
-                  margin: '2px 0',
-                  borderRadius: '4px',
-                  overflow: 'hidden'
-                }}
-              >
-                <div style={{ 
-                  display: 'flex', 
-                  alignItems: 'center',
-                  backgroundColor: selectedCategory === cat.name ? '#f0f7ff' : 'transparent',
-                  padding: '8px 10px',
-                  borderRadius: '4px',
-                  transition: 'background-color 0.2s ease'
-                }}>
-                  <input
-                    type="checkbox"
-                    id={`direct-category-${index}`}
-                    checked={!hiddenCategories.includes(cat.name)}
-                    onChange={() => toggleCategory(cat.name)}
-                    style={{ 
-                      marginRight: '8px',
-                      accentColor: '#1a73e8'
-                    }}
-                  />
-                  <label 
-                    htmlFor={`direct-category-${index}`}
-                    onClick={() => onCategorySelect(cat.name)} 
-                    style={{ 
-                      cursor: 'pointer', 
-                      flex: 1,
-                      fontSize: '14px',
-                      color: selectedCategory === cat.name ? '#1a73e8' : '#444',
-                      fontWeight: selectedCategory === cat.name ? '500' : 'normal',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}
-                  >
-                    <span style={{ 
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap'
-                    }}>
-                      {cat.name}
-                    </span>
-                    <span style={{ 
-                      backgroundColor: '#f1f1f1',
-                      borderRadius: '30px',
-                      padding: '2px 8px',
-                      fontSize: '12px',
-                      color: '#666',
-                      minWidth: '30px',
-                      textAlign: 'center'
-                    }}>
-                      {cat.count}
-                    </span>
-                  </label>
-                </div>
-              </div>
-            ))
-          ) : (
-            <div style={{ 
-              padding: '20px', 
-              textAlign: 'center', 
-              color: '#888',
-              fontSize: '14px'
-            }}>
-              {categoryFilter ? "No categories match your filter" : "No categories available"}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
   // Server Status Button component
   const ServerStatusButton = ({ onOpenSessionDebugger }) => {
     const [isChecking, setIsChecking] = useState(false);
     const [statusData, setStatusData] = useState(null);
     const [showDetails, setShowDetails] = useState(false);
     const [isReloadingEpg, setIsReloadingEpg] = useState(false);
-    
-    // Force a reload of EPG sources using the init endpoint
+
     const forceReloadEpg = async () => {
       if (window.confirm('Force reload EPG sources from the server configuration? This will add all configured EPG sources to your session.')) {
         setIsReloadingEpg(true);
         try {
-          // Get the session ID
           const sessionId = SessionManager.getSessionId();
           if (!sessionId) {
             alert('Error: No session ID available');
             return;
           }
-          
-          // First initialize the EPG session
+
           const baseUrl = resolveApiBase();
           const initResponse = await fetch(`${baseUrl}/api/epg/init`, {
             method: 'POST',
@@ -1611,28 +1096,14 @@ function App() {
             },
             body: JSON.stringify({ sessionId })
           });
-          
+
           if (!initResponse.ok) {
             throw new Error(`Failed to initialize EPG: ${initResponse.status}`);
           }
-          
-          const initData = await initResponse.json();
-          console.log('[EPG Reload] Init result:', initData);
-          
-          // Refresh EPG sources
-          const epgResponse = await fetch(`${baseUrl}/api/epg/${sessionId}/sources?_t=${Date.now()}`);
-          if (!epgResponse.ok) {
-            throw new Error(`Failed to get EPG sources: ${epgResponse.status}`);
-          }
-          
-          const epgData = await epgResponse.json();
-          console.log('[EPG Reload] Sources result:', epgData);
-          
-          // Show success message
-          alert(`Successfully loaded ${epgData.sources.length} EPG sources!`);
-          
-          // Trigger a custom event to notify the DirectEpgSourcesLoader component
-          const event = new CustomEvent('epgSourcesUpdated', { detail: epgData.sources });
+
+          await fetch(`${baseUrl}/api/epg/${sessionId}/sources?_t=${Date.now()}`);
+          alert('Successfully triggered EPG source reload.');
+          const event = new CustomEvent('epgSourcesUpdated', { detail: null });
           window.dispatchEvent(event);
         } catch (error) {
           console.error('[EPG Reload] Error:', error);
@@ -1642,7 +1113,7 @@ function App() {
         }
       }
     };
-    
+
     const checkServerStatus = async () => {
       setIsChecking(true);
       try {
@@ -1651,7 +1122,6 @@ function App() {
         if (response.ok) {
           const data = await response.json();
           setStatusData(data);
-          console.log('[Server Status]', data);
         } else {
           console.error('Failed to fetch server status:', response.status);
         }
@@ -1661,22 +1131,16 @@ function App() {
         setIsChecking(false);
       }
     };
-    
+
     const triggerCleanup = async () => {
       if (window.confirm('Are you sure you want to trigger server cleanup?')) {
         setIsChecking(true);
         try {
           const baseUrl = resolveApiBase();
-          const response = await fetch(`${baseUrl}/api/status/cleanup`, {
-            method: 'POST'
-          });
-          
+          const response = await fetch(`${baseUrl}/api/status/cleanup`, { method: 'POST' });
           if (response.ok) {
             const result = await response.json();
-            console.log('[Server Cleanup] Result:', result);
             alert(`Cleanup complete. Removed ${result.sessionsDiff} sessions.`);
-            
-            // Refresh status data
             checkServerStatus();
           }
         } catch (error) {
@@ -1686,101 +1150,63 @@ function App() {
         }
       }
     };
-    
-    // Format memory usage for display
+
     const formatMemory = (memoryObj) => {
       if (!memoryObj) return 'N/A';
-      return Object.entries(memoryObj).map(([key, value]) => 
-        `${key}: ${value}`
-      ).join(', ');
+      return Object.entries(memoryObj)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(', ');
     };
-    
+
     return (
-      <div style={{
-        position: 'fixed',
-        bottom: '10px',
-        right: '10px',
-        zIndex: 1000
-      }}>
+      <div className="fixed bottom-3 right-3 z-50 text-xs">
         {statusData && showDetails && (
-          <div style={{
-            position: 'absolute',
-            bottom: '40px',
-            right: '0',
-            backgroundColor: 'white',
-            border: '1px solid #ddd',
-            borderRadius: '4px',
-            padding: '10px',
-            width: '300px',
-            boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-            fontSize: '12px'
-          }}>
-            <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>
-              Server Status
-              <button 
+          <div className="absolute bottom-12 right-0 w-72 space-y-3 rounded-2xl border border-slate-800 bg-slate-950/95 p-4 text-slate-200 shadow-xl shadow-slate-950/40">
+            <div className="flex items-center justify-between text-sm font-semibold text-slate-100">
+              <span>Server Status</span>
+              <button
+                type="button"
                 onClick={() => setShowDetails(false)}
-                style={{
-                  float: 'right',
-                  border: 'none',
-                  background: 'none',
-                  cursor: 'pointer',
-                  fontSize: '14px'
-                }}
+                className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-slate-100"
               >
                 ×
               </button>
             </div>
-            <div>Uptime: {Math.floor(statusData.uptime / 60)} minutes</div>
-            <div>Memory: {formatMemory(statusData.memory)}</div>
-            <div>Sessions: {statusData.sessions.count}</div>
-            {statusData.sessions.oldest && (
-              <div>Oldest: {new Date(statusData.sessions.oldest.lastAccessed).toLocaleTimeString()}</div>
-            )}
-            
-            <div style={{ display: 'flex', gap: '5px', marginTop: '8px' }}>
+            <dl className="space-y-1 text-slate-300">
+              <div className="flex justify-between"><dt>Uptime</dt><dd>{Math.floor(statusData.uptime / 60)} minutes</dd></div>
+              <div className="flex justify-between"><dt>Memory</dt><dd className="text-right">{formatMemory(statusData.memory)}</dd></div>
+              <div className="flex justify-between"><dt>Sessions</dt><dd>{statusData.sessions.count}</dd></div>
+              {statusData.sessions.oldest && (
+                <div className="flex justify-between"><dt>Oldest</dt><dd>{new Date(statusData.sessions.oldest.lastAccessed).toLocaleTimeString()}</dd></div>
+              )}
+            </dl>
+            <div className="flex gap-2">
               <button
+                type="button"
                 onClick={triggerCleanup}
                 disabled={isChecking}
-                style={{
-                  flex: '1',
-                  padding: '4px 8px',
-                  fontSize: '12px',
-                  backgroundColor: '#f8d7da',
-                  color: '#721c24',
-                  border: '1px solid #f5c6cb',
-                  borderRadius: '4px',
-                  cursor: isChecking ? 'wait' : 'pointer'
-                }}
+                className="flex-1 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isChecking ? 'Working...' : 'Cleanup Sessions'}
+                {isChecking ? 'Working…' : 'Cleanup Sessions'}
               </button>
-              
               <button
+                type="button"
                 onClick={forceReloadEpg}
                 disabled={isReloadingEpg}
-                style={{
-                  flex: '1',
-                  padding: '4px 8px',
-                  fontSize: '12px',
-                  backgroundColor: '#d1ecf1',
-                  color: '#0c5460',
-                  border: '1px solid #bee5eb',
-                  borderRadius: '4px',
-                  cursor: isReloadingEpg ? 'wait' : 'pointer'
-                }}
+                className="flex-1 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isReloadingEpg ? 'Loading...' : 'Force Reload EPG'}
+                {isReloadingEpg ? 'Loading…' : 'Force Reload EPG'}
               </button>
             </div>
-            
-            <div style={{ fontSize: '10px', marginTop: '5px', color: '#666' }}>
+            <div className="text-[10px] text-slate-500">
               Last checked: {new Date(statusData.timestamp).toLocaleTimeString()}
             </div>
           </div>
         )}
-        
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+
+        <div className="flex flex-col gap-2">
           <button
+            type="button"
             onClick={() => {
               if (statusData && !showDetails) {
                 setShowDetails(true);
@@ -1790,32 +1216,14 @@ function App() {
               }
             }}
             disabled={isChecking}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: isChecking ? '#6c757d' : '#17a2b8',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: isChecking ? 'wait' : 'pointer',
-              fontSize: '12px',
-              opacity: 0.85
-            }}
+            className="rounded-xl bg-cyan-600 px-3 py-2 text-[11px] font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isChecking ? 'Checking…' : statusData ? 'Status ●' : 'Status'}
           </button>
-
           <button
+            type="button"
             onClick={onOpenSessionDebugger}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#1d4ed8',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '12px',
-              opacity: 0.9
-            }}
+            className="rounded-xl bg-blue-600 px-3 py-2 text-[11px] font-semibold text-white shadow-lg shadow-blue-900/30 transition hover:bg-blue-500"
           >
             Session Debugger
           </button>
@@ -1825,39 +1233,14 @@ function App() {
   };
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      flexDirection: 'column',
-      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif',
-      color: '#333',
-      backgroundColor: '#f5f7fa'
-    }}>
-      {/* Header */}
-      <header style={{
-        backgroundColor: 'white',
-        borderBottom: '1px solid #eee',
-        padding: '10px 20px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: '20px',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+    <div className="flex min-h-screen flex-col bg-slate-950 font-sans text-slate-100">
+      <header className="flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20">
+        <div className="flex items-center gap-3">
           <button
+            type="button"
             onClick={toggleSidebar}
-            style={{
-              border: 'none',
-              background: 'transparent',
-              color: '#666',
-              cursor: 'pointer',
-              padding: '8px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: '4px'
-            }}
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:ring-offset-2 focus:ring-offset-slate-950"
+            aria-label="Toggle sidebar"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="3" y1="12" x2="21" y2="12"></line>
@@ -1867,15 +1250,7 @@ function App() {
           </button>
 
           {sessionId && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              backgroundColor: '#e3f2fd',
-              padding: '4px 10px',
-              borderRadius: '30px',
-              fontSize: '12px',
-              color: '#1565c0'
-            }}>
+            <div className="hidden items-center rounded-full border border-blue-400/40 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-200 sm:inline-flex">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 width="14"
@@ -1886,46 +1261,29 @@ function App() {
                 strokeWidth="2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                style={{ marginRight: '5px' }}
+                className="mr-2 h-3.5 w-3.5"
               >
                 <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
                 <circle cx="12" cy="12" r="3"></circle>
               </svg>
-              Session: {sessionId && typeof sessionId === 'string' ? sessionId.substring(0, 8) : 'Loading...'}
+              Session: {typeof sessionId === 'string' ? sessionId.substring(0, 8) : 'Loading...'}
             </div>
           )}
         </div>
 
-        <div style={{ flex: 1, textAlign: 'center' }}>
-          <h1 style={{
-            fontSize: '18px',
-            margin: 0,
-            color: '#1a73e8',
-            fontWeight: '500'
-          }}>
-            IPTV EPG Matcher
-          </h1>
+        <div className="flex flex-1 items-center justify-center px-4">
+          <h1 className="text-lg font-semibold text-blue-300 sm:text-xl">IPTV EPG Matcher</h1>
         </div>
 
-        <div>
+        <div className="flex items-center gap-3">
           {sessionId && activeTab === 'channels' && (
             <button
+              type="button"
               onClick={async () => {
                 console.log('[App] Manually reloading categories');
                 await fetchCategoriesFromApi(sessionId);
               }}
-              style={{
-                backgroundColor: '#f1f8e9',
-                color: '#388e3c',
-                border: '1px solid #c5e1a5',
-                borderRadius: '4px',
-                padding: '8px 12px',
-                fontSize: '13px',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px'
-              }}
+              className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-500/20"
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M23 4v6h-6"></path>
@@ -1939,13 +1297,7 @@ function App() {
         </div>
       </header>
 
-      {/* Main content */}
-      <div style={{
-        display: 'flex',
-        flex: 1,
-        position: 'relative'
-      }}>
-        {/* Sidebar */}
+      <div className="flex flex-1">
         <Sidebar
           showSidebar={showSidebar}
           activeTab={activeTab}
@@ -1957,32 +1309,11 @@ function App() {
           epgSourceCount={epgSources.length}
         />
 
-        {/* Main content area */}
-        <main style={{
-          flex: 1,
-          overflowY: 'auto',
-          maxHeight: 'calc(100vh - 60px)'
-        }}>
-          {/* Tab content */}
+        <main className="flex-1 overflow-y-auto bg-slate-950">
           {renderActiveTabContent()}
         </main>
       </div>
 
-      {/* CSS Animation */}
-      <style dangerouslySetInnerHTML={{
-        __html: `
-          @keyframes spin {
-            to { transform: rotate(360deg); }
-          }
-          
-          @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-          }
-        `
-      }} />
-
-      {/* Server status button */}
       <SessionDebugger
         isOpen={sessionDebuggerOpen}
         onClose={() => setSessionDebuggerOpen(false)}

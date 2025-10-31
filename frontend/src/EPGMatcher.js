@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
+import StatusDisplay from './StatusDisplay';
 
 /**
  * Enhanced EPGMatcher component for matching channels with EPG data
@@ -858,58 +859,39 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         // Safety check - make sure sources is an array
         const safeSources = Array.isArray(sources) ? sources : [];
         const sourceCount = safeSources.length;
-        
+
         return (
-            <div style={{
-                padding: '10px',
-                backgroundColor: '#f9f9f9',
-                borderRadius: '4px',
-                color: '#666',
-                fontSize: '13px',
-                maxHeight: '300px',
-                overflowY: 'auto',
-                position: 'relative'
-            }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    marginBottom: '10px'
-                }}>
-                    <h3 style={{ margin: 0, fontSize: '16px' }}>
+            <div className="relative max-h-[300px] overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-400">
+                <div className="mb-4 flex items-center justify-between">
+                    <h3 className="m-0 text-base font-semibold text-slate-100">
                         {sourceCount} EPG Sources
                     </h3>
                     <button
                         onClick={onClose}
-                        style={{
-                            background: 'none',
-                            border: 'none',
-                            cursor: 'pointer',
-                            fontSize: '16px'
-                        }}
+                        className="cursor-pointer border-none bg-transparent text-xl text-slate-400 transition hover:text-slate-100"
                     >
                         ×
                     </button>
                 </div>
-                
+
                 {sourceCount === 0 ? (
-                    <div>No EPG sources found</div>
+                    <div className="text-slate-500">No EPG sources found</div>
                 ) : (
-                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <table className="w-full border-collapse">
                         <thead>
-                            <tr>
-                                <th style={{ textAlign: 'left', padding: '5px' }}>ID</th>
-                                <th style={{ textAlign: 'left', padding: '5px' }}>Name</th>
+                            <tr className="border-b border-slate-800">
+                                <th className="p-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">ID</th>
+                                <th className="p-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">Name</th>
                             </tr>
                         </thead>
                         <tbody>
                             {safeSources.map((source, index) => (
-                                <tr key={source.id || index} style={{ 
-                                    borderBottom: '1px solid #eee',
-                                    backgroundColor: index % 2 === 0 ? '#f5f5f5' : 'white'
-                                }}>
-                                    <td style={{ padding: '5px' }}>{source.id}</td>
-                                    <td style={{ padding: '5px' }}>{source.name}</td>
+                                <tr
+                                    key={source.id || index}
+                                    className={`border-b border-slate-800/50 ${index % 2 === 0 ? 'bg-slate-950/40' : 'bg-slate-900/40'}`}
+                                >
+                                    <td className="p-2 text-slate-300">{source.id}</td>
+                                    <td className="p-2 text-slate-300">{source.name}</td>
                                 </tr>
                             ))}
                         </tbody>
@@ -922,26 +904,23 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     // Debug component for EPG troubleshooting - Completely rewritten for better data handling
     const EpgDebugPanel = ({ sessionId, epgSources }) => {
         const [showDebug, setShowDebug] = useState(false);
-        
+
         if (!showDebug) {
             return (
-                <div 
+                <div
                     onClick={() => setShowDebug(true)}
-                    style={{
-                        padding: '8px 15px',
-                        backgroundColor: '#f0f0f0',
-                        borderRadius: '4px',
-                        margin: '15px 0',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        color: '#666',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '5px'
-                    }}
+                    className="my-4 flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-900/70 px-4 py-2 text-xs text-slate-400 transition hover:border-slate-600 hover:bg-slate-900 hover:text-slate-200"
                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className="h-4 w-4"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                    >
                         <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"></path>
                         <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
                         <line x1="12" y1="17" x2="12.01" y2="17"></line>
@@ -950,87 +929,51 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 </div>
             );
         }
-        
+
         return (
-            <div style={{
-                padding: '15px',
-                backgroundColor: '#f8f9fa',
-                border: '1px solid #ddd',
-                borderRadius: '6px',
-                margin: '15px 0',
-                fontSize: '13px'
-            }}>
-                <div style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    marginBottom: '10px'
-                }}>
-                    <h4 style={{
-                        margin: '0 0 10px 0',
-                        color: '#333',
-                        fontWeight: '500',
-                        fontSize: '14px'
-                    }}>EPG Debug Information</h4>
+            <div className="my-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm">
+                <div className="mb-4 flex items-center justify-between">
+                    <h4 className="mb-0 text-sm font-medium text-slate-100">EPG Debug Information</h4>
                     <button
                         onClick={() => setShowDebug(false)}
-                        style={{
-                            background: 'none',
-                            border: 'none',
-                            cursor: 'pointer',
-                            color: '#666',
-                            padding: '0',
-                            display: 'flex',
-                            alignItems: 'center'
-                        }}
+                        className="flex cursor-pointer items-center border-none bg-transparent p-0 text-slate-400 transition hover:text-slate-100"
                     >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            className="h-4 w-4"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        >
                             <line x1="18" y1="6" x2="6" y2="18"></line>
                             <line x1="6" y1="6" x2="18" y2="18"></line>
                         </svg>
                     </button>
                 </div>
-                
-                <div style={{
-                    backgroundColor: '#fff',
-                    padding: '10px',
-                    borderRadius: '4px',
-                    marginBottom: '10px',
-                    border: '1px solid #eee'
-                }}>
-                    <p style={{ margin: '0 0 5px 0', fontWeight: '500' }}>Session ID:</p>
-                    <code style={{
-                        display: 'block',
-                        padding: '5px',
-                        backgroundColor: '#f5f5f5',
-                        borderRadius: '3px',
-                        fontSize: '12px',
-                        overflowX: 'auto'
-                    }}>{typeof sessionId === 'string' ? sessionId : 'No session ID available'}</code>
+
+                <div className="mb-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                    <p className="mb-2 font-medium text-slate-300">Session ID:</p>
+                    <code className="block overflow-x-auto rounded bg-slate-950/80 p-2 text-xs text-slate-400">
+                        {typeof sessionId === 'string' ? sessionId : 'No session ID available'}
+                    </code>
                 </div>
-                
-                <div style={{
-                    backgroundColor: '#fff',
-                    padding: '10px',
-                    borderRadius: '4px',
-                    border: '1px solid #eee'
-                }}>
-                    <p style={{ margin: '0 0 5px 0', fontWeight: '500' }}>
+
+                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                    <p className="mb-2 font-medium text-slate-300">
                         EPG Sources ({Array.isArray(epgSources) ? epgSources.length : 0}):
                     </p>
-                    
-                    <div style={{ maxHeight: '200px', overflow: 'auto' }}>
-                        <EpgSourcesDisplay 
-                            sources={safeFormattedEpgSources} 
+
+                    <div className="max-h-[200px] overflow-auto">
+                        <EpgSourcesDisplay
+                            sources={safeFormattedEpgSources}
                             onClose={() => {}} // No-op since this is just a display
                         />
                     </div>
-                    
-                    <div style={{
-                        marginTop: '10px',
-                        display: 'flex',
-                        gap: '10px',
-                        justifyContent: 'flex-end'
-                    }}>
+
+                    <div className="mt-3 flex justify-end gap-3">
                         <button
                             onClick={async () => {
                                 try {
@@ -1039,7 +982,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                                     });
                                     console.log('EPG session re-initialization response:', initResponse.data);
                                     alert('EPG session reinitialized. Check console for details.');
-                                    
+
                                     // Re-fetch sources
                                     const sourcesResponse = await axios.get(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
                                     if (sourcesResponse.data && sourcesResponse.data.sources) {
@@ -1051,14 +994,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                                     alert(`Error: ${error.message}`);
                                 }
                             }}
-                            style={{
-                                padding: '5px 10px',
-                                backgroundColor: '#f5f5f5',
-                                border: '1px solid #ddd',
-                                borderRadius: '4px',
-                                fontSize: '12px',
-                                cursor: 'pointer'
-                            }}
+                            className="cursor-pointer rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-1.5 text-xs transition hover:border-slate-600 hover:bg-slate-900 hover:text-slate-100"
                         >
                             Reinitialize EPG Session
                         </button>
@@ -1071,123 +1007,77 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     // Component to display the EPG program data
     const EpgProgramDisplay = () => {
         if (!epgData || !epgData.channel) return null;
-        
+
         const { channel, programs } = epgData;
-        
+
         return (
-            <div style={{
-                marginTop: '20px',
-                border: '1px solid #e0e0e0',
-                borderRadius: '8px',
-                overflow: 'hidden'
-            }}>
-                <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    padding: '12px',
-                    backgroundColor: '#f5f5f5',
-                    borderBottom: '1px solid #e0e0e0'
-                }}>
+            <div className="mt-6 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40">
+                <div className="flex items-center border-b border-slate-800 bg-slate-900/60 p-4">
                     {channel.icon && (
-                        <img 
-                            src={channel.icon} 
-                            alt={channel.name} 
-                            style={{
-                                width: '32px',
-                                height: '32px',
-                                marginRight: '10px',
-                                objectFit: 'contain'
-                            }}
+                        <img
+                            src={channel.icon}
+                            alt={channel.name}
+                            className="mr-3 h-8 w-8 object-contain"
                             onError={(e) => { e.target.style.display = 'none' }}
                         />
                     )}
                     <div>
-                        <h3 style={{ margin: '0 0 4px 0', fontWeight: '500' }}>{channel.name}</h3>
-                        <div style={{ fontSize: '12px', color: '#666' }}>
+                        <h3 className="mb-1 font-medium text-slate-100">{channel.name}</h3>
+                        <div className="text-xs text-slate-500">
                             Source: {channel.source_name || 'Unknown'} • ID: {channel.id}
                         </div>
                     </div>
                 </div>
-                
+
                 {currentProgram && (
-                    <div style={{
-                        padding: '12px',
-                        backgroundColor: '#e3f2fd',
-                        borderBottom: '1px solid #bbdefb'
-                    }}>
-                        <div style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            marginBottom: '6px'
-                        }}>
-                            <h4 style={{ margin: 0, fontWeight: '500', color: '#1565c0' }}>
+                    <div className="border-b border-emerald-500/30 bg-emerald-500/10 p-4">
+                        <div className="mb-2 flex justify-between">
+                            <h4 className="m-0 font-medium text-emerald-100">
                                 {currentProgram.title}
-                                <span style={{
-                                    marginLeft: '8px',
-                                    fontSize: '11px',
-                                    padding: '2px 6px',
-                                    backgroundColor: '#1976d2',
-                                    color: 'white',
-                                    borderRadius: '10px',
-                                    verticalAlign: 'middle'
-                                }}>
+                                <span className="ml-2 inline-block rounded-full bg-emerald-500 px-2 py-0.5 align-middle text-[11px] text-white">
                                     ON NOW
                                 </span>
                             </h4>
-                            <div style={{ fontSize: '13px', color: '#1976d2', fontWeight: '500' }}>
+                            <div className="text-sm font-medium text-emerald-200">
                                 {formatTime(currentProgram.start)} - {formatTime(currentProgram.stop)}
                             </div>
                         </div>
                         {currentProgram.description && (
-                            <div style={{ fontSize: '13px', color: '#333' }}>
+                            <div className="text-sm text-emerald-100/90">
                                 {currentProgram.description}
                             </div>
                         )}
                     </div>
                 )}
-                
+
                 {programs && programs.length > 0 ? (
-                    <div style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                    <div className="max-h-[300px] overflow-y-auto">
                         {programs.map((program, index) => {
                             const isCurrentProgram = currentProgram && program.id === currentProgram.id;
                             if (isCurrentProgram && currentProgram) {
                                 // Skip current program as it's already displayed above
                                 return null;
                             }
-                            
+
                             return (
-                                <div 
-                                    key={program.id || index} 
-                                    style={{
-                                        padding: '10px 12px',
-                                        borderBottom: index < programs.length - 1 ? '1px solid #eee' : 'none',
-                                        backgroundColor: index % 2 === 0 ? '#fafafa' : 'white',
-                                        display: 'flex'
-                                    }}
+                                <div
+                                    key={program.id || index}
+                                    className={`flex border-b border-slate-800/50 p-3 ${index % 2 === 0 ? 'bg-slate-950/40' : 'bg-slate-900/40'}`}
                                 >
-                                    <div style={{ width: '100px', flexShrink: 0 }}>
-                                        <div style={{ fontSize: '13px', fontWeight: '500' }}>
+                                    <div className="w-24 flex-shrink-0">
+                                        <div className="text-sm font-medium text-slate-300">
                                             {formatTime(program.start)}
                                         </div>
-                                        <div style={{ fontSize: '11px', color: '#666' }}>
+                                        <div className="text-xs text-slate-500">
                                             {formatDate(program.start)}
                                         </div>
                                     </div>
-                                    <div style={{ flex: 1 }}>
-                                        <div style={{ fontWeight: '400' }}>
+                                    <div className="flex-1">
+                                        <div className="font-normal text-slate-200">
                                             {program.title}
                                         </div>
                                         {program.description && (
-                                            <div style={{ 
-                                                fontSize: '12px', 
-                                                color: '#666',
-                                                marginTop: '4px',
-                                                overflow: 'hidden',
-                                                textOverflow: 'ellipsis',
-                                                display: '-webkit-box',
-                                                WebkitLineClamp: 2,
-                                                WebkitBoxOrient: 'vertical'
-                                            }}>
+                                            <div className="mt-1 line-clamp-2 text-xs text-slate-400">
                                                 {program.description}
                                             </div>
                                         )}
@@ -1197,7 +1087,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                         })}
                     </div>
                 ) : (
-                    <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>
+                    <div className="p-6 text-center text-slate-500">
                         No program data available for this channel
                     </div>
                 )}
@@ -1206,24 +1096,10 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     };
 
     return (
-        <div className="epg-matcher-container" style={{
-            marginTop: '20px',
-            padding: '20px',
-            border: '1px solid rgba(0, 0, 0, 0.1)',
-            borderRadius: '8px',
-            backgroundColor: '#ffffff',
-            boxShadow: '0 2px 10px rgba(0, 0, 0, 0.05)'
-        }}>
+        <div className="epg-matcher-container mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl backdrop-blur">
             {/* Header with toggle buttons */}
-            <div style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: '15px',
-                borderBottom: '1px solid #eee',
-                paddingBottom: '10px'
-            }}>
-                <h3 style={{ margin: 0, color: '#333', fontWeight: '500' }}>EPG Information</h3>
+            <div className="mb-4 flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="m-0 text-xl font-semibold text-slate-100">EPG Information</h3>
             </div>
 
             {/* Show program data if available after a match */}
@@ -1231,74 +1107,47 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
 
             {/* Error message */}
             {error && (
-                <div style={{
-                    padding: '15px',
-                    marginBottom: '20px',
-                    backgroundColor: '#ffebee',
-                    borderRadius: '4px',
-                    border: '1px solid #ffcdd2',
-                    color: '#c62828'
-                }}>
-                    {error}
+                <div className="mb-6">
+                    <StatusDisplay message={error} type="error" />
                 </div>
             )}
 
             {/* Search Form */}
-            <div style={{
-                marginBottom: '20px',
-                padding: '15px',
-                backgroundColor: '#f5f5f5',
-                borderRadius: '8px'
-            }}>
-                <form onSubmit={handleSearchSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <div className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner">
+                <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3">
+                    <div className="flex items-center gap-3">
                         <input
                             type="text"
                             value={epgSearch}
                             onChange={(e) => setEpgSearch(e.target.value)}
                             placeholder="Search EPG channels..."
-                            style={{
-                                flex: 1,
-                                padding: '10px 12px',
-                                fontSize: '14px',
-                                border: '1px solid #ddd',
-                                borderRadius: '4px',
-                                outline: 'none'
-                            }}
+                            className="flex-1 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
                         />
                         <button
                             type="submit"
                             disabled={loading || !epgSearch.trim()}
-                            style={{
-                                padding: '10px 15px',
-                                backgroundColor: '#1976d2',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '4px',
-                                cursor: (loading || !epgSearch.trim()) ? 'not-allowed' : 'pointer',
-                                fontSize: '14px',
-                                fontWeight: '500',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '5px'
-                            }}
+                            className="inline-flex items-center gap-2 rounded-lg border border-teal-500/60 bg-teal-500/20 px-4 py-2 text-sm font-semibold text-teal-100 transition hover:border-teal-400 hover:bg-teal-500/30 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-800/60 disabled:text-slate-500"
                         >
-                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                className="h-4 w-4"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            >
                                 <circle cx="11" cy="11" r="8"></circle>
                                 <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                             </svg>
                             {loading ? 'Searching...' : 'Search'}
                         </button>
                     </div>
-                    
+
                     {suggestedIds.length > 0 && (
-                        <div style={{
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            gap: '5px',
-                            marginTop: '5px'
-                        }}>
-                            <span style={{ fontSize: '12px', color: '#666', marginRight: '5px' }}>Suggestions:</span>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <span className="mr-2 text-xs text-slate-500">Suggestions:</span>
                             {suggestedIds.slice(0, 5).map((suggestion, index) => (
                                 <button
                                     key={index}
@@ -1307,15 +1156,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                                         setEpgSearch(suggestion.id);
                                         searchEpgChannels(suggestion.id);
                                     }}
-                                    style={{
-                                        padding: '4px 8px',
-                                        backgroundColor: '#e0e0e0',
-                                        border: 'none',
-                                        borderRadius: '12px',
-                                        fontSize: '12px',
-                                        cursor: 'pointer',
-                                        whiteSpace: 'nowrap'
-                                    }}
+                                    className="cursor-pointer whitespace-nowrap rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-900 hover:text-white"
                                 >
                                     {suggestion.id}
                                 </button>
@@ -1327,39 +1168,39 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
 
             {/* Search Results */}
             {searching ? (
-                <div className="text-center py-5">
-                    <div className="text-2xl mb-2">⏳</div>
-                    <p className="text-gray-600">Searching EPG data...</p>
+                <div className="py-5 text-center">
+                    <div className="mb-2 text-2xl">⏳</div>
+                    <p className="text-slate-400">Searching EPG data...</p>
                 </div>
             ) : searchResults && searchResults.length > 0 ? (
                 <div className="mb-5">
-                    <div className="flex justify-between items-center mb-3">
-                        <h4 className="text-lg font-semibold text-gray-900 m-0">Search Results</h4>
-                        <span className="text-sm text-gray-600">
+                    <div className="mb-3 flex items-center justify-between">
+                        <h4 className="m-0 text-lg font-semibold text-slate-100">Search Results</h4>
+                        <span className="text-sm text-slate-400">
                             {searchResults.length} {searchResults.length === 1 ? 'match' : 'matches'} found
                         </span>
                     </div>
 
                     {/* Filter and Sort Controls */}
-                    <div className="flex justify-between items-center mb-3 bg-gray-50 p-3 rounded-lg border border-gray-200">
+                    <div className="mb-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/60 p-3">
                         <div className="flex items-center gap-2">
-                            <label htmlFor="result-filter" className="text-sm font-medium text-gray-700">Filter:</label>
+                            <label htmlFor="result-filter" className="text-sm font-medium text-slate-400">Filter:</label>
                             <input
                                 id="result-filter"
                                 type="text"
                                 value={resultFilter}
                                 onChange={(e) => setResultFilter(e.target.value)}
                                 placeholder="Filter results..."
-                                className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent w-48"
+                                className="w-48 rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
                             />
                         </div>
                         <div className="flex items-center gap-2">
-                            <label htmlFor="result-sort" className="text-sm font-medium text-gray-700">Sort by:</label>
+                            <label htmlFor="result-sort" className="text-sm font-medium text-slate-400">Sort by:</label>
                             <select
                                 id="result-sort"
                                 value={resultSortMethod}
                                 onChange={(e) => setResultSortMethod(e.target.value)}
-                                className="px-3 py-1.5 border border-gray-300 rounded-md text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                className="rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5 text-sm text-slate-100 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
                             >
                                 <option value="match">Best Match</option>
                                 <option value="name">Channel Name</option>
@@ -1368,42 +1209,42 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                         </div>
                     </div>
 
-                    <div className="max-h-[400px] overflow-y-auto border border-gray-200 rounded-lg bg-white shadow-sm">
+                    <div className="max-h-[400px] overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 shadow-sm">
                         {sortedSearchResults().length > 0 ? (
                             sortedSearchResults().map((result, index) => (
                                 <div
                                     key={index}
-                                    className={`p-3 flex justify-between items-center gap-4 ${
-                                        index < sortedSearchResults().length - 1 ? 'border-b border-gray-100' : ''
-                                    } ${index % 2 === 0 ? 'bg-gray-50' : 'bg-white'} hover:bg-blue-50 transition-colors`}
+                                    className={`flex items-center justify-between gap-4 p-3 transition-colors ${
+                                        index < sortedSearchResults().length - 1 ? 'border-b border-slate-800/50' : ''
+                                    } ${index % 2 === 0 ? 'bg-slate-950/40' : 'bg-slate-900/40'} hover:bg-slate-800/50`}
                                 >
-                                    <div className="flex-1 min-w-0">
-                                        <div className="font-medium text-gray-900 truncate">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="truncate font-medium text-slate-100">
                                             {result.channelName || result.name || result.channelId}
                                         </div>
-                                        <div className="flex items-center gap-2 text-sm text-gray-600 mt-0.5">
-                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                                        <div className="mt-0.5 flex items-center gap-2 text-sm text-slate-400">
+                                            <span className="inline-flex items-center rounded bg-teal-500/20 px-2 py-0.5 text-xs font-medium text-teal-200">
                                                 {result.source_name || 'Unknown Source'}
                                             </span>
-                                            <span className="text-gray-400">·</span>
-                                            <span className="text-gray-500 truncate">ID: {result.channelId || result.id}</span>
+                                            <span className="text-slate-700">·</span>
+                                            <span className="truncate text-slate-500">ID: {result.channelId || result.id}</span>
                                         </div>
                                         {(result.title || result.currentProgram) && (
-                                            <div className="mt-2 px-2 py-1 bg-green-50 border border-green-200 rounded">
+                                            <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1">
                                                 <div className="flex items-start gap-1.5">
-                                                    <svg className="w-4 h-4 text-green-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                                                     </svg>
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="text-xs font-medium text-green-900">
+                                                    <div className="min-w-0 flex-1">
+                                                        <div className="text-xs font-medium text-emerald-200">
                                                             Currently Playing:
                                                         </div>
-                                                        <div className="text-sm text-green-800 font-medium truncate">
+                                                        <div className="truncate text-sm font-medium text-emerald-100">
                                                             {result.currentProgram?.title || result.title}
                                                         </div>
                                                         {result.currentProgram?.start && result.currentProgram?.stop && (
-                                                            <div className="text-xs text-green-700 mt-0.5">
+                                                            <div className="mt-0.5 text-xs text-emerald-200/80">
                                                                 {new Date(result.currentProgram.start).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})} - {new Date(result.currentProgram.stop).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
                                                             </div>
                                                         )}
@@ -1414,57 +1255,41 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                                     </div>
                                     <button
                                         onClick={() => handleMatch(result)}
-                                        className="flex-shrink-0 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+                                        className="flex-shrink-0 rounded-md border border-emerald-500/60 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition-colors hover:border-emerald-400 hover:bg-emerald-500/30 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                                     >
                                         Use This
                                     </button>
                                 </div>
                             ))
                         ) : (
-                            <div className="p-4 text-center text-gray-500">
+                            <div className="p-4 text-center text-slate-500">
                                 No results match your filter criteria
                             </div>
                         )}
                     </div>
                 </div>
             ) : searchStatus ? (
-                <div style={{
-                    padding: '15px',
-                    backgroundColor: '#fff3e0',
-                    borderRadius: '4px',
-                    marginBottom: '20px',
-                    border: '1px solid #ffe0b2'
-                }}>
-                    <p style={{ margin: 0, color: '#e65100' }}>{searchStatus}</p>
+                <div className="mb-6">
+                    <StatusDisplay message={searchStatus} type="warning" />
                 </div>
             ) : null}
 
             {/* Debug Panel (Collapsible) */}
             {debugMode && (
-                <div style={{
-                    padding: '12px',
-                    background: '#f7f7f7',
-                    borderRadius: '6px',
-                    marginBottom: '15px',
-                    fontSize: '12px',
-                    fontFamily: 'monospace',
-                    maxHeight: '200px',
-                    overflowY: 'auto',
-                    border: '1px solid #e0e0e0'
-                }}>
-                    <strong>Debug Info:</strong>
-                    <div><strong>Session ID:</strong> {session || 'None'}</div>
-                    <div><strong>EPG Sources:</strong> {safeFormattedEpgSources.length > 0 
-                        ? `${safeFormattedEpgSources.length} unique sources (deduplicated from ${epgSources.length})` 
+                <div className="mb-4 max-h-[200px] overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/60 p-3 font-mono text-xs">
+                    <strong className="text-slate-200">Debug Info:</strong>
+                    <div className="text-slate-400"><strong className="text-slate-300">Session ID:</strong> {session || 'None'}</div>
+                    <div className="text-slate-400"><strong className="text-slate-300">EPG Sources:</strong> {safeFormattedEpgSources.length > 0
+                        ? `${safeFormattedEpgSources.length} unique sources (deduplicated from ${epgSources.length})`
                         : 'None detected'}</div>
-                    <div><strong>Selected Channel:</strong> {selectedChannel ? selectedChannel.name : 'None'}</div>
-                    <div><strong>Channel ID:</strong> {selectedChannel ? selectedChannel.tvgId : 'None'}</div>
-                    <div><strong>Current Source:</strong> {currentSource || 'None'}</div>
-                    <div><strong>Matched EPG ID:</strong> {selectedChannel && matchedChannels[selectedChannel.tvgId] ? matchedChannels[selectedChannel.tvgId] : 'Not matched'}</div>
+                    <div className="text-slate-400"><strong className="text-slate-300">Selected Channel:</strong> {selectedChannel ? selectedChannel.name : 'None'}</div>
+                    <div className="text-slate-400"><strong className="text-slate-300">Channel ID:</strong> {selectedChannel ? selectedChannel.tvgId : 'None'}</div>
+                    <div className="text-slate-400"><strong className="text-slate-300">Current Source:</strong> {currentSource || 'None'}</div>
+                    <div className="text-slate-400"><strong className="text-slate-300">Matched EPG ID:</strong> {selectedChannel && matchedChannels[selectedChannel.tvgId] ? matchedChannels[selectedChannel.tvgId] : 'Not matched'}</div>
                     {epgData && (
                         <>
-                            <div><strong>EPG Data:</strong></div>
-                            <pre style={{ fontSize: '10px' }}>{JSON.stringify(epgData, null, 2)}</pre>
+                            <div className="text-slate-300"><strong>EPG Data:</strong></div>
+                            <pre className="text-[10px] text-slate-400">{JSON.stringify(epgData, null, 2)}</pre>
                         </>
                     )}
                 </div>

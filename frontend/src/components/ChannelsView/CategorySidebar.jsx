@@ -15,17 +15,17 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
   const hasSelected = selectedCategories.size > 0;
 
   return (
-    <div className="w-72 bg-white border-r border-gray-200 flex flex-col h-full">
+    <div className="flex h-full w-72 flex-col border-r border-slate-800/80 bg-slate-950/80 backdrop-blur">
       {/* Header */}
-      <div className="px-4 py-4 border-b border-gray-200">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">
+      <div className="border-b border-slate-800/80 px-4 py-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold uppercase tracking-[0.35em] text-slate-300">
             Categories
           </h3>
           {hasSelected && (
             <button
               onClick={onClearAll}
-              className="text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors"
+              className="text-xs font-medium text-blue-400 transition-colors hover:text-blue-200"
             >
               Clear ({selectedCategories.size})
             </button>
@@ -34,8 +34,8 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
 
         {/* Category search */}
         <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <svg className="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+            <svg className="h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
           </div>
@@ -44,7 +44,7 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
             placeholder="Filter categories..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="block w-full pl-9 pr-3 py-1.5 text-sm border border-gray-300 rounded-md placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="block w-full rounded-lg border border-slate-800/80 bg-slate-900/70 py-1.5 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/70"
           />
         </div>
       </div>
@@ -53,15 +53,15 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
       <div className="flex-1 overflow-y-auto">
         {loading && categories.length === 0 ? (
           <div className="px-4 py-8 text-center">
-            <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            <p className="text-sm text-gray-500 mt-2">Loading categories...</p>
+            <div className="inline-block h-8 w-8 animate-spin rounded-full border-b-2 border-blue-500"></div>
+            <p className="mt-2 text-sm text-slate-500">Loading categories...</p>
           </div>
         ) : filteredCategories.length === 0 ? (
           <div className="px-4 py-8 text-center">
-            <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="mx-auto h-12 w-12 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <p className="text-sm text-gray-500 mt-2">
+            <p className="mt-2 text-sm text-slate-500">
               {searchTerm ? 'No matching categories' : 'No categories available'}
             </p>
           </div>
@@ -74,27 +74,29 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
                 <button
                   key={category.name}
                   onClick={() => onToggle(category.name)}
-                  className={`w-full px-4 py-2.5 flex items-center justify-between hover:bg-gray-50 transition-colors ${
-                    isSelected ? 'bg-blue-50' : ''
+                  className={`flex w-full items-center justify-between px-4 py-2.5 transition-colors ${
+                    isSelected
+                      ? 'rounded-lg bg-blue-500/15 text-blue-100 shadow-inner shadow-blue-500/10'
+                      : 'hover:bg-slate-800/80'
                   }`}
                 >
-                  <div className="flex items-center min-w-0 flex-1">
+                  <div className="flex min-w-0 flex-1 items-center">
                     <div
-                      className={`flex-shrink-0 w-4 h-4 rounded border-2 mr-3 flex items-center justify-center transition-colors ${
+                      className={`mr-3 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border-2 transition-colors ${
                         isSelected
-                          ? 'bg-blue-600 border-blue-600'
-                          : 'border-gray-300 bg-white'
+                          ? 'border-blue-400 bg-blue-500'
+                          : 'border-slate-600 bg-slate-900'
                       }`}
                     >
                       {isSelected && (
-                        <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                         </svg>
                       )}
                     </div>
                     <span
-                      className={`text-sm truncate ${
-                        isSelected ? 'font-medium text-blue-900' : 'text-gray-700'
+                      className={`truncate text-sm ${
+                        isSelected ? 'font-medium text-blue-100' : 'text-slate-300'
                       }`}
                     >
                       {category.name}
@@ -102,10 +104,10 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
                   </div>
                   {category.count > 0 && (
                     <span
-                      className={`ml-2 px-2 py-0.5 text-xs rounded-full flex-shrink-0 ${
+                      className={`ml-2 flex-shrink-0 rounded-full px-2 py-0.5 text-xs ${
                         isSelected
-                          ? 'bg-blue-200 text-blue-800'
-                          : 'bg-gray-200 text-gray-600'
+                          ? 'bg-blue-500/30 text-blue-100'
+                          : 'bg-slate-800/80 text-slate-400'
                       }`}
                     >
                       {category.count}
@@ -119,8 +121,8 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
       </div>
 
       {/* Footer stats */}
-      <div className="px-4 py-3 border-t border-gray-200 bg-gray-50">
-        <p className="text-xs text-gray-600">
+      <div className="border-t border-slate-800/80 bg-slate-900/70 px-4 py-3">
+        <p className="text-xs text-slate-500">
           {categories.length} {categories.length === 1 ? 'category' : 'categories'} total
         </p>
       </div>

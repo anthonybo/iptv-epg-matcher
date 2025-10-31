@@ -3,7 +3,6 @@ import { loadChannelsAndEpg } from '../../services/api';
 import { setupSSE } from '../../services/SSEService';
 import { getSessionId } from '../../services/sessionService';
 import { useNavigate } from 'react-router-dom';
-import './LoadData.css';
 
 const LoadData = () => {
   const [m3uUrl, setM3uUrl] = useState('');
@@ -20,6 +19,24 @@ const LoadData = () => {
   
   const eventSourceRef = useRef(null);
   const navigate = useNavigate();
+
+  const tabButtonClasses = (tab) => {
+    const isActive = activeTab === tab;
+    const isBlocked = loading && activeTab !== tab;
+
+    return [
+      'flex-1 rounded-xl px-4 py-3 text-sm font-semibold transition-all duration-150',
+      'focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:ring-offset-2 focus:ring-offset-slate-900',
+      isActive
+        ? 'bg-blue-500/20 text-blue-100 shadow-inner ring-1 ring-inset ring-blue-400/60'
+        : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60',
+      isBlocked ? 'cursor-not-allowed opacity-60' : ''
+    ].join(' ');
+  };
+
+  const inputClasses = 'w-full rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/60 disabled:cursor-not-allowed disabled:opacity-60';
+  const helpTextClasses = 'text-xs text-slate-400 leading-relaxed';
+  const stageLabel = (processingStage || 'starting').replace(/_/g, ' ');
 
   // Listen for SSE completion event
   useEffect(() => {
@@ -129,136 +146,161 @@ const LoadData = () => {
   const handleEpgSubmit = (e) => handleSubmit(e, 'epg');
 
   return (
-    <div className="load-container">
-      <h2 className="page-title">Load IPTV Data</h2>
-      <p className="page-subtitle">
-        Connect to your provider, then manage EPG sources separately for a cleaner setup.
-      </p>
+    <div className="mx-auto flex min-h-[calc(100vh-5rem)] w-full max-w-5xl flex-col gap-8 px-4 py-12">
+      <header className="space-y-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.35em] text-blue-400/70">Setup</p>
+        <h1 className="text-3xl font-semibold text-slate-100">Load IPTV Data</h1>
+        <p className="max-w-2xl text-sm leading-relaxed text-slate-400">
+          Connect to your provider, then manage EPG sources independently for a streamlined configuration.
+        </p>
+      </header>
 
-      <div className="tab-header">
-        <button
-          type="button"
-          className={`tab-button ${activeTab === 'xtream' ? 'active' : ''}`}
-          onClick={() => setActiveTab('xtream')}
-          disabled={loading && activeTab !== 'xtream'}
-        >
-          Xtream Login
-        </button>
-        <button
-          type="button"
-          className={`tab-button ${activeTab === 'epg' ? 'active' : ''}`}
-          onClick={() => setActiveTab('epg')}
-          disabled={loading && activeTab !== 'epg'}
-        >
-          EPG Sources
-        </button>
-      </div>
+      <section className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-8 shadow-2xl shadow-slate-950/50 backdrop-blur">
+        <div className="mb-8 flex items-center gap-2 border-b border-slate-800/70 pb-2">
+          <button
+            type="button"
+            className={tabButtonClasses('xtream')}
+            onClick={() => setActiveTab('xtream')}
+            disabled={loading && activeTab !== 'xtream'}
+          >
+            Xtream Login
+          </button>
+          <button
+            type="button"
+            className={tabButtonClasses('epg')}
+            onClick={() => setActiveTab('epg')}
+            disabled={loading && activeTab !== 'epg'}
+          >
+            EPG Sources
+          </button>
+        </div>
 
-      {activeTab === 'xtream' && (
-        <form onSubmit={handleXtreamSubmit} className="tab-panel">
-          <div className="form-grid">
-            <div className="form-field">
-              <label>Xtream Username</label>
-              <input
-                type="text"
-                value={xtreamUsername}
-                onChange={(e) => setXtreamUsername(e.target.value)}
-                placeholder="Enter Xtream username"
-                disabled={loading}
-              />
+        {activeTab === 'xtream' && (
+          <form onSubmit={handleXtreamSubmit} className="space-y-8">
+            <div className="grid gap-6 md:grid-cols-2">
+              <label className="flex flex-col gap-2">
+                <span className="text-sm font-semibold text-slate-200">Xtream Username</span>
+                <input
+                  type="text"
+                  value={xtreamUsername}
+                  onChange={(e) => setXtreamUsername(e.target.value)}
+                  placeholder="Enter Xtream username"
+                  disabled={loading}
+                  className={inputClasses}
+                />
+              </label>
+              <label className="flex flex-col gap-2">
+                <span className="text-sm font-semibold text-slate-200">Xtream Password</span>
+                <input
+                  type="password"
+                  value={xtreamPassword}
+                  onChange={(e) => setXtreamPassword(e.target.value)}
+                  placeholder="Enter Xtream password"
+                  disabled={loading}
+                  className={inputClasses}
+                />
+              </label>
+              <label className="md:col-span-2 flex flex-col gap-2">
+                <span className="text-sm font-semibold text-slate-200">Xtream Server URL</span>
+                <input
+                  type="text"
+                  value={xtreamServer}
+                  onChange={(e) => setXtreamServer(e.target.value)}
+                  placeholder="http://example.com:25461"
+                  disabled={loading}
+                  className={inputClasses}
+                />
+              </label>
             </div>
-            <div className="form-field">
-              <label>Xtream Password</label>
-              <input
-                type="password"
-                value={xtreamPassword}
-                onChange={(e) => setXtreamPassword(e.target.value)}
-                placeholder="Enter Xtream password"
-                disabled={loading}
-              />
-            </div>
-            <div className="form-field">
-              <label>Xtream Server URL</label>
-              <input
-                type="text"
-                value={xtreamServer}
-                onChange={(e) => setXtreamServer(e.target.value)}
-                placeholder="http://example.com:25461"
-                disabled={loading}
-              />
-            </div>
-          </div>
 
-          <div className="section-divider">
-            <span>Playlist Options</span>
-          </div>
+            <div className="flex items-center gap-4 text-xs uppercase tracking-[0.4em] text-slate-500">
+              <span className="hidden h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/70 to-transparent sm:block" />
+              Playlist Options
+              <span className="hidden h-px flex-1 bg-gradient-to-r from-transparent via-slate-700/70 to-transparent sm:block" />
+            </div>
 
-          <div className="form-grid">
-            <div className="form-field full-width">
-              <label>M3U URL (Optional)</label>
+            <label className="flex flex-col gap-3">
+              <span className="text-sm font-semibold text-slate-200">M3U URL (Optional)</span>
               <input
                 type="text"
                 value={m3uUrl}
                 onChange={(e) => setM3uUrl(e.target.value)}
                 placeholder="Enter playlist URL if provided by your provider"
                 disabled={loading}
+                className={inputClasses}
               />
-              <div className="field-help">
+              <p className={helpTextClasses}>
                 Include your provider&apos;s M3U URL if you prefer to load channels from a playlist.
-              </div>
+              </p>
+            </label>
+
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={loading}
+                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-blue-500 via-blue-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-900/40 transition-all duration-150 hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loading ? 'Processing…' : 'Load Xtream Data'}
+              </button>
             </div>
-          </div>
+          </form>
+        )}
 
-          <div className="form-actions">
-            <button type="submit" disabled={loading} className="primary-button">
-              {loading ? 'Processing...' : 'Load Xtream Data'}
-            </button>
-          </div>
-        </form>
-      )}
-
-      {activeTab === 'epg' && (
-        <form onSubmit={handleEpgSubmit} className="tab-panel">
-          <div className="form-grid">
-            <div className="form-field full-width">
-              <label>EPG URL</label>
+        {activeTab === 'epg' && (
+          <form onSubmit={handleEpgSubmit} className="space-y-8">
+            <label className="flex flex-col gap-3">
+              <span className="text-sm font-semibold text-slate-200">EPG URL</span>
               <input
                 type="text"
                 value={epgUrl}
                 onChange={(e) => setEpgUrl(e.target.value)}
                 placeholder="Enter XMLTV or gzipped EPG URL"
                 disabled={loading}
+                className={inputClasses}
               />
-              <div className="field-help">
-                Manage your guide data independently. You can come back here any time to refresh it.
-              </div>
+              <p className={helpTextClasses}>
+                Manage your guide data independently. You can refresh your sources at any time.
+              </p>
+            </label>
+
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={loading}
+                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-sky-500 via-blue-500 to-blue-700 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-900/40 transition-all duration-150 hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loading ? 'Processing…' : 'Load EPG Sources'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {loading && (
+          <div className="mt-10 space-y-4 rounded-2xl border border-slate-800/70 bg-slate-900/80 p-6">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800/80">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-sky-400 via-blue-500 to-blue-600 transition-[width] duration-150"
+                style={{ width: `${Math.min(Math.max(progress, 6), 100)}%` }}
+              ></div>
+            </div>
+            <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+              <span className="text-slate-400">Processing</span>
+              <span className="text-blue-200">{stageLabel} · {Math.round(progress)}%</span>
             </div>
           </div>
+        )}
 
-          <div className="form-actions">
-            <button type="submit" disabled={loading} className="primary-button">
-              {loading ? 'Processing...' : 'Load EPG Sources'}
-            </button>
+        {error && (
+          <div className="mt-8 rounded-2xl border border-red-500/40 bg-red-500/10 p-4 text-sm font-medium text-red-200">
+            {error}
           </div>
-        </form>
-      )}
-      
-      {loading && (
-        <div className="progress-container">
-          <div className="progress-bar">
-            <div className="progress-fill" style={{ width: `${progress}%` }}></div>
-          </div>
-          <div className="progress-text">
-            {processingStage} - {progress}%
-          </div>
+        )}
+
+        <div className="mt-8 rounded-2xl border border-slate-800/70 bg-slate-900/60 p-4 text-xs text-slate-400">
+          <span className="font-semibold text-slate-200">Current session ID:</span>{' '}
+          {currentSessionId || 'None'}
         </div>
-      )}
-      
-      {error && <div className="error-message">{error}</div>}
-      
-      <div className="session-debug">
-        <strong>Current session ID:</strong> {currentSessionId || 'None'}
-      </div>
+      </section>
     </div>
   );
 };
