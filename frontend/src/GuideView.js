@@ -1,5 +1,219 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
 import apiClient from './utils/apiClient';
+import './GuideView.css';
+
+const HOURS_IN_DAY = 24;
+const MINUTES_IN_HOUR = 60;
+const HOUR_COLUMN_WIDTH = 240;
+const PIXELS_PER_MINUTE = HOUR_COLUMN_WIDTH / MINUTES_IN_HOUR;
+const MIN_PROGRAM_WIDTH = 120;
+const PROGRAM_HORIZONTAL_GAP = 4;
+const LABEL_SAFE_PADDING = 16;
+
+const formatDisplayTime = (value) => {
+  if (!value) return '';
+
+  try {
+    const date = typeof value === 'string' ? new Date(value) : value;
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch (error) {
+    console.warn('[GuideView] Failed to format time', value, error);
+    return '';
+  }
+};
+
+const buildTimeSlots = (referenceDate = new Date()) => {
+  const startOfDay = new Date(referenceDate);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  return Array.from({ length: HOURS_IN_DAY }, (_, hour) => {
+    const slot = new Date(startOfDay);
+    slot.setHours(hour);
+    return slot;
+  });
+};
+
+const filterChannels = (channels, rawTerm) => {
+  const term = rawTerm.trim().toLowerCase();
+
+  if (!term) {
+    return channels;
+  }
+
+  return channels.filter((channel) => {
+    if (!channel) return false;
+
+    if (channel.name && channel.name.toLowerCase().includes(term)) {
+      return true;
+    }
+
+    if (Array.isArray(channel.programs)) {
+      return channel.programs.some((program) => {
+        if (!program) return false;
+        return (
+          (program.title && program.title.toLowerCase().includes(term)) ||
+          (program.description && program.description.toLowerCase().includes(term))
+        );
+      });
+    }
+
+    return false;
+  });
+};
+
+const getProgramMetrics = (program, viewDate) => {
+  if (!program?.start || !program?.stop) {
+    return null;
+  }
+
+  const start = new Date(program.start);
+  const stop = new Date(program.stop);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(stop.getTime())) {
+    return null;
+  }
+
+  const viewStart = new Date(viewDate);
+  viewStart.setHours(0, 0, 0, 0);
+  const viewEnd = new Date(viewStart);
+  viewEnd.setDate(viewEnd.getDate() + 1);
+
+  if (stop <= viewStart || start >= viewEnd) {
+    return null;
+  }
+
+  const clampedStart = start < viewStart ? viewStart : start;
+  const clampedStop = stop > viewEnd ? viewEnd : stop;
+  const minutesSinceStart = (clampedStart - viewStart) / 60000;
+  const durationMinutes = (clampedStop - clampedStart) / 60000;
+
+  if (durationMinutes <= 0 || durationMinutes > HOURS_IN_DAY * MINUTES_IN_HOUR) {
+    return null;
+  }
+
+  return {
+    left: minutesSinceStart * PIXELS_PER_MINUTE,
+    width: Math.max(durationMinutes * PIXELS_PER_MINUTE, MIN_PROGRAM_WIDTH),
+    durationMinutes,
+  };
+};
+
+const isProgramCurrent = (program, now) => {
+  if (!program?.start || !program?.stop) {
+    return false;
+  }
+
+  const start = new Date(program.start);
+  const stop = new Date(program.stop);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(stop.getTime())) {
+    return false;
+  }
+
+  return now >= start && now < stop;
+};
+
+const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft }) => {
+  if (!metrics) {
+    return null;
+  }
+
+  const width = Math.max(metrics.width - PROGRAM_HORIZONTAL_GAP, MIN_PROGRAM_WIDTH);
+  const showStickyTitle = width > 220;
+  const showDescription = Boolean(program.description) && width > 260;
+  const hiddenLeft = Math.max(0, scrollLeft - metrics.left);
+  const labelRef = useRef(null);
+  const [labelWidth, setLabelWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!showStickyTitle || !labelRef.current) {
+      return undefined;
+    }
+
+    const updateWidth = () => {
+      setLabelWidth(labelRef.current.scrollWidth || labelRef.current.offsetWidth);
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === 'function') {
+      const observer = new ResizeObserver(() => {
+        updateWidth();
+      });
+      observer.observe(labelRef.current);
+      return () => observer.disconnect();
+    }
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', updateWidth);
+      return () => window.removeEventListener('resize', updateWidth);
+    }
+
+    return undefined;
+  }, [program.title, showStickyTitle]);
+
+  const maxLabelWidth = Math.max(0, width - LABEL_SAFE_PADDING);
+  const availableTravel = Math.max(0, width - labelWidth - LABEL_SAFE_PADDING);
+  const labelOffset = Math.min(hiddenLeft, availableTravel);
+  const isLabelTruncated = showStickyTitle && labelWidth > maxLabelWidth;
+  const titleClassName = showStickyTitle
+    ? 'guide-program-title guide-program-title--sticky'
+    : 'guide-program-title font-semibold leading-tight';
+  const titleStyle = showStickyTitle
+    ? {
+        marginLeft: `${labelOffset}px`,
+        maxWidth: `${maxLabelWidth}px`,
+      }
+    : undefined;
+  const tooltipStyle = showStickyTitle
+    ? {
+        left: `${labelOffset}px`,
+      }
+    : undefined;
+
+  return (
+    <article
+      className={`guide-program-card absolute top-1 bottom-1 flex flex-col justify-center rounded-xl border transition-all duration-150 ${
+        isCurrent
+          ? 'bg-blue-600/90 ring-2 ring-blue-300/70 shadow-lg shadow-blue-900/40'
+          : 'bg-gray-700/90 ring-1 ring-gray-600/60 hover:bg-gray-600/90 hover:ring-gray-500/70'
+      }`}
+      style={{ left: `${metrics.left}px`, width: `${width}px` }}
+      title={`${program.title ?? 'Unknown program'}\n${formatDisplayTime(program.start)} - ${formatDisplayTime(program.stop)}${
+        program.description ? `\n${program.description}` : ''
+      }`}
+    >
+      <div className="relative flex h-full flex-col justify-between gap-2 px-3 py-2 text-white">
+        <div
+          ref={labelRef}
+          className={titleClassName}
+          data-title={program.title ?? 'Unknown program'}
+          style={titleStyle}
+          title={program.title ?? 'Unknown program'}
+        >
+          <span className="guide-program-title-text">
+            {program.title ?? 'Unknown program'}
+          </span>
+        </div>
+        {isLabelTruncated && (
+          <div className="guide-program-title-tooltip" role="tooltip" style={tooltipStyle}>
+            {program.title ?? 'Unknown program'}
+          </div>
+        )}
+        <div className="text-xs font-semibold text-gray-100 whitespace-nowrap">
+          {formatDisplayTime(program.start)} - {formatDisplayTime(program.stop)}
+        </div>
+        {showDescription && (
+          <p className="text-xs text-gray-200 leading-tight line-clamp-3">
+            {program.description}
+          </p>
+        )}
+      </div>
+    </article>
+  );
+});
+
+ProgramBlock.displayName = 'ProgramBlock';
 
 /**
  * GuideView component displays all channels with matched EPG data in a traditional grid layout
@@ -15,34 +229,59 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedChannel, setSelectedChannel] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [gridScrollLeft, setGridScrollLeft] = useState(0);
   const gridRef = useRef(null);
+  const autoScrolledRef = useRef(false);
+  const scrollAnimationFrameRef = useRef(null);
 
   // Fetch matched channels with their EPG data
   useEffect(() => {
-    const fetchMatchedChannels = async () => {
-      if (!sessionId) {
-        setError('No session ID available');
-        setLoading(false);
-        return;
-      }
+    if (!sessionId) {
+      setMatchedChannels([]);
+      setError('No session ID available');
+      setLoading(false);
+      return undefined;
+    }
 
+    const controller = new AbortController();
+    let isMounted = true;
+
+    const fetchMatchedChannels = async () => {
       try {
         setLoading(true);
         setError(null);
 
-        const response = await apiClient.get(`/epg/${sessionId}/matched-channels`);
+        const response = await apiClient.get(`/epg/${sessionId}/matched-channels`, {
+          signal: controller.signal,
+        });
+
+        if (!isMounted) {
+          return;
+        }
+
         setMatchedChannels(response.data.channels || []);
+        autoScrolledRef.current = false;
       } catch (err) {
+        if (controller.signal.aborted || !isMounted) {
+          return;
+        }
+
         console.error('Error fetching matched channels:', err);
         setError(err.response?.data?.error || err.message);
       } finally {
-        setLoading(false);
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     };
 
     fetchMatchedChannels();
+
+    return () => {
+      isMounted = false;
+      controller.abort();
+    };
   }, [sessionId]);
 
   // Update current time every minute
@@ -54,144 +293,67 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
     return () => clearInterval(timer);
   }, []);
 
-  // Scroll to current time on mount
-  useEffect(() => {
-    if (gridRef.current && matchedChannels.length > 0) {
-      const now = new Date();
-      const startOfDay = new Date(now);
-      startOfDay.setHours(0, 0, 0, 0);
-      const minutesSinceMidnight = (now - startOfDay) / (1000 * 60);
-      const pixelsPerMinute = 4; // 240px per hour = 4px per minute
-      const scrollPosition = minutesSinceMidnight * pixelsPerMinute - 200; // Offset to center current time
-
-      gridRef.current.scrollLeft = Math.max(0, scrollPosition);
-    }
-  }, [matchedChannels]);
-
-  // Filter channels by search term (search channel names, program titles, and descriptions)
-  const filteredChannels = matchedChannels.filter(channel => {
-    const search = searchTerm.toLowerCase();
-
-    // Search in channel name
-    if (channel.name.toLowerCase().includes(search)) {
-      return true;
+  // Scroll to current time once data is available
+  useLayoutEffect(() => {
+    if (!gridRef.current || autoScrolledRef.current || matchedChannels.length === 0) {
+      return;
     }
 
-    // Search in program titles and descriptions
-    if (channel.programs && channel.programs.length > 0) {
-      return channel.programs.some(program =>
-        (program.title && program.title.toLowerCase().includes(search)) ||
-        (program.description && program.description.toLowerCase().includes(search))
-      );
+    const startOfDay = new Date(currentTime);
+    startOfDay.setHours(0, 0, 0, 0);
+    const minutesSinceMidnight = (currentTime - startOfDay) / 60000;
+    const desiredScroll = minutesSinceMidnight * PIXELS_PER_MINUTE - (gridRef.current.clientWidth / 2);
+
+    gridRef.current.scrollLeft = Math.max(0, desiredScroll);
+    setGridScrollLeft(gridRef.current.scrollLeft);
+    autoScrolledRef.current = true;
+  }, [matchedChannels, currentTime]);
+
+  const handleGridScroll = useCallback((event) => {
+    const target = event.currentTarget.scrollLeft;
+
+    if (scrollAnimationFrameRef.current) {
+      cancelAnimationFrame(scrollAnimationFrameRef.current);
     }
 
-    return false;
-  });
+    scrollAnimationFrameRef.current = requestAnimationFrame(() => {
+      setGridScrollLeft(target);
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (scrollAnimationFrameRef.current) {
+      cancelAnimationFrame(scrollAnimationFrameRef.current);
+    }
+  }, []);
+
+  const filteredChannels = useMemo(
+    () => filterChannels(matchedChannels, searchTerm),
+    [matchedChannels, searchTerm]
+  );
 
   // Handle channel click
-  const handleChannelClick = (channel) => {
-    console.log('[GuideView] Channel clicked:', channel);
-    console.log('[GuideView] Channel ID:', channel.id);
-    console.log('[GuideView] Channel URL:', channel.url);
-    setSelectedChannel(channel);
-    if (onChannelSelect) {
-      onChannelSelect(channel);
-    }
-  };
+  const handleChannelClick = useCallback(
+    (channel) => {
+      if (!channel) {
+        return;
+      }
 
-  // Generate time slots for the grid (24 hours)
-  const generateTimeSlots = () => {
-    const slots = [];
-    const now = new Date();
-    const startOfDay = new Date(now);
+      if (onChannelSelect) {
+        onChannelSelect(channel);
+      }
+    },
+    [onChannelSelect]
+  );
+
+  const timeSlots = useMemo(() => buildTimeSlots(currentTime), [currentTime]);
+
+  const currentTimePosition = useMemo(() => {
+    const startOfDay = new Date(currentTime);
     startOfDay.setHours(0, 0, 0, 0);
-
-    for (let hour = 0; hour < 24; hour++) {
-      const time = new Date(startOfDay);
-      time.setHours(hour);
-      slots.push(time);
-    }
-    return slots;
-  };
-
-  // Format time for display
-  const formatTime = (date) => {
-    if (!date) return '';
-    try {
-      const d = typeof date === 'string' ? new Date(date) : date;
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return '';
-    }
-  };
-
-  // Calculate position and width for a program block
-  const getProgramPosition = (program) => {
-    if (!program.start || !program.stop) return { left: 0, width: 0, display: 'none' };
-
-    try {
-      const start = new Date(program.start);
-      const stop = new Date(program.stop);
-
-      // Check if dates are valid
-      if (isNaN(start.getTime()) || isNaN(stop.getTime())) {
-        console.warn('Invalid program time:', program);
-        return { left: 0, width: 0, display: 'none' };
-      }
-
-      // Check if program is on the current day
-      const now = new Date();
-      const startOfToday = new Date(now);
-      startOfToday.setHours(0, 0, 0, 0);
-      const endOfToday = new Date(now);
-      endOfToday.setHours(23, 59, 59, 999);
-
-      // Skip programs that don't overlap with today
-      if (stop < startOfToday || start > endOfToday) {
-        return { left: 0, width: 0, display: 'none' };
-      }
-
-      const startOfDay = new Date(start);
-      startOfDay.setHours(0, 0, 0, 0);
-
-      const minutesSinceStart = (start - startOfDay) / (1000 * 60);
-      const durationMinutes = (stop - start) / (1000 * 60);
-
-      // Skip programs with invalid duration
-      if (durationMinutes <= 0 || durationMinutes > 24 * 60) {
-        console.warn('Invalid program duration:', program, durationMinutes);
-        return { left: 0, width: 0, display: 'none' };
-      }
-
-      const pixelsPerMinute = 4; // 240px per hour = 4px per minute
-      const left = minutesSinceStart * pixelsPerMinute;
-      const width = durationMinutes * pixelsPerMinute;
-
-      return { left, width, display: 'block' };
-    } catch (error) {
-      console.error('Error calculating program position:', error, program);
-      return { left: 0, width: 0, display: 'none' };
-    }
-  };
-
-  // Check if a program is currently airing
-  const isCurrentProgram = (program) => {
-    if (!program.start || !program.stop) return false;
-    const now = currentTime;
-    const start = new Date(program.start);
-    const stop = new Date(program.stop);
-    return now >= start && now < stop;
-  };
-
-  // Get current time indicator position
-  const getCurrentTimePosition = () => {
-    const now = currentTime;
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
-    const minutesSinceMidnight = (now - startOfDay) / (1000 * 60);
-    const pixelsPerMinute = 4;
-    return minutesSinceMidnight * pixelsPerMinute;
-  };
+    const minutesSinceMidnight = (currentTime - startOfDay) / 60000;
+    return minutesSinceMidnight * PIXELS_PER_MINUTE;
+  }, [currentTime]);
 
   if (loading) {
     return (
@@ -235,9 +397,6 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
       </div>
     );
   }
-
-  const timeSlots = generateTimeSlots();
-  const currentTimePos = getCurrentTimePosition();
 
   return (
     <div className="flex flex-col h-full bg-gray-900">
@@ -315,7 +474,7 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
           </div>
 
           {/* Program Grid (Scrollable) */}
-          <div className="flex-1 overflow-auto" ref={gridRef}>
+          <div className="flex-1 overflow-auto" ref={gridRef} onScroll={handleGridScroll}>
             <div className="relative" style={{ minWidth: `${24 * 240}px` }}>
               {/* Time header */}
               <div className="h-12 bg-gray-900 border-b border-gray-700 sticky top-0 z-10 flex">
@@ -326,7 +485,7 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
                     style={{ width: '240px' }}
                   >
                     <div className="px-2 py-3 text-xs font-semibold text-gray-300">
-                      {formatTime(time)}
+                      {formatDisplayTime(time)}
                     </div>
                   </div>
                 ))}
@@ -335,7 +494,7 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
               {/* Current time indicator */}
               <div
                 className="absolute top-12 bottom-0 w-0.5 bg-red-500 z-20 pointer-events-none"
-                style={{ left: `${currentTimePos}px` }}
+                style={{ left: `${currentTimePosition}px` }}
               >
                 <div className="absolute -top-12 -left-2 w-4 h-4 bg-red-500 rounded-full"></div>
               </div>
@@ -344,7 +503,7 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
               {filteredChannels.map((channel, channelIndex) => (
                 <div
                   key={channelIndex}
-                  className="h-28 border-b border-gray-700 relative overflow-hidden"
+                  className="h-28 border-b border-gray-700 relative"
                   style={{ isolation: 'isolate' }}
                 >
                   {/* Hour dividers */}
@@ -357,40 +516,23 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
                   ))}
 
                   {/* Programs */}
-                  {channel.programs && channel.programs.map((program, programIndex) => {
-                    const position = getProgramPosition(program);
-                    const isCurrent = isCurrentProgram(program);
+                  {Array.isArray(channel.programs) &&
+                    channel.programs.map((program, programIndex) => {
+                      const metrics = getProgramMetrics(program, currentTime);
+                      if (!metrics) {
+                        return null;
+                      }
 
-                    if (position.display === 'none') return null;
-
-                    return (
-                      <div
-                        key={programIndex}
-                        className={`absolute top-0 bottom-0 rounded px-2 py-2 cursor-pointer transition-all hover:z-30 hover:shadow-xl flex flex-col justify-center ${
-                          isCurrent
-                            ? 'bg-blue-600 border-2 border-blue-400'
-                            : 'bg-gray-700 border border-gray-600 hover:bg-gray-600'
-                        }`}
-                        style={{
-                          left: `${position.left}px`,
-                          width: `${Math.max(position.width - 4, 120)}px`,
-                        }}
-                        title={`${program.title}\n${formatTime(program.start)} - ${formatTime(program.stop)}${program.description ? '\n' + program.description : ''}`}
-                      >
-                        <div className="text-sm font-bold text-white leading-tight text-wrap break-words">
-                          {program.title}
-                        </div>
-                        <div className="text-xs text-gray-100 font-semibold mt-1 whitespace-nowrap">
-                          {formatTime(program.start)} - {formatTime(program.stop)}
-                        </div>
-                        {program.description && position.width > 180 && (
-                          <div className="text-xs text-gray-200 mt-1 leading-tight text-wrap break-words">
-                            {program.description}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                      return (
+                        <ProgramBlock
+                          key={`${channel.id ?? channel.name}-${programIndex}`}
+                          program={program}
+                          metrics={metrics}
+                          isCurrent={isProgramCurrent(program, currentTime)}
+                          scrollLeft={gridScrollLeft}
+                        />
+                      );
+                    })}
                 </div>
               ))}
             </div>
