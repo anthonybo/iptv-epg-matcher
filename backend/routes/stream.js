@@ -4,6 +4,7 @@ const fetch = require('node-fetch');
 const { getSession } = require('../utils/storageUtils');
 const logger = require('../config/logger');
 const sessionStorage = require('../utils/sessionStorage');
+const iptvDatabaseService = require('../services/iptvDatabaseService');
 const { PassThrough } = require('stream');
 
 /**
@@ -17,55 +18,74 @@ router.get('/:sessionId/:channelId', async (req, res) => {
         const format = req.query.format || 'ts'; // Default to ts format
         
         logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}`);
-        
-        // Get session data using sessionStorage module directly
-        let session = sessionStorage.getSession(sessionId);
 
-        // Check if session exists
-        if (!session) {
-            logger.warn(`Session ${sessionId} not found for streaming. Auto-creating...`);
-            
-            // Create a simple session with empty channels array
-            session = sessionStorage.createSession(sessionId, { 
-                data: { channels: [] } 
+        let channels = [];
+
+        // Try to get channels from database first
+        try {
+            logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}`);
+            const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
+                page: 1,
+                limit: 50000 // Load all channels
             });
-            
-            logger.info(`Auto-created session ${sessionId} for streaming`);
+
+            if (dbResult && dbResult.channels && dbResult.channels.length > 0) {
+                logger.info(`Loaded ${dbResult.channels.length} channels from database for streaming`);
+
+                // Transform channels to match expected format
+                channels = dbResult.channels.map(ch => ({
+                    id: ch.id,
+                    tvgId: ch.tvg?.id || ch.id,
+                    name: ch.name,
+                    groupTitle: ch.group?.title || '',
+                    logo: ch.logo || '',
+                    url: ch.url,
+                    categories: ch.categories || []
+                }));
+            }
+        } catch (dbError) {
+            logger.warn(`Error loading channels from database: ${dbError.message}, falling back to in-memory`);
         }
-        
-        // Ensure channels array exists
-        if (!session.data || !session.data.channels) {
-            logger.warn(`Session ${sessionId} has no data.channels array, initializing it`);
-            // Update session with proper structure
-            session = sessionStorage.updateSession(sessionId, {
-                data: { channels: [] }
-            });
-        }
-        
-        // Check if session has channels
-        if (!session.data.channels || session.data.channels.length === 0) {
-            logger.error(`Session ${sessionId} exists but has no channels`);
-            return res.status(404).json({ error: 'No channels loaded for this session' });
+
+        // Fall back to in-memory session storage if database didn't have channels
+        if (channels.length === 0) {
+            logger.info(`Falling back to in-memory session storage for streaming`);
+            let session = sessionStorage.getSession(sessionId);
+
+            // Check if session exists
+            if (!session) {
+                logger.error(`Session ${sessionId} not found in memory or database`);
+                return res.status(404).json({ error: 'Session not found' });
+            }
+
+            // Get channels from session
+            if (session.data && session.data.channels && session.data.channels.length > 0) {
+                channels = session.data.channels;
+                logger.info(`Using ${channels.length} channels from in-memory session`);
+            } else {
+                logger.error(`Session ${sessionId} has no channels in memory or database`);
+                return res.status(404).json({ error: 'No channels loaded for this session' });
+            }
         }
         
         // Normalize channelId - either with or without 'channel_' prefix
         let normalizedChannelId = channelId;
         let channel;
-        
+
         // Try to find the channel with the exact ID first
-        channel = session.data.channels.find(ch => ch.tvgId === channelId);
-        
+        channel = channels.find(ch => ch.tvgId === channelId);
+
         // If not found, try adding 'channel_' prefix if it's not already there
         if (!channel && !channelId.startsWith('channel_')) {
             normalizedChannelId = `channel_${channelId}`;
-            channel = session.data.channels.find(ch => ch.tvgId === normalizedChannelId);
+            channel = channels.find(ch => ch.tvgId === normalizedChannelId);
             logger.info(`Channel not found with ID ${channelId}, trying with prefix: ${normalizedChannelId}`);
         }
-        
+
         // If still not found and has 'channel_' prefix, try without it
         if (!channel && channelId.startsWith('channel_')) {
             normalizedChannelId = channelId.replace(/^channel_/, '');
-            channel = session.data.channels.find(ch => ch.tvgId === normalizedChannelId);
+            channel = channels.find(ch => ch.tvgId === normalizedChannelId);
             logger.info(`Channel not found with ID ${channelId}, trying without prefix: ${normalizedChannelId}`);
         }
         

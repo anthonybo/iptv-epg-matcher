@@ -939,12 +939,15 @@ router.get('/:sessionId', async (req, res) => {
     try {
       // Get channel info
       const channelInfo = await getChannelById(channelId);
-      
+
       if (!channelInfo) {
-        return res.status(404).json({
-          error: `Channel not found: ${channelId}`,
-          success: false,
-          channelId
+        logger.info(`No EPG channel match found for ${channelId}, returning empty EPG data`);
+        return res.json({
+          success: true,
+          channelId,
+          channelInfo: null,
+          programs: [],
+          message: 'No EPG data available for this channel'
         });
       }
       
