@@ -90,6 +90,9 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
 
   // Handle channel click
   const handleChannelClick = (channel) => {
+    console.log('[GuideView] Channel clicked:', channel);
+    console.log('[GuideView] Channel ID:', channel.id);
+    console.log('[GuideView] Channel URL:', channel.url);
     setSelectedChannel(channel);
     if (onChannelSelect) {
       onChannelSelect(channel);

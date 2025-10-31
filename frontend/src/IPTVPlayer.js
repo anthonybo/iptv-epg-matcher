@@ -11,19 +11,25 @@ import React, { useEffect, useRef, useState } from 'react';
  * @param {Object} props.matchedChannels Object mapping channel IDs to matched EPG IDs
  * @returns {JSX.Element} IPTVPlayer component
  */
-const IPTVPlayer = ({ 
-  sessionId, 
-  selectedChannel, 
+const IPTVPlayer = ({
+  sessionId,
+  selectedChannel,
   playbackMethod = 'mpegts-player',
   matchedChannels = {}
 }) => {
+  // Helper to get channel ID from either 'id' or 'tvgId' field
+  const getChannelId = () => selectedChannel?.id || selectedChannel?.tvgId;
+
+  // Helper to get group title from either 'groupTitle' or 'group.title' field
+  const getGroupTitle = () => selectedChannel?.groupTitle || selectedChannel?.group?.title || '';
+
   // State
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState([]);
   const [showDebug, setShowDebug] = useState(false);
-  const [showChannelInfo, setShowChannelInfo] = useState(true);
-  const [showEpgInfo, setShowEpgInfo] = useState(true); // New state for EPG toggle
+  const [showChannelInfo, setShowChannelInfo] = useState(false);
+  const [showEpgInfo, setShowEpgInfo] = useState(false);
   const [epgData, setEpgData] = useState(null);
   
   // Refs
@@ -67,21 +73,22 @@ const IPTVPlayer = ({
 
   // Try to load EPG data when channel changes
   useEffect(() => {
-    if (sessionId && selectedChannel && selectedChannel.tvgId) {
+    const channelId = getChannelId();
+    if (sessionId && selectedChannel && channelId) {
       // Only fetch EPG data if the channel has a matched EPG ID
-      if (matchedChannels[selectedChannel.tvgId]) {
-        const epgId = matchedChannels[selectedChannel.tvgId];
-        log('info', 'Fetching EPG data for matched channel', { 
-          channelId: selectedChannel.tvgId, 
+      if (matchedChannels[channelId]) {
+        const epgId = matchedChannels[channelId];
+        log('info', 'Fetching EPG data for matched channel', {
+          channelId: channelId,
           matchedEpgId: epgId
         });
-        
+
         fetchEpgData(epgId);
       } else {
         // Clear EPG data when there's no match
         setEpgData(null);
-        log('info', 'No EPG match for channel, clearing EPG data', { 
-          channelId: selectedChannel.tvgId
+        log('info', 'No EPG match for channel, clearing EPG data', {
+          channelId: channelId
         });
       }
     }
@@ -187,9 +194,9 @@ const IPTVPlayer = ({
       return;
     }
 
-    log('info', 'Channel selected', { 
-      name: selectedChannel.name, 
-      id: selectedChannel.tvgId
+    log('info', 'Channel selected', {
+      name: selectedChannel.name,
+      id: getChannelId()
     });
     
     setError(null);
@@ -256,7 +263,7 @@ const IPTVPlayer = ({
     }
     
     // Get URL from the backend proxy
-    const proxyHlsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+    const proxyHlsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
     
     log('info', 'Initializing Clappr player', { url: proxyHlsUrl });
     
@@ -349,7 +356,7 @@ const IPTVPlayer = ({
     }
     
     // Check if channel ID is properly encoded
-    if (selectedChannel && url.includes(selectedChannel.tvgId) && !url.includes(encodeURIComponent(selectedChannel.tvgId))) {
+    if (selectedChannel && url.includes(getChannelId()) && !url.includes(encodeURIComponent(getChannelId()))) {
       log('warn', 'Channel ID not properly encoded in URL');
       return encodeURI(url);
     }
@@ -369,7 +376,7 @@ const IPTVPlayer = ({
     log('info', 'Initializing mpegts.js player');
     
     // Get URL for TS stream
-    let proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+    let proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
     
     // Validate the URL before using it
     proxyTsUrl = validateStreamUrl(proxyTsUrl);
@@ -440,7 +447,7 @@ const IPTVPlayer = ({
   const initializeVlcLink = () => {
     log('info', 'Initializing VLC link page');
     
-    const proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+    const proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
     
     // Create new player container
     while (containerRef.current.firstChild) {
@@ -677,9 +684,9 @@ const formatTime = (date) => {
             padding: '5px',
             width: '30px',
             height: '30px',
-            backgroundColor: selectedChannel && matchedChannels[selectedChannel.tvgId] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)',
+            backgroundColor: selectedChannel && matchedChannels[getChannelId()] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)',
             color: 'white',
-            border: selectedChannel && matchedChannels[selectedChannel.tvgId] ? '2px solid rgba(0, 255, 100, 0.5)' : 'none',
+            border: selectedChannel && matchedChannels[getChannelId()] ? '2px solid rgba(0, 255, 100, 0.5)' : 'none',
             borderRadius: '50%',
             cursor: 'pointer',
             display: 'flex',
@@ -688,8 +695,8 @@ const formatTime = (date) => {
             transition: 'all 0.2s ease',
             position: 'relative'
           }}
-          onMouseOver={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[selectedChannel.tvgId] ? 'rgba(0, 180, 60, 0.8)' : 'rgba(30, 30, 30, 0.8)'}
-          onMouseOut={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[selectedChannel.tvgId] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)'}
+          onMouseOver={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[getChannelId()] ? 'rgba(0, 180, 60, 0.8)' : 'rgba(30, 30, 30, 0.8)'}
+          onMouseOut={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[getChannelId()] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)'}
         >
           <svg 
             xmlns="http://www.w3.org/2000/svg" 
@@ -760,33 +767,6 @@ const formatTime = (date) => {
         </button>
       </div>
       
-      {/* EPG Status notification */}
-      {selectedChannel && !matchedChannels[selectedChannel.tvgId] && (
-        <div style={{
-          position: 'absolute',
-          top: '50px',
-          left: '10px',
-          padding: '8px 12px',
-          backgroundColor: 'rgba(0, 0, 0, 0.7)',
-          color: '#f8f8f8',
-          borderRadius: '6px',
-          zIndex: 35,
-          fontSize: '12px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          backdropFilter: 'blur(3px)',
-          border: '1px solid rgba(255, 255, 255, 0.15)',
-          maxWidth: '300px'
-        }}>
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="12" y1="8" x2="12" y2="12"></line>
-            <line x1="12" y1="16" x2="12.01" y2="16"></line>
-          </svg>
-          <span>Match this channel with EPG data to see program information.</span>
-        </div>
-      )}
       
       {/* Debug panel */}
       {showDebug && (
@@ -827,14 +807,14 @@ const formatTime = (date) => {
                 <strong>Channel:</strong> {selectedChannel.name}
               </div>
               <div style={{ marginBottom: '5px' }}>
-                <strong>Channel ID:</strong> {selectedChannel.tvgId}
+                <strong>Channel ID:</strong> {getChannelId()}
               </div>
               <div style={{ marginBottom: '5px' }}>
-                <strong>Group:</strong> {selectedChannel.groupTitle}
+                <strong>Group:</strong> {getGroupTitle()}
               </div>
-              {matchedChannels[selectedChannel.tvgId] && (
+              {matchedChannels[getChannelId()] && (
                 <div style={{ marginBottom: '5px', color: '#81c784' }}>
-                  <strong>Matched EPG ID:</strong> {matchedChannels[selectedChannel.tvgId]}
+                  <strong>Matched EPG ID:</strong> {matchedChannels[getChannelId()]}
                 </div>
               )}
               <div>
@@ -1038,14 +1018,14 @@ const formatTime = (date) => {
                 <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
                 <line x1="7" y1="7" x2="7.01" y2="7"></line>
               </svg>
-              {selectedChannel.groupTitle}
+              {getGroupTitle()}
             </div>
           </div>
         </>
       )}
       
       {/* EPG info overlay (toggleable) - Only shown when there's a matched EPG ID */}
-      {selectedChannel && showEpgInfo && epgData && epgData.currentProgram && matchedChannels[selectedChannel.tvgId] && (
+      {selectedChannel && showEpgInfo && epgData && epgData.currentProgram && matchedChannels[getChannelId()] && (
         <div style={{
           position: 'absolute',
           bottom: '80px',

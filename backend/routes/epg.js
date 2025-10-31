@@ -1353,20 +1353,22 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           continue;
         }
 
-        // Get IPTV channel info (including logo) from IPTV database
-        let iptvChannelLogo = null;
+        // Get full IPTV channel info from IPTV database
+        let iptvChannelData = null;
         try {
           const iptvChannel = await new Promise((resolve, reject) => {
             iptvDb.all(`
-              SELECT logo FROM iptv_channels WHERE channel_id = ?
+              SELECT channel_id, name, logo, url, group_title, epg_channel_id
+              FROM iptv_channels
+              WHERE channel_id = ?
             `, [iptvChannelId], (err, rows) => {
               if (err) reject(err);
               else resolve(rows && rows.length > 0 ? rows[0] : null);
             });
           });
-          iptvChannelLogo = iptvChannel?.logo || null;
-        } catch (logoError) {
-          logger.warn(`Could not fetch logo for IPTV channel ${iptvChannelId}: ${logoError.message}`);
+          iptvChannelData = iptvChannel;
+        } catch (dbError) {
+          logger.warn(`Could not fetch IPTV channel data for ${iptvChannelId}: ${dbError.message}`);
         }
 
         // Get channel info from EPG database
@@ -1403,7 +1405,14 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
         channelsWithEpg.push({
           id: iptvChannelId,
           name: iptvChannelName || channelInfo.name,
-          logo: iptvChannelLogo || channelInfo.icon,
+          logo: iptvChannelData?.logo || channelInfo.icon,
+          url: iptvChannelData?.url || '',
+          group: {
+            title: iptvChannelData?.group_title || ''
+          },
+          tvg: {
+            id: iptvChannelData?.epg_channel_id || epgChannelId
+          },
           epgId: epgChannelId,
           epgSource: epgSourceName || channelInfo.source_name,
           programs: formattedPrograms
