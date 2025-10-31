@@ -283,7 +283,7 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
       <div className="flex-1 overflow-hidden">
         <div className="flex h-full">
           {/* Channel Sidebar (Fixed) */}
-          <div className="w-48 flex-shrink-0 bg-gray-800 border-r border-gray-700 overflow-y-auto">
+          <div className="w-60 flex-shrink-0 bg-gray-800 border-r border-gray-700 overflow-y-auto">
             {/* Time header spacer */}
             <div className="h-12 bg-gray-900 border-b border-gray-700 flex items-center px-3">
               <span className="text-xs font-semibold text-gray-400">CHANNELS</span>
@@ -293,20 +293,21 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
             {filteredChannels.map((channel, index) => (
               <div
                 key={index}
-                className="h-20 border-b border-gray-700 flex items-center px-3 cursor-pointer hover:bg-gray-700 transition-colors"
+                className="h-28 border-b border-gray-700 flex items-center px-3 cursor-pointer hover:bg-gray-700 transition-colors group"
                 onClick={() => handleChannelClick(channel)}
+                title={channel.name}
               >
                 <div className="flex items-center gap-2 w-full">
                   {channel.logo && (
                     <img
                       src={channel.logo}
                       alt={channel.name}
-                      className="w-8 h-8 rounded object-contain bg-gray-900 p-1"
+                      className="w-10 h-10 rounded object-contain bg-gray-900 p-1 flex-shrink-0"
                       onError={(e) => e.target.style.display = 'none'}
                     />
                   )}
                   <div className="flex-1 min-w-0">
-                    <h3 className="text-sm font-medium text-white truncate">{channel.name}</h3>
+                    <h3 className="text-sm font-medium text-white line-clamp-3">{channel.name}</h3>
                   </div>
                 </div>
               </div>
@@ -343,7 +344,7 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
               {filteredChannels.map((channel, channelIndex) => (
                 <div
                   key={channelIndex}
-                  className="h-20 border-b border-gray-700 relative overflow-hidden"
+                  className="h-28 border-b border-gray-700 relative overflow-hidden"
                   style={{ isolation: 'isolate' }}
                 >
                   {/* Hour dividers */}
@@ -365,25 +366,25 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
                     return (
                       <div
                         key={programIndex}
-                        className={`absolute top-1 bottom-1 rounded px-2 py-1 overflow-hidden cursor-pointer transition-all hover:z-10 hover:shadow-lg ${
+                        className={`absolute top-0 bottom-0 rounded px-2 py-2 cursor-pointer transition-all hover:z-30 hover:shadow-xl flex flex-col justify-center ${
                           isCurrent
                             ? 'bg-blue-600 border-2 border-blue-400'
                             : 'bg-gray-700 border border-gray-600 hover:bg-gray-600'
                         }`}
                         style={{
                           left: `${position.left}px`,
-                          width: `${Math.max(position.width - 4, 60)}px`,
+                          width: `${Math.max(position.width - 4, 120)}px`,
                         }}
-                        title={`${program.title} (${formatTime(program.start)} - ${formatTime(program.stop)})`}
+                        title={`${program.title}\n${formatTime(program.start)} - ${formatTime(program.stop)}${program.description ? '\n' + program.description : ''}`}
                       >
-                        <div className="text-xs font-semibold text-white truncate">
+                        <div className="text-sm font-bold text-white leading-tight text-wrap break-words">
                           {program.title}
                         </div>
-                        <div className="text-xs text-gray-300 truncate">
+                        <div className="text-xs text-gray-100 font-semibold mt-1 whitespace-nowrap">
                           {formatTime(program.start)} - {formatTime(program.stop)}
                         </div>
-                        {program.description && position.width > 200 && (
-                          <div className="text-xs text-gray-400 truncate mt-0.5">
+                        {program.description && position.width > 180 && (
+                          <div className="text-xs text-gray-200 mt-1 leading-tight text-wrap break-words">
                             {program.description}
                           </div>
                         )}

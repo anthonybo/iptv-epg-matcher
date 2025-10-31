@@ -8,24 +8,30 @@ const apiClient = axios.create({
   baseURL: '/api'
 });
 
-// Add request interceptor to check session before making requests
+// Add request interceptor to check session and add auth token
 apiClient.interceptors.request.use(
   async (config) => {
+    // Add JWT token if available
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
     // Extract session ID from the URL if present
     const urlSessionIdMatch = config.url.match(/\/([a-f0-9]{8})(?:\/|$|\?)/);
     const urlSessionId = urlSessionIdMatch ? urlSessionIdMatch[1] : null;
-    
+
     // If there's a session ID in the URL, validate it
     if (urlSessionId) {
       const isValid = await SessionManager.validateSession(urlSessionId);
-      
+
       if (!isValid) {
         // Cancel the request and trigger session reset
         SessionManager.clearSession();
         return Promise.reject(new axios.Cancel('Invalid session'));
       }
     }
-    
+
     return config;
   },
   (error) => {

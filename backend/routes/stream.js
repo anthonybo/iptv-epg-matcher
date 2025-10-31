@@ -6,18 +6,20 @@ const logger = require('../config/logger');
 const sessionStorage = require('../utils/sessionStorage');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
 const { PassThrough } = require('stream');
+const { authMiddleware } = require('../middleware/authMiddleware');
 
 /**
  * GET /:sessionId/:channelId
  * Stream a channel by redirecting to the appropriate URL
  * Supports both direct streaming and format conversion
  */
-router.get('/:sessionId/:channelId', async (req, res) => {
+router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
     try {
         const { sessionId, channelId } = req.params;
         const format = req.query.format || 'ts'; // Default to ts format
-        
-        logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}`);
+        const userId = req.user?.id; // Get user ID if authenticated
+
+        logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}, userId ${userId || 'none'}`);
 
         let channels = [];
 
@@ -26,7 +28,8 @@ router.get('/:sessionId/:channelId', async (req, res) => {
             logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}`);
             const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
                 page: 1,
-                limit: 50000 // Load all channels
+                limit: 50000, // Load all channels
+                userId: userId || null
             });
 
             if (dbResult && dbResult.channels && dbResult.channels.length > 0) {

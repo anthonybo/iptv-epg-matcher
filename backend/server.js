@@ -287,6 +287,7 @@ app.use(['/api/channels/:sessionId', '/api/channels/:sessionId/categories'], (re
 });
 
 // Import routes
+const authRoutes = require('./routes/auth');
 const channelRoutes = require('./routes/channels');
 const epgRoutes = require('./routes/epg');
 const streamRoutes = require('./routes/stream');
@@ -329,6 +330,7 @@ if (!settingsRouter || typeof settingsRouter !== 'function') {
 }
 
 // Use routes
+app.use('/api/auth', authRoutes);
 app.use('/api/channels', channelRoutes);
 app.use('/api/epg', epgRoutes);
 app.use('/api/stream', streamRoutes);

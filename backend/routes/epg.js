@@ -9,6 +9,10 @@ const { exec, spawn } = require('child_process');
 const logger = require('../utils/logger');
 const sessionStorage = require('../utils/sessionStorage');
 const sqlite3 = require('sqlite3').verbose();
+const { authMiddleware } = require('../middleware/authMiddleware');
+
+// Apply optional auth middleware to all routes
+router.use(authMiddleware);
 
 // Load EPG sources from config file (single source of truth)
 const EPG_SOURCES_CONFIG = require('../config/epg_sources.json');
@@ -1248,14 +1252,31 @@ router.post('/:sessionId/match', async (req, res) => {
     try {
       const iptvDatabaseService = require('../services/iptvDatabaseService');
       const iptvDb = await iptvDatabaseService.connect();
+      const userId = req.user?.id; // Get user ID if authenticated
+
+      // If user is authenticated, delete all old matches for this channel for this user
+      // (regardless of session_id) to prevent duplicates
+      if (userId) {
+        await new Promise((resolve, reject) => {
+          iptvDb.run(`
+            DELETE FROM epg_matches
+            WHERE user_id = ? AND iptv_channel_id = ?
+          `, [userId, m3uChannel.id], (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+        logger.info(`Deleted old matches for user ${userId}, channel ${m3uChannel.id}`);
+      }
 
       await new Promise((resolve, reject) => {
         iptvDb.run(`
           INSERT OR REPLACE INTO epg_matches
-          (session_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          (session_id, user_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         `, [
           sessionId,
+          userId || null,
           m3uChannel.id,
           m3uChannel.name,
           epgChannel.id,
@@ -1268,7 +1289,7 @@ router.post('/:sessionId/match', async (req, res) => {
         });
       });
 
-      logger.info(`Saved match to database: ${m3uChannel.name} -> ${epgChannel.name}`);
+      logger.info(`Saved match to database: ${m3uChannel.name} -> ${epgChannel.name}${userId ? ` (user ${userId})` : ''}`);
     } catch (dbError) {
       logger.error(`Failed to save match to database: ${dbError.message}`);
       // Don't fail the request if database save fails
@@ -1296,8 +1317,9 @@ router.post('/:sessionId/match', async (req, res) => {
 router.get('/:sessionId/matched-channels', async (req, res) => {
   try {
     const { sessionId } = req.params;
+    const userId = req.user?.id; // Get user ID if authenticated
 
-    logger.info(`Getting matched channels for session ${sessionId}`);
+    logger.info(`Getting matched channels for session ${sessionId}${userId ? ` (user ${userId})` : ''}`);
 
     if (!sessionId) {
       return res.status(400).json({ error: 'Session ID is required' });
@@ -1307,8 +1329,24 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
     const iptvDatabaseService = require('../services/iptvDatabaseService');
     const iptvDb = await iptvDatabaseService.connect();
 
-    const dbMatches = await new Promise((resolve, reject) => {
-      iptvDb.all(`
+    // Query by user_id if authenticated, otherwise by session_id
+    let query, params;
+    if (userId) {
+      query = `
+        SELECT
+          iptv_channel_id,
+          iptv_channel_name,
+          epg_channel_id,
+          epg_channel_name,
+          epg_source_name,
+          epg_source_id
+        FROM epg_matches
+        WHERE user_id = ? OR session_id = ?
+        ORDER BY iptv_channel_name
+      `;
+      params = [userId, sessionId];
+    } else {
+      query = `
         SELECT
           iptv_channel_id,
           iptv_channel_name,
@@ -1319,7 +1357,12 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
         FROM epg_matches
         WHERE session_id = ?
         ORDER BY iptv_channel_name
-      `, [sessionId], (err, rows) => {
+      `;
+      params = [sessionId];
+    }
+
+    const dbMatches = await new Promise((resolve, reject) => {
+      iptvDb.all(query, params, (err, rows) => {
         if (err) reject(err);
         else resolve(rows || []);
       });
@@ -1404,9 +1447,9 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
 
         channelsWithEpg.push({
           id: iptvChannelId,
-          name: iptvChannelName || channelInfo.name,
+          name: iptvChannelData?.name || channelInfo.name,
           logo: iptvChannelData?.logo || channelInfo.icon,
-          url: iptvChannelData?.url || '',
+          url: (iptvChannelData?.url || '').trim(),
           group: {
             title: iptvChannelData?.group_title || ''
           },

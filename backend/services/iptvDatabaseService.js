@@ -369,36 +369,50 @@ const getChannelsForSession = (sessionId, options = {}) => {
             categoryId = null,
             search = null,
             sortBy = 'name',
-            sortOrder = 'asc'
+            sortOrder = 'asc',
+            userId = null
         } = options;
-        
+
         const offset = (page - 1) * limit;
-        const params = [sessionId];
-        
+
+        // Build WHERE clause for session/user filtering
+        let sessionWhereClause;
+        let params;
+
+        if (userId) {
+            // If user is authenticated, query by user_id OR session_id
+            sessionWhereClause = '(m.user_id = ? OR m.session_id = ?)';
+            params = [userId, sessionId];
+        } else {
+            // If not authenticated, query by session_id only
+            sessionWhereClause = 'm.session_id = ?';
+            params = [sessionId];
+        }
+
         let whereClause = '';
-        
+
         if (categoryId) {
             whereClause += ' AND c.group_title = ?';
             params.push(categoryId);
         }
-        
+
         if (search) {
             whereClause += ' AND c.name LIKE ?';
             params.push(`%${search}%`);
         }
-        
+
         // Validate sort parameters for security
         const validSortColumns = ['name', 'group_title', 'last_updated'];
         const validSortOrders = ['asc', 'desc'];
-        
+
         const sanitizedSortBy = validSortColumns.includes(sortBy) ? sortBy : 'name';
-        const sanitizedSortOrder = validSortOrders.includes(sortOrder.toLowerCase()) ? 
+        const sanitizedSortOrder = validSortOrders.includes(sortOrder.toLowerCase()) ?
             sortOrder.toLowerCase() : 'asc';
-        
+
         db.all(
             `SELECT c.* FROM iptv_channels c
              JOIN session_iptv_mappings m ON c.source_id = m.source_id
-             WHERE m.session_id = ? ${whereClause}
+             WHERE ${sessionWhereClause} ${whereClause}
              ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
              LIMIT ? OFFSET ?`,
             [...params, limit, offset],
@@ -413,7 +427,7 @@ const getChannelsForSession = (sessionId, options = {}) => {
                 db.get(
                     `SELECT COUNT(*) as total FROM iptv_channels c
                      JOIN session_iptv_mappings m ON c.source_id = m.source_id
-                     WHERE m.session_id = ? ${whereClause}`,
+                     WHERE ${sessionWhereClause} ${whereClause}`,
                     params,
                     (countErr, countRow) => {
                         if (countErr) {
