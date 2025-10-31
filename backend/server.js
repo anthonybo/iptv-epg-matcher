@@ -837,10 +837,15 @@ setInterval(() => {
   try {
     await db.initDatabase();
     logger.info('Database initialized successfully');
-    
+
     // Get database stats
     const stats = await db.getDatabaseStats();
     logger.info(`Database contains ${stats.channelCount} channels and ${stats.programCount} programs`);
+
+    // Initialize IPTV database
+    const iptvDb = require('./services/iptvDatabaseService');
+    await iptvDb.connect();
+    logger.info('IPTV database initialized successfully');
     
     // If database is empty and EPG sources exist, parse them
     if (stats.channelCount === 0) {
@@ -899,6 +904,47 @@ setInterval(() => {
     logger.error(`Database initialization failed: ${error.message}`);
   }
 })();
+
+// Set up automatic EPG refresh schedule
+const cron = require('node-cron');
+const { exec } = require('child_process');
+const { EPG_AUTO_REFRESH_ENABLED, EPG_AUTO_REFRESH_CRON } = require('./config/constants');
+
+if (EPG_AUTO_REFRESH_ENABLED) {
+  logger.info(`Setting up automatic EPG refresh schedule: ${EPG_AUTO_REFRESH_CRON}`);
+
+  cron.schedule(EPG_AUTO_REFRESH_CRON, () => {
+    logger.info('Starting scheduled EPG refresh');
+
+    const pythonPath = 'python3';
+    const scriptPath = path.join(__dirname, 'epg_parser.py');
+    const cmd = `${pythonPath} ${scriptPath} --force --no-menu`;
+
+    logger.info(`Running EPG parser: ${cmd}`);
+
+    exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        logger.error(`Scheduled EPG refresh failed: ${error.message}`);
+        logger.error(`Stderr: ${stderr}`);
+        return;
+      }
+
+      logger.info('Scheduled EPG refresh completed successfully');
+      logger.debug(`Stdout: ${stdout}`);
+
+      // Log database stats after refresh
+      db.getDatabaseStats().then(stats => {
+        logger.info(`Database now contains ${stats.sourceCount} sources, ${stats.channelCount} channels, and ${stats.programCount} programs`);
+      }).catch(err => {
+        logger.error(`Error fetching database stats: ${err.message}`);
+      });
+    });
+  });
+
+  logger.info('Automatic EPG refresh schedule configured successfully');
+} else {
+  logger.info('Automatic EPG refresh is disabled in configuration');
+}
 
 // Serve static frontend files if build directory exists
 const frontendBuildPath = path.join(__dirname, '../frontend/build');

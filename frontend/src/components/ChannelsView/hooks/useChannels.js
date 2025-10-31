@@ -61,7 +61,15 @@ export const useChannels = (sessionId) => {
       setLoading(true);
 
       try {
-        const url = `${API_BASE_URL}/api/channels/${sessionId}?page=${page}&limit=${limit}`;
+        // Build URL with category filter if selected
+        let url = `${API_BASE_URL}/api/channels/${sessionId}?page=${page}&limit=${limit}`;
+
+        // If exactly one category is selected, use backend filtering
+        if (selectedCategories.size === 1) {
+          const category = Array.from(selectedCategories)[0];
+          url += `&category=${encodeURIComponent(category)}`;
+        }
+
         const response = await fetch(url);
 
         if (!response.ok) {
@@ -101,7 +109,7 @@ export const useChannels = (sessionId) => {
     };
 
     fetchChannels();
-  }, [sessionId, page]);
+  }, [sessionId, page, selectedCategories]);
 
   // Filter channels based on selected categories and search term
   const filteredChannels = useMemo(() => {
@@ -129,11 +137,17 @@ export const useChannels = (sessionId) => {
       }
       return newSet;
     });
+    // Reset to page 1 when category selection changes
+    setPage(1);
+    setChannels([]);
   };
 
   // Clear all category filters
   const clearCategoryFilters = () => {
     setSelectedCategories(new Set());
+    // Reset to page 1 when clearing filters
+    setPage(1);
+    setChannels([]);
   };
 
   // Load more channels

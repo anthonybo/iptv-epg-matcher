@@ -5,10 +5,35 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
 const logger = require('../utils/logger');
 const sessionStorage = require('../utils/sessionStorage');
 const sqlite3 = require('sqlite3').verbose();
+
+// Load EPG sources from config file (single source of truth)
+const EPG_SOURCES_CONFIG = require('../config/epg_sources.json');
+
+// Get only enabled sources
+function getEnabledEpgSources() {
+  return EPG_SOURCES_CONFIG.sources
+    .filter(source => source.enabled)
+    .map(source => source.url);
+}
+
+// Get all sources (including disabled ones) with metadata
+function getAllEpgSourcesWithMetadata() {
+  return EPG_SOURCES_CONFIG.sources;
+}
+
+// Track running EPG refresh process
+let epgRefreshProcess = null;
+let epgRefreshStatus = {
+  isRunning: false,
+  startedAt: null,
+  currentSource: 0,
+  totalSources: 0,
+  lastMessage: null
+};
 
 // Path to the SQLite database created by epg_parser.py
 const DB_PATH = path.join(__dirname, '../data/epg.db');
@@ -454,40 +479,151 @@ const getProgramsByChannelId = async (channelId, startTime, endTime) => {
   }
 };
 
-// Run the Python parser
+// Run the Python parser with live progress streaming
 const runEpgParser = async (options = {}) => {
   return new Promise((resolve, reject) => {
-    const pythonPath = 'python3'; // Adjust according to your environment
+    // Check if already running
+    if (epgRefreshStatus.isRunning) {
+      logger.warn('EPG refresh already in progress, ignoring duplicate request');
+      return reject(new Error('EPG refresh already in progress'));
+    }
+
+    const pythonPath = 'python3';
     const scriptPath = path.join(__dirname, '../epg_parser.py');
-    
-    let args = [];
-    
+
+    let args = ['--no-menu']; // Always use non-interactive mode
+
     if (options.force) {
       args.push('--force');
     }
-    
+
     if (options.source) {
       args.push(`--source=${options.source}`);
     }
-    
-    const cmd = `${pythonPath} ${scriptPath} ${args.join(' ')}`;
-    
-    logger.info(`Running EPG parser: ${cmd}`);
-    
-    exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        logger.error(`EPG parser error: ${error.message}`);
+
+    logger.info(`Running EPG parser: ${pythonPath} ${scriptPath} ${args.join(' ')}`);
+
+    epgRefreshProcess = spawn(pythonPath, [scriptPath, ...args]);
+    epgRefreshStatus = {
+      isRunning: true,
+      startedAt: new Date().toISOString(),
+      currentSource: 0,
+      totalSources: getEnabledEpgSources().length, // Set to number of enabled sources
+      lastMessage: 'Starting EPG refresh...'
+    };
+
+    let stdout = '';
+    let stderr = '';
+
+    // Capture stdout line by line and broadcast via SSE
+    epgRefreshProcess.stdout.on('data', (data) => {
+      const output = data.toString();
+      stdout += output;
+
+      // Parse output and broadcast progress
+      const lines = output.split('\n');
+      lines.forEach(line => {
+        if (line.trim()) {
+          logger.info(`[EPG Parser] ${line}`);
+
+          // Update global status
+          epgRefreshStatus.lastMessage = line.trim();
+
+          // Extract source progress
+          const sourceMatch = line.match(/Processing source (\d+)\/(\d+):/);
+          if (sourceMatch) {
+            epgRefreshStatus.currentSource = parseInt(sourceMatch[1]);
+            epgRefreshStatus.totalSources = parseInt(sourceMatch[2]);
+          }
+
+          // Broadcast progress to all connected clients
+          if (global.app && global.app.locals && global.app.locals.sessions) {
+            Object.keys(global.app.locals.sessions).forEach(sessionId => {
+              const session = global.app.locals.sessions[sessionId];
+              if (session && session.clients) {
+                session.clients.forEach(client => {
+                  if (client && client.send) {
+                    client.send('epg-progress', {
+                      type: 'epg-progress',
+                      message: line.trim(),
+                      timestamp: new Date().toISOString()
+                    });
+                  }
+                });
+              }
+            });
+          }
+        }
+      });
+    });
+
+    epgRefreshProcess.stderr.on('data', (data) => {
+      const output = data.toString();
+      stderr += output;
+      logger.error(`[EPG Parser Error] ${output}`);
+    });
+
+    epgRefreshProcess.on('close', (code) => {
+      // Reset status
+      epgRefreshStatus.isRunning = false;
+      epgRefreshProcess = null;
+
+      if (code !== 0) {
+        logger.error(`EPG parser exited with code ${code}`);
         logger.error(`Stderr: ${stderr}`);
-        return reject(error);
+
+        // Broadcast error
+        if (global.app && global.app.locals && global.app.locals.sessions) {
+          Object.keys(global.app.locals.sessions).forEach(sessionId => {
+            const session = global.app.locals.sessions[sessionId];
+            if (session && session.clients) {
+              session.clients.forEach(client => {
+                if (client && client.send) {
+                  client.send('epg-error', {
+                    type: 'epg-error',
+                    message: `EPG refresh failed with exit code ${code}`,
+                    timestamp: new Date().toISOString()
+                  });
+                }
+              });
+            }
+          });
+        }
+
+        return reject(new Error(`EPG parser failed with exit code ${code}`));
       }
-      
+
       logger.info(`EPG parser completed successfully`);
-      logger.debug(`Stdout: ${stdout}`);
-      
+
+      // Broadcast completion
+      if (global.app && global.app.locals && global.app.locals.sessions) {
+        Object.keys(global.app.locals.sessions).forEach(sessionId => {
+          const session = global.app.locals.sessions[sessionId];
+          if (session && session.clients) {
+            session.clients.forEach(client => {
+              if (client && client.send) {
+                client.send('epg-complete', {
+                  type: 'epg-complete',
+                  message: 'EPG refresh completed successfully',
+                  timestamp: new Date().toISOString()
+                });
+              }
+            });
+          }
+        });
+      }
+
       resolve({
         success: true,
         output: stdout
       });
+    });
+
+    epgRefreshProcess.on('error', (error) => {
+      epgRefreshStatus.isRunning = false;
+      epgRefreshProcess = null;
+      logger.error(`EPG parser process error: ${error.message}`);
+      reject(error);
     });
   });
 };
@@ -636,26 +772,49 @@ router.get('/debug/stats', async (req, res) => {
 });
 
 /**
+ * GET /refresh-status
+ * Get current EPG refresh status
+ */
+router.get('/refresh-status', (req, res) => {
+  res.json({
+    isRunning: epgRefreshStatus.isRunning,
+    startedAt: epgRefreshStatus.startedAt,
+    currentSource: epgRefreshStatus.currentSource,
+    totalSources: epgRefreshStatus.totalSources,
+    lastMessage: epgRefreshStatus.lastMessage
+  });
+});
+
+/**
  * POST /parse
  * Parse EPG from URL or file using epg_parser.py
  */
 router.post('/parse', async (req, res) => {
   try {
     const { url, force = false } = req.body;
-    
+
+    // Check if already running
+    if (epgRefreshStatus.isRunning) {
+      return res.status(409).json({
+        error: 'EPG refresh already in progress',
+        status: epgRefreshStatus,
+        timestamp: new Date().toISOString()
+      });
+    }
+
     // Start parsing in the background
     res.json({
       status: 'EPG parsing started',
       source: url || 'all sources',
       timestamp: new Date().toISOString()
     });
-    
+
     // Run the EPG parser
     const options = {
       force,
       source: url
     };
-    
+
     runEpgParser(options).then(result => {
       logger.info(`EPG parse completed: ${result.success}`);
     }).catch(error => {
@@ -898,35 +1057,69 @@ router.get('/:sessionId', async (req, res) => {
 router.get('/:sessionId/sources', async (req, res) => {
   try {
     const { sessionId } = req.params;
-    
+
     logger.info(`Getting EPG sources for session ${sessionId}`);
-    
+
     if (!sessionId) {
       return res.status(400).json({ error: 'Session ID is required' });
     }
-    
+
     // Initialize database
     await initDb();
-    
+
     // Get sources from the database
-    const sources = await runQuery(`
+    const dbSources = await runQuery(`
       SELECT id, name, url, last_updated, channel_count, program_count
       FROM sources
-      ORDER BY name
     `);
-    
+
+    // Create a map of database sources by URL for quick lookup
+    const dbSourceMap = {};
+    dbSources.forEach(source => {
+      if (source.url) {
+        dbSourceMap[source.url] = source;
+      }
+    });
+
+    // Merge config sources with database data
+    // This ensures frontend knows about all sources with their status
+    const allSourcesMetadata = getAllEpgSourcesWithMetadata();
+    const sources = allSourcesMetadata.map((configSource, index) => {
+      const dbSource = dbSourceMap[configSource.url];
+
+      return {
+        id: dbSource?.id || `source_${index + 1}`,
+        name: configSource.name || dbSource?.name || configSource.url.split('/').pop(),
+        url: configSource.url,
+        enabled: configSource.enabled,
+        verified: configSource.verified,
+        notes: configSource.notes,
+        last_updated: dbSource?.last_updated || null,
+        channel_count: dbSource?.channel_count || 0,
+        program_count: dbSource?.program_count || 0,
+        channelCount: dbSource?.channel_count || 0,
+        programCount: dbSource?.program_count || 0
+      };
+    });
+
+    // Filter to only enabled sources if requested
+    const enabledOnly = req.query.enabled === 'true';
+    const filteredSources = enabledOnly ? sources.filter(s => s.enabled) : sources;
+
     return res.json({
       success: true,
       sessionId,
-      sources,
-      count: sources.length,
-      message: `Retrieved ${sources.length} EPG sources`
+      sources: filteredSources,
+      count: filteredSources.length,
+      totalAvailable: sources.length,
+      enabledCount: sources.filter(s => s.enabled).length,
+      message: `Retrieved ${filteredSources.length} EPG sources (${sources.filter(s => s.enabled).length} enabled, ${dbSources.length} with data)`
     });
   } catch (error) {
     logger.error(`Error getting EPG sources: ${error.message}`);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: `Failed to get EPG sources: ${error.message}`,
-      success: false 
+      success: false
     });
   }
 });

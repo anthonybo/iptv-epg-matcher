@@ -376,7 +376,23 @@ async function parseEPGProgressively(epgContent, progressCallback) {
  */
 router.post('/', upload.single('m3uFile'), async (req, res) => {
     // Extract parameters from request
-    const { sessionId, m3uUrl, epgUrl, xtreamUsername, xtreamPassword, xtreamServer, forceUpdate = false } = req.body;
+    // Extract and trim all parameters to avoid whitespace issues
+    const {
+        sessionId,
+        m3uUrl: rawM3uUrl,
+        epgUrl: rawEpgUrl,
+        xtreamUsername: rawXtreamUsername,
+        xtreamPassword: rawXtreamPassword,
+        xtreamServer: rawXtreamServer,
+        forceUpdate = false
+    } = req.body;
+
+    // Trim all string parameters
+    const m3uUrl = rawM3uUrl ? rawM3uUrl.trim() : rawM3uUrl;
+    const epgUrl = rawEpgUrl ? rawEpgUrl.trim() : rawEpgUrl;
+    const xtreamUsername = rawXtreamUsername ? rawXtreamUsername.trim() : rawXtreamUsername;
+    const xtreamPassword = rawXtreamPassword ? rawXtreamPassword.trim() : rawXtreamPassword;
+    const xtreamServer = rawXtreamServer ? rawXtreamServer.trim() : rawXtreamServer;
     const m3uFile = req.file; // Access uploaded file from multer
 
     // Log what was received for debugging

@@ -10,6 +10,10 @@ module.exports = {
     CACHE_TTL: 24 * 60 * 60 * 1000, // 24 hours in ms
     EPG_CACHE_TTL_HOURS: 12, // 12 hours - reduced from 24 for more frequent updates
 
+    // EPG automatic refresh schedule
+    EPG_AUTO_REFRESH_ENABLED: true, // Enable automatic EPG refresh
+    EPG_AUTO_REFRESH_CRON: '0 3 * * *', // Daily at 3:00 AM (cron format: minute hour day month weekday)
+
     // External EPG sources
     EXTERNAL_EPG_URLS: [
         // 'https://strongepg.ip-ddns.com/8k-epg.xml.gz',

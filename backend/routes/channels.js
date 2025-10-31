@@ -5,6 +5,7 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../config/logger');
 const sessionStorage = require('../utils/sessionStorage');
+const iptvDatabaseService = require('../services/iptvDatabaseService');
 
 /**
  * GET /api/channels/:sessionId
@@ -14,47 +15,83 @@ router.get('/:sessionId', async (req, res) => {
   try {
     // Get session ID from path parameter or query parameter
     let sessionId = req.params.sessionId;
-    
+
     // Extract pagination parameters
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 100, 1000); // Cap at 1000 channels max
     const category = req.query.category || null;
-    
+
     // Log debugging info about the request
     logger.info(`CHANNEL REQUEST RECEIVED: sessionId=${sessionId}`, {
       url: req.originalUrl,
       params: req.params,
       query: req.query,
-      sessionIdFromParams: req.params.sessionId,
-      sessionIdFromQuery: req.query.sessionId
+      page,
+      limit,
+      category
     });
-    
+
     // Also check query parameter as a fallback
     if ((!sessionId || sessionId === 'null' || sessionId === 'undefined') && req.query.sessionId) {
       sessionId = req.query.sessionId;
       logger.debug(`Using query parameter sessionId instead: ${sessionId}`);
     }
-    
+
     // Validate session ID
     if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
       logger.warn(`INVALID SESSION ID: ${sessionId}`);
-      return res.status(400).json({ 
-        error: 'Invalid session ID', 
+      return res.status(400).json({
+        error: 'Invalid session ID',
         message: 'A valid session ID is required to retrieve channels',
         code: 'INVALID_SESSION_ID'
       });
     }
-    
-    // Get session data
+
+    // Try to get channels from IPTV database first
+    try {
+      logger.info(`Fetching channels from IPTV database for session ${sessionId}`);
+      const result = await iptvDatabaseService.getChannelsForSession(sessionId, {
+        page,
+        limit,
+        categoryId: category
+      });
+
+      if (result && result.channels && result.channels.length > 0) {
+        logger.info(`Found ${result.channels.length} channels from IPTV database`);
+
+        // Transform channels to match expected format
+        const transformedChannels = result.channels.map(ch => ({
+          id: ch.id,
+          tvgId: ch.tvg?.id || ch.id,
+          name: ch.name,
+          groupTitle: ch.group?.title || '',
+          logo: ch.logo || '',
+          url: ch.url,
+          categories: ch.categories || []
+        }));
+
+        return res.json({
+          channels: transformedChannels,
+          pagination: result.pagination,
+          totalChannels: result.pagination.total
+        });
+      }
+    } catch (dbError) {
+      logger.warn(`Error fetching from IPTV database: ${dbError.message}`);
+      // Fall through to in-memory storage
+    }
+
+    // Fallback to in-memory session storage
+    logger.info(`Falling back to in-memory session storage for session ${sessionId}`);
     const sessionData = sessionStorage.getSession(sessionId);
-    
+
     if (!sessionData) {
       logger.warn(`Session not found: ${sessionId}`);
-      
+
       // Return test channels for easier debugging
       const testChannels = generateTestChannels(10);
       logger.info(`Returning ${testChannels.length} test channels for missing session ${sessionId}`);
-      
+
       return res.json({
         channels: testChannels,
         categories: generateCategories(testChannels),
@@ -63,14 +100,14 @@ router.get('/:sessionId', async (req, res) => {
         message: 'Session not found, returning test data'
       });
     }
-    
+
     // Check if channels exist in the session data
     const allChannels = sessionData.data?.channels;
     if (!allChannels || allChannels.length === 0) {
       // If no channels, return test channels for development
       const testChannels = generateTestChannels(50);
       logger.info(`No channels found in session ${sessionId}, returning ${testChannels.length} test channels`);
-      
+
       // Update the session with test channels
       sessionStorage.updateSession(sessionId, {
         data: {
@@ -78,7 +115,7 @@ router.get('/:sessionId', async (req, res) => {
           channels: testChannels
         }
       });
-      
+
       return res.json({
         channels: testChannels,
         categories: generateCategories(testChannels),
@@ -92,16 +129,16 @@ router.get('/:sessionId', async (req, res) => {
     if (category) {
       filteredChannels = allChannels.filter(ch => ch.groupTitle === category);
     }
-    
+
     // Apply pagination
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + limit;
     const paginatedChannels = filteredChannels.slice(startIndex, endIndex);
-    
+
     // Calculate total pages
     const totalChannels = filteredChannels.length;
     const totalPages = Math.ceil(totalChannels / limit);
-    
+
     logger.info(`Returning page ${page}/${totalPages} with ${paginatedChannels.length} channels for session ${sessionId}`);
 
     // Get categories from the session or generate them
@@ -109,7 +146,7 @@ router.get('/:sessionId', async (req, res) => {
     if (!categories || !Array.isArray(categories) || categories.length === 0) {
       logger.debug(`Generating categories for response as none exist in session`);
       categories = generateCategories(allChannels);
-      
+
       // Store in session for future use
       sessionStorage.updateSession(sessionId, {
         data: {
@@ -118,7 +155,7 @@ router.get('/:sessionId', async (req, res) => {
         }
       });
     }
-    
+
     // Return paginated channels with metadata
     res.json({
       channels: paginatedChannels,
@@ -139,8 +176,8 @@ router.get('/:sessionId', async (req, res) => {
       error: error.message,
       stack: error.stack
     });
-    res.status(500).json({ 
-      error: 'Internal server error', 
+    res.status(500).json({
+      error: 'Internal server error',
       message: 'An unexpected error occurred while retrieving channels.'
     });
   }
@@ -170,40 +207,59 @@ router.get('/session/:sessionId', async (req, res) => {
  * GET /api/channels/:sessionId/categories
  * Gets channel categories with counts
  */
-router.get('/:sessionId/categories', (req, res) => {
+router.get('/:sessionId/categories', async (req, res) => {
   const { sessionId } = req.params;
 
   logger.debug(`REQUEST RECEIVED for categories: sessionId=${sessionId}`);
 
   try {
-    const session = sessionStorage.getSession(sessionId);
-    
-    if (!session || !session.data || !session.data.categories) {
-    // Try to synthesize categories from cached channels before failing 
-    const inferredCategories = generateCategories(session?.data?.channels || []);
-    if (inferredCategories.length > 0) {
-      logger.info(`Synthesized ${inferredCategories.length} categories for session ${sessionId} from cached channels`);
-      sessionStorage.updateSession(sessionId, {
-        data: {
-          ...(session?.data || {}),
-          categories: inferredCategories
-        }
-      });
-      return res.json(inferredCategories);
+    // Try to get categories from IPTV database first
+    try {
+      logger.info(`Fetching categories from IPTV database for session ${sessionId}`);
+      const categories = await iptvDatabaseService.getCategoriesForSession(sessionId);
+
+      if (categories && categories.length > 0) {
+        logger.info(`Found ${categories.length} categories from IPTV database`);
+
+        // Transform to expected format
+        const formattedCategories = categories.map(cat => ({
+          name: cat.name,
+          count: cat.channelCount
+        }));
+
+        return res.json(formattedCategories);
+      }
+    } catch (dbError) {
+      logger.warn(`Error fetching categories from IPTV database: ${dbError.message}`);
+      // Fall through to in-memory storage
     }
 
-    logger.warn(`No categories present for session ${sessionId}`);
-    return res.status(200).json({
-      categories: [],
-      channelCount: session?.data?.channels?.length || 0,
-      message: 'Categories not yet available for this session'
-    });
-  }
-  
+    // Fallback to in-memory session storage
+    logger.info(`Falling back to in-memory session storage for categories`);
+    const session = sessionStorage.getSession(sessionId);
+
+    if (!session || !session.data || !session.data.categories) {
+      // Try to synthesize categories from cached channels before failing
+      const inferredCategories = generateCategories(session?.data?.channels || []);
+      if (inferredCategories.length > 0) {
+        logger.info(`Synthesized ${inferredCategories.length} categories for session ${sessionId} from cached channels`);
+        sessionStorage.updateSession(sessionId, {
+          data: {
+            ...(session?.data || {}),
+            categories: inferredCategories
+          }
+        });
+        return res.json(inferredCategories);
+      }
+
+      logger.warn(`No categories present for session ${sessionId}`);
+      return res.status(200).json([]);
+    }
+
     // Ensure categories are in the expected format
     const rawCategories = session.data.categories;
     let formattedCategories;
-    
+
     // Format the categories depending on what we have
     if (Array.isArray(rawCategories)) {
       // Map to ensure each category has the correct format
@@ -223,18 +279,18 @@ router.get('/:sessionId/categories', (req, res) => {
       logger.warn(`Categories for session ${sessionId} are not in expected format`);
       formattedCategories = [];
     }
-    
+
     // Sort alphabetically
     formattedCategories.sort((a, b) => a.name.localeCompare(b.name));
-    
+
     logger.info(`Returning ${formattedCategories.length} formatted categories from session data`);
-    
+
     // Return the formatted categories
     return res.json(formattedCategories);
   } catch (error) {
     logger.error(`Error getting categories: ${error.message}`, { stack: error.stack });
-    return res.status(500).json({ 
-      error: 'Server error', 
+    return res.status(500).json({
+      error: 'Server error',
       message: 'Failed to retrieve categories'
     });
   }

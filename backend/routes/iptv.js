@@ -15,10 +15,22 @@ const iptvDatabaseService = require('../services/iptvDatabaseService');
  */
 router.post('/provider', async (req, res) => {
   try {
-    const { name, url, username, password, sessionId } = req.body;
-    
+    // Extract and trim parameters to avoid whitespace issues
+    const {
+      name: rawName,
+      url: rawUrl,
+      username: rawUsername,
+      password: rawPassword,
+      sessionId
+    } = req.body;
+
+    const name = rawName ? rawName.trim() : rawName;
+    const url = rawUrl ? rawUrl.trim() : rawUrl;
+    const username = rawUsername ? rawUsername.trim() : rawUsername;
+    const password = rawPassword ? rawPassword.trim() : rawPassword;
+
     if (!url || !username || !password) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Missing required fields',
         success: false
       });

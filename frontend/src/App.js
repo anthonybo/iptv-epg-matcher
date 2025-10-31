@@ -13,7 +13,6 @@ import ChannelsView from './components/ChannelsView';
 import PlayerView from './PlayerView';
 import ResultView from './ResultView';
 import SessionDebugger from './components/SessionDebugger';
-import DirectEpgSourcesLoader from './DirectEpgSourcesLoader';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 
 const resolveApiBase = () => {
@@ -773,7 +772,7 @@ function App() {
   const handleReset = () => {
     // Clear session data
     SessionManager.clearSession();
-    
+
     // Keep credentials but reset everything else
     setChannels([]);
     setTotalChannels(0);
@@ -788,6 +787,14 @@ function App() {
     setActiveTab('configure');
     setStatus('Application reset. Ready to load new channels.');
     setStatusType('info');
+  };
+
+  // Handle EPG sources update after refresh
+  const handleEpgSourcesUpdated = (updatedSources) => {
+    console.log('[App] EPG sources updated:', updatedSources);
+    setEpgSources(updatedSources);
+    setStatus(`${updatedSources.length} EPG sources refreshed successfully`);
+    setStatusType('success');
   };
 
   // Toggle sidebar visibility
@@ -827,11 +834,7 @@ function App() {
               These sources populate guide data across the rest of the app.
             </p>
 
-            <EpgSourcesSummary sources={epgSources} />
-
-            <div style={{ marginTop: '24px' }}>
-              <DirectEpgSourcesLoader hideSourceList />
-            </div>
+            <EpgSourcesSummary sources={epgSources} onSourcesUpdated={handleEpgSourcesUpdated} />
 
             <div style={{ marginTop: '24px' }}>
               <Configuration

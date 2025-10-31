@@ -31,18 +31,28 @@ logger = logging.getLogger("epg_parser")
 # Default paths
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "epg.db")
 DEFAULT_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+EPG_SOURCES_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "epg_sources.json")
 
-# Default EPG sources (you can override with the --sources argument)
-DEFAULT_EPG_SOURCES = [
-    "https://strongepg.ip-ddns.com/epg/w-8k-epg.xml.gz",
-    "https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz",
-    "https://epg.pw/xmltv/epg_US.xml",
-    "https://www.open-epg.com/files/unitedstates1.xml.gz",
-    "https://open-epg.com/files/sports1.xml",
-    "https://epg.starlite.best/utc.xml.gz",
-    "https://raw.githubusercontent.com/acidjesuz/epgtalk/master/guide.xml",
-    "https://i.mjh.nz/PlutoTV/us.xml.gz"
-]
+def load_epg_sources_config():
+    """Load EPG sources from config file (single source of truth)"""
+    try:
+        with open(EPG_SOURCES_CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+            return config['sources']
+    except FileNotFoundError:
+        logger.error(f"EPG sources config not found at {EPG_SOURCES_CONFIG_PATH}")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing EPG sources config: {e}")
+        return []
+
+def get_enabled_epg_sources():
+    """Get list of enabled EPG source URLs"""
+    sources = load_epg_sources_config()
+    return [source['url'] for source in sources if source.get('enabled', True)]
+
+# Legacy support - get enabled sources
+DEFAULT_EPG_SOURCES = get_enabled_epg_sources()
 
 class TwoPassEPGParser:
     """Process EPG data in two passes to avoid foreign key issues"""
@@ -394,11 +404,17 @@ def init_database(db_path):
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
     # Connect to database
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)  # 10 second timeout
     conn.row_factory = sqlite3.Row  # Use row factory for better row access
-    
+
     cursor = conn.cursor()
-    
+
+    # Enable WAL mode for better concurrency with Node.js server
+    cursor.execute("PRAGMA journal_mode = WAL")
+
+    # Set synchronous mode for better performance
+    cursor.execute("PRAGMA synchronous = NORMAL")
+
     # Enable foreign keys
     cursor.execute("PRAGMA foreign_keys = ON")
     
@@ -595,7 +611,7 @@ def read_sources_file(file_path):
 
 def get_db_statistics(db_path):
     """Get statistics about the database contents"""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -749,7 +765,7 @@ def show_interactive_menu(db_path, cache_dir):
 
 def search_channels(db_path, search_term):
     """Search for channels by name"""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -784,7 +800,7 @@ def search_channels(db_path, search_term):
 
 def delete_source(db_path):
     """Delete a source and all its data"""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
@@ -833,7 +849,7 @@ def optimize_database(db_path):
     """Optimize the database by vacuuming it"""
     print("\nOptimizing database. This may take a few minutes for large databases...")
     
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
     start_time = time.time()
     
     # Get the file size before optimization
@@ -893,6 +909,9 @@ def run_parser(db_path, cache_dir, force=False):
             print(f"Processing source {idx+1}/{len(sources)}: {source}")
             if process_source(source, db_connection, cache_dir, force):
                 success_count += 1
+                print(f"✓ Successfully processed source {idx+1}/{len(sources)}: {source}")
+            else:
+                print(f"✗ FAILED to process source {idx+1}/{len(sources)}: {source} - Source may be offline or unreachable")
     except KeyboardInterrupt:
         print("\nProcess interrupted by user, cleaning up...")
         # Ensure we commit any pending transactions
@@ -971,6 +990,9 @@ def main():
                 logger.info(f"Processing source {idx+1}/{len(sources)}: {source}")
                 if process_source(source, db_connection, args.cache, args.force):
                     success_count += 1
+                    logger.info(f"✓ Successfully processed source {idx+1}/{len(sources)}: {source}")
+                else:
+                    logger.error(f"✗ FAILED to process source {idx+1}/{len(sources)}: {source} - Source may be offline or unreachable")
         except KeyboardInterrupt:
             logger.warning("Process interrupted by user, cleaning up...")
             # Ensure we commit any pending transactions
@@ -988,7 +1010,7 @@ def main():
             
             # Vacuum the database to optimize storage
             logger.info(f"Optimizing database...")
-            db_connection = sqlite3.connect(args.db)
+            db_connection = sqlite3.connect(args.db, timeout=10.0)
             db_connection.execute("VACUUM")
             db_connection.close()
             logger.info(f"Database optimization complete")

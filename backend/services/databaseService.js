@@ -16,13 +16,44 @@ if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true });
 }
 
-// Initialize database connection
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    logger.error(`Error connecting to SQLite database: ${err.message}`);
-  } else {
-    logger.info('Connected to SQLite database');
-  }
+// Initialize database connection with better concurrency handling
+let db;
+const initDb = () => {
+  return new Promise((resolve, reject) => {
+    db = new sqlite3.Database(DB_PATH, (err) => {
+      if (err) {
+        logger.error(`Error connecting to SQLite database: ${err.message}`);
+        return reject(err);
+      }
+
+      logger.info('Connected to SQLite database');
+
+      // Configure database for better concurrency FIRST
+      db.configure('busyTimeout', 10000); // 10 second timeout for locked database
+
+      // Enable WAL mode for better concurrent read/write
+      db.run('PRAGMA journal_mode = WAL', (err) => {
+        if (err) {
+          logger.warn(`Failed to enable WAL mode (may already be enabled): ${err.message}`);
+        } else {
+          logger.info('SQLite WAL mode enabled for better concurrency');
+        }
+
+        // Set synchronous mode to NORMAL for better performance
+        db.run('PRAGMA synchronous = NORMAL', (err) => {
+          if (err) {
+            logger.warn(`Failed to set synchronous mode: ${err.message}`);
+          }
+          resolve(db);
+        });
+      });
+    });
+  });
+};
+
+// Initialize immediately
+initDb().catch(err => {
+  logger.error(`Database initialization failed: ${err.message}`);
 });
 
 // Helper for promise-based SQLite queries
