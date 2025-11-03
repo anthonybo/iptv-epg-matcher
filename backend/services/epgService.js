@@ -1650,7 +1650,35 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
                 baseUrl: normalizedUrl
             }
         });
-        
+
+        // First, fetch category list to map category IDs to names
+        const categoriesUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}&action=get_live_categories`;
+        logger.info(`Fetching categories from Xtream API: ${categoriesUrl}`);
+
+        let categoryMap = {};
+        try {
+            const categoriesResponse = await fetch(categoriesUrl, {
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'EPG-Matcher/1.0'
+                },
+                timeout: 30000
+            });
+
+            if (categoriesResponse.ok) {
+                const categoriesData = await categoriesResponse.json();
+                if (Array.isArray(categoriesData)) {
+                    categoryMap = categoriesData.reduce((acc, cat) => {
+                        acc[cat.category_id] = cat.category_name;
+                        return acc;
+                    }, {});
+                    logger.info(`Loaded ${Object.keys(categoryMap).length} categories from Xtream API`);
+                }
+            }
+        } catch (categoryError) {
+            logger.warn(`Could not fetch categories: ${categoryError.message}, channels will use Uncategorized`);
+        }
+
         // Fetch channels from Xtream API
         const apiUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}&action=get_live_streams`;
         logger.info(`Fetching channels from Xtream API: ${apiUrl}`);
@@ -1683,22 +1711,25 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
             }
         });
         
-        // Process channel data into our format
-        const channels = channelsData.map(channel => ({
-            id: `xtream_${channel.stream_id}`,
-            name: channel.name || `Channel ${channel.stream_id}`,
-            logo: channel.stream_icon || null,
-            group: channel.category_name || 'Uncategorized',
-            url: `${normalizedUrl}${channel.stream_type}/${username}/${password}/${channel.stream_id}`,
-            epgChannelId: channel.epg_channel_id || null,
-            streamType: channel.stream_type || 'live',
-            added: channel.added || new Date().toISOString(),
-            categoryId: channel.category_id || 0,
-            customSid: channel.custom_sid || null,
-            tvArchive: channel.tv_archive || 0,
-            directSource: channel.direct_source || null,
-            tvArchiveDuration: channel.tv_archive_duration || 0
-        }));
+        // Process channel data into our format, using categoryMap to get category names
+        const channels = channelsData.map(channel => {
+            const categoryName = categoryMap[channel.category_id] || channel.category_name || 'Uncategorized';
+            return {
+                id: `xtream_${channel.stream_id}`,
+                name: channel.name || `Channel ${channel.stream_id}`,
+                logo: channel.stream_icon || null,
+                group: categoryName,
+                url: `${normalizedUrl}${channel.stream_type}/${username}/${password}/${channel.stream_id}`,
+                epgChannelId: channel.epg_channel_id || null,
+                streamType: channel.stream_type || 'live',
+                added: channel.added || new Date().toISOString(),
+                categoryId: channel.category_id || 0,
+                customSid: channel.custom_sid || null,
+                tvArchive: channel.tv_archive || 0,
+                directSource: channel.direct_source || null,
+                tvArchiveDuration: channel.tv_archive_duration || 0
+            };
+        });
         
         // Apply channel limit if specified
         let filteredChannels = channels;
@@ -1773,6 +1804,65 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
             error: error.message,
             channels: [],
             success: false
+        };
+    }
+}
+
+/**
+ * Fetch account information from Xtream API
+ * @param {string} baseUrl - Base URL of the Xtream server (e.g., "http://server:port/")
+ * @param {string} username - Xtream username
+ * @param {string} password - Xtream password
+ * @returns {Promise<Object>} Account information
+ */
+async function fetchXtreamAccountInfo(baseUrl, username, password) {
+    try {
+        // Normalize URL to ensure it ends with a slash
+        const normalizedUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+
+        // Fetch account info from Xtream API (no action parameter)
+        const apiUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}`;
+        logger.info(`Fetching account info from Xtream API: ${apiUrl}`);
+
+        const response = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'User-Agent': 'EPG-Matcher/1.0'
+            },
+            timeout: 15000 // 15 second timeout
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+        }
+
+        // Parse JSON response
+        const data = await response.json();
+
+        // Extract user_info and server_info
+        const userInfo = data.user_info || {};
+        const serverInfo = data.server_info || {};
+
+        logger.info(`Successfully fetched account info for user: ${username}`);
+
+        return {
+            exp_date: userInfo.exp_date || null,
+            max_connections: userInfo.max_connections ? parseInt(userInfo.max_connections) : null,
+            active_connections: userInfo.active_cons ? parseInt(userInfo.active_cons) : null,
+            account_status: userInfo.status || null,
+            is_trial: userInfo.is_trial === "1" || userInfo.is_trial === 1 ? 1 : 0,
+            account_created_at: userInfo.created_at || null
+        };
+    } catch (error) {
+        logger.error(`Error fetching Xtream account info: ${error.message}`);
+        // Return null values if we can't fetch account info
+        return {
+            exp_date: null,
+            max_connections: null,
+            active_connections: null,
+            account_status: null,
+            is_trial: 0,
+            account_created_at: null
         };
     }
 }
@@ -3578,6 +3668,7 @@ module.exports = {
     loadAllExternalEPGs,
     loadAllExternalEPGsEnhanced,
     loadXtreamEPG,
+    fetchXtreamAccountInfo,
     loadSingleEpgSource,
     getEpgSummary: generateEpgSummary,
     createTestEpgSource,

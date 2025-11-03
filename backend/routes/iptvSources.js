@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const iptvDatabaseService = require('../services/iptvDatabaseService');
 const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
+const epgService = require('../services/epgService');
 const logger = require('../config/logger');
 
 // Apply auth middleware to all routes in this router
@@ -190,6 +191,133 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to remove source'
+        });
+    }
+});
+
+/**
+ * POST /api/iptv/sources/:sourceId/refresh-account-info
+ * Re-fetch channels and account information from Xtream API
+ */
+router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const sourceId = parseInt(req.params.sourceId);
+
+        // Get source details from database
+        const sources = await iptvDatabaseService.getUserIPTVSources(userId);
+        const source = sources.find(s => s.id === sourceId);
+
+        if (!source) {
+            return res.status(404).json({
+                success: false,
+                error: 'Source not found'
+            });
+        }
+
+        // Check if this is an Xtream source
+        if (source.type !== 'xtream' || !source.url || !source.username || !source.password) {
+            return res.status(400).json({
+                success: false,
+                error: 'Can only refresh data for Xtream sources with valid credentials'
+            });
+        }
+
+        logger.info(`Refreshing channels and account info for source ${sourceId}`);
+
+        // 1. Fetch fresh channels from Xtream API (force refresh to bypass cache)
+        const channelsResult = await epgService.loadXtreamEPG(
+            source.url,
+            source.username,
+            source.password,
+            {
+                onProgress: () => {}, // No-op progress callback
+                maxChannelsToProcess: 0, // No limit
+                forceRefresh: true // Force fresh fetch from API, bypass cache
+            }
+        );
+
+        if (!channelsResult.success || !channelsResult.channels) {
+            throw new Error('Failed to fetch channels from Xtream API');
+        }
+
+        // Debug logging
+        logger.info(`Received ${channelsResult.channels.length} channels from Xtream API`);
+        if (channelsResult.channels.length > 0) {
+            logger.info(`Sample channel data: ${JSON.stringify(channelsResult.channels[0], null, 2)}`);
+
+            // Count how many channels have groups
+            const channelsWithGroups = channelsResult.channels.filter(ch => ch.group && ch.group !== 'Uncategorized').length;
+            logger.info(`Channels with valid groups: ${channelsWithGroups} / ${channelsResult.channels.length}`);
+        }
+
+        // 2. Fetch fresh account info
+        const accountInfo = await epgService.fetchXtreamAccountInfo(
+            source.url,
+            source.username,
+            source.password
+        );
+
+        // 3. Update source with account info (this will also delete old channels)
+        const sourceInfo = {
+            name: source.name,
+            url: source.url,
+            username: source.username,
+            password: source.password,
+            type: source.type,
+            ...accountInfo
+        };
+
+        await iptvDatabaseService.saveSource(sourceInfo);
+        logger.info(`Updated source ${sourceId} with fresh account info`);
+
+        // 4. Generate categories from channels
+        const categoryMap = channelsResult.channels.reduce((acc, ch) => {
+            const groupTitle = ch.group || 'Uncategorized';
+            acc[groupTitle] = (acc[groupTitle] || 0) + 1;
+            return acc;
+        }, {});
+
+        logger.info(`Category breakdown: ${JSON.stringify(categoryMap, null, 2)}`);
+
+        const categories = Object.entries(categoryMap)
+            .map(([name, count]) => ({
+                id: name,
+                name,
+                count
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        logger.info(`Generated ${categories.length} categories`);
+        await iptvDatabaseService.saveCategories(sourceId, categories);
+        logger.info(`Saved ${categories.length} categories for source ${sourceId}`);
+
+        // 5. Transform and save channels
+        const dbChannels = channelsResult.channels.map(ch => ({
+            id: ch.id || ch.name,
+            name: ch.name,
+            logo: ch.logo || '',
+            url: ch.url,
+            group: { title: ch.group || 'Uncategorized' },
+            tvg: { id: ch.epgChannelId || '' },
+            categories: []
+        }));
+
+        await iptvDatabaseService.saveChannels(sourceId, dbChannels);
+        logger.info(`Saved ${dbChannels.length} channels for source ${sourceId}`);
+
+        res.json({
+            success: true,
+            message: 'Channels and account information refreshed successfully',
+            channelCount: dbChannels.length,
+            categoryCount: categories.length,
+            accountInfo
+        });
+    } catch (error) {
+        logger.error(`Error refreshing source data: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to refresh source data: ' + error.message
         });
     }
 });

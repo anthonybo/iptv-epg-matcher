@@ -8,6 +8,7 @@ const { broadcastSSEUpdate } = require('../utils/sseUtils');
 const { fetchURL } = require('../utils/fetchUtils');
 const m3uService = require('../services/m3uService');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
+const epgService = require('../services/epgService');
 const path = require('path');
 const fs = require('fs');
 
@@ -317,6 +318,24 @@ async function processChannels(sessionId, channels, userId = null, options = {})
         password: xtreamPassword || '',
         type: xtreamServer ? 'xtream' : m3uUrl ? 'm3u' : 'unknown'
       };
+
+      // Fetch account info from Xtream API if this is an Xtream source
+      if (xtreamServer && xtreamUsername && xtreamPassword) {
+        logger.info('Fetching account info from Xtream API...');
+        try {
+          const accountInfo = await epgService.fetchXtreamAccountInfo(
+            xtreamServer,
+            xtreamUsername,
+            xtreamPassword
+          );
+
+          // Add account info to sourceInfo
+          Object.assign(sourceInfo, accountInfo);
+          logger.info('Account info fetched successfully:', accountInfo);
+        } catch (accountError) {
+          logger.warn(`Could not fetch account info: ${accountError.message}`);
+        }
+      }
 
       // Save source
       const sourceId = await iptvDatabaseService.saveSource(sourceInfo);

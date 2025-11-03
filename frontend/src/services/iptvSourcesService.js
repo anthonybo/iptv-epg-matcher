@@ -128,6 +128,21 @@ class IPTVSourcesService {
       throw error;
     }
   }
+
+  /**
+   * Refresh account information for an Xtream source
+   * @param {number} sourceId - Source ID
+   * @returns {Promise<Object>} Updated account info
+   */
+  async refreshAccountInfo(sourceId) {
+    try {
+      const response = await apiClient.post(`/iptv/sources/${sourceId}/refresh-account-info`);
+      return response.data;
+    } catch (error) {
+      console.error('Error refreshing account info:', error);
+      throw error;
+    }
+  }
 }
 
 export default new IPTVSourcesService();

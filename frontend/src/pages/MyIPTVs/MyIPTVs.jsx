@@ -4,10 +4,11 @@ import iptvSourcesService from '../../services/iptvSourcesService';
 /**
  * Source card component
  */
-const SourceCard = ({ source, onEdit, onDelete, onViewChannels }) => {
+const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [nickname, setNickname] = useState(source.nickname || source.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const handleSaveNickname = async () => {
     if (nickname.trim() && nickname !== source.nickname) {
@@ -28,6 +29,17 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels }) => {
   const handleDelete = async () => {
     await onDelete(source.id);
     setShowDeleteConfirm(false);
+  };
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await onRefreshAccountInfo(source.id);
+    } catch (error) {
+      console.error('Error refreshing account info:', error);
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   return (
@@ -55,15 +67,36 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels }) => {
           <h3 className="text-base font-semibold text-slate-100 flex-1 truncate">
             {source.nickname || source.name}
           </h3>
-          <button
-            onClick={() => setIsEditing(true)}
-            className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-200 transition-opacity"
-            title="Edit nickname"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1">
+            {source.type === 'xtream' && (
+              <button
+                onClick={handleRefresh}
+                disabled={isRefreshing}
+                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-blue-400 transition-opacity disabled:opacity-50"
+                title="Refresh channels and account info"
+              >
+                {isRefreshing ? (
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                )}
+              </button>
+            )}
+            <button
+              onClick={() => setIsEditing(true)}
+              className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-200 transition-opacity"
+              title="Edit nickname"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </button>
+          </div>
         </div>
       )}
 
@@ -106,6 +139,58 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels }) => {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
             </svg>
             <span className="truncate">{source.password}</span>
+          </div>
+        )}
+
+        {/* Account Info Section */}
+        {(source.exp_date || source.max_connections || source.account_status) && (
+          <div className="border-t border-slate-700/50 pt-3 mt-3 space-y-2">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Account Info</div>
+
+            {source.exp_date && (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                <span className="text-slate-500">Expires:</span>
+                <span className="font-medium text-slate-300">
+                  {source.exp_date === 'null' || !source.exp_date ? 'Unlimited' : new Date(parseInt(source.exp_date) * 1000).toLocaleDateString()}
+                </span>
+              </div>
+            )}
+
+            {source.account_status && (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-slate-500">Status:</span>
+                <span className={`font-medium ${source.account_status === 'Active' ? 'text-green-400' : 'text-red-400'}`}>
+                  {source.account_status}
+                </span>
+              </div>
+            )}
+
+            {(source.active_connections !== null && source.active_connections !== undefined) && (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                <span className="text-slate-500">Connections:</span>
+                <span className="font-medium text-slate-300">
+                  {source.active_connections} / {source.max_connections || '?'}
+                </span>
+              </div>
+            )}
+
+            {source.is_trial === 1 && (
+              <div className="flex items-center gap-2 text-sm">
+                <svg className="w-4 h-4 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="font-medium text-yellow-400">Trial Account</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -162,6 +247,7 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [notification, setNotification] = useState(null);
 
   // Load sources on mount
   useEffect(() => {
@@ -212,8 +298,67 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
     }
   };
 
+  const handleRefreshAccountInfo = async (sourceId) => {
+    try {
+      const result = await iptvSourcesService.refreshAccountInfo(sourceId);
+
+      // Show success message with channel count
+      if (result.success) {
+        setNotification({
+          type: 'success',
+          message: `Successfully refreshed! Loaded ${result.channelCount} channels and ${result.categoryCount} categories.`
+        });
+        setTimeout(() => setNotification(null), 5000);
+      }
+
+      // Reload sources to get updated data
+      await loadSources();
+      if (onSourcesUpdated) onSourcesUpdated();
+    } catch (err) {
+      console.error('Error refreshing source:', err);
+      const errorMsg = err.response?.data?.error || 'Failed to refresh source data';
+      setNotification({
+        type: 'error',
+        message: errorMsg
+      });
+      setTimeout(() => setNotification(null), 5000);
+    }
+  };
+
   return (
     <div className="space-y-6">
+      {/* Notification Toast */}
+      {notification && (
+        <div className={`fixed top-4 right-4 z-50 rounded-lg border px-4 py-3 shadow-lg max-w-md ${
+          notification.type === 'success'
+            ? 'bg-green-900/90 border-green-700 text-green-100'
+            : 'bg-red-900/90 border-red-700 text-red-100'
+        }`}>
+          <div className="flex items-start gap-3">
+            {notification.type === 'success' ? (
+              <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            ) : (
+              <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            )}
+            <div className="flex-1">
+              <p className="text-sm font-medium">{notification.message}</p>
+            </div>
+            <button
+              onClick={() => setNotification(null)}
+              className="text-current opacity-70 hover:opacity-100 transition-opacity"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -296,6 +441,7 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
               onEdit={handleEditNickname}
               onDelete={handleDelete}
               onViewChannels={handleViewChannels}
+              onRefreshAccountInfo={handleRefreshAccountInfo}
             />
           ))}
         </div>

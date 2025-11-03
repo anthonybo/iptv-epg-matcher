@@ -80,6 +80,12 @@ const initializeTables = () => {
                 username TEXT,
                 password TEXT,
                 type TEXT,
+                exp_date TEXT,
+                max_connections INTEGER,
+                active_connections INTEGER,
+                account_status TEXT,
+                is_trial BOOLEAN DEFAULT 0,
+                account_created_at TEXT,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(url, username, password)
             )`,
@@ -143,6 +149,17 @@ const initializeTables = () => {
             `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_user ON user_iptv_preferences(user_id)`,
             `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_priority ON user_iptv_preferences(user_id, priority)`
         ];
+
+        // Migration queries to add new columns to existing tables
+        const migrationQueries = [
+            // Add account info columns to iptv_sources if they don't exist
+            `ALTER TABLE iptv_sources ADD COLUMN exp_date TEXT`,
+            `ALTER TABLE iptv_sources ADD COLUMN max_connections INTEGER`,
+            `ALTER TABLE iptv_sources ADD COLUMN active_connections INTEGER`,
+            `ALTER TABLE iptv_sources ADD COLUMN account_status TEXT`,
+            `ALTER TABLE iptv_sources ADD COLUMN is_trial BOOLEAN DEFAULT 0`,
+            `ALTER TABLE iptv_sources ADD COLUMN account_created_at TEXT`
+        ];
         
         db.serialize(() => {
             db.run('BEGIN TRANSACTION', (err) => {
@@ -173,8 +190,21 @@ const initializeTables = () => {
                             reject(commitErr);
                             return;
                         }
-                        
+
                         logger.info('IPTV database tables created successfully');
+
+                        // Run migrations (ignore errors for columns that already exist)
+                        migrationQueries.forEach((migrationQuery) => {
+                            db.run(migrationQuery, (migrationErr) => {
+                                if (migrationErr) {
+                                    // Ignore "duplicate column" errors
+                                    if (!migrationErr.message.includes('duplicate column')) {
+                                        logger.warn(`Migration warning: ${migrationErr.message}`);
+                                    }
+                                }
+                            });
+                        });
+
                         resolve();
                     });
                 }
@@ -190,7 +220,11 @@ const initializeTables = () => {
  */
 const saveSource = (source) => {
     return new Promise((resolve, reject) => {
-        const { name, url, username, password, type } = source;
+        const {
+            name, url, username, password, type,
+            exp_date, max_connections, active_connections,
+            account_status, is_trial, account_created_at
+        } = source;
 
         // First check if source already exists
         db.get(
@@ -215,9 +249,12 @@ const saveSource = (source) => {
                         // Update the source metadata
                         db.run(
                             `UPDATE iptv_sources
-                             SET last_updated = CURRENT_TIMESTAMP, name = ?, type = ?
+                             SET last_updated = CURRENT_TIMESTAMP, name = ?, type = ?,
+                                 exp_date = ?, max_connections = ?, active_connections = ?,
+                                 account_status = ?, is_trial = ?, account_created_at = ?
                              WHERE id = ?`,
-                            [name, type, existingSource.id],
+                            [name, type, exp_date, max_connections, active_connections,
+                             account_status, is_trial, account_created_at, existingSource.id],
                             (updateErr) => {
                                 if (updateErr) {
                                     logger.error(`Error updating source: ${updateErr.message}`);
@@ -232,9 +269,14 @@ const saveSource = (source) => {
                 } else {
                     // Source doesn't exist, create it
                     db.run(
-                        `INSERT INTO iptv_sources (name, url, username, password, type, last_updated)
-                         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-                        [name, url, username, password, type],
+                        `INSERT INTO iptv_sources (name, url, username, password, type,
+                                                   exp_date, max_connections, active_connections,
+                                                   account_status, is_trial, account_created_at,
+                                                   last_updated)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+                        [name, url, username, password, type,
+                         exp_date, max_connections, active_connections,
+                         account_status, is_trial, account_created_at],
                         function(insertErr) {
                             if (insertErr) {
                                 logger.error(`Error inserting new source: ${insertErr.message}`);
@@ -246,6 +288,45 @@ const saveSource = (source) => {
                         }
                     );
                 }
+            }
+        );
+    });
+};
+
+/**
+ * Update source account information without touching channels
+ * @param {number} sourceId - Source ID
+ * @param {Object} accountInfo - Account information to update
+ * @returns {Promise<void>}
+ */
+const updateSourceAccountInfo = (sourceId, accountInfo) => {
+    return new Promise((resolve, reject) => {
+        const {
+            exp_date, max_connections, active_connections,
+            account_status, is_trial, account_created_at
+        } = accountInfo;
+
+        db.run(
+            `UPDATE iptv_sources
+             SET exp_date = ?,
+                 max_connections = ?,
+                 active_connections = ?,
+                 account_status = ?,
+                 is_trial = ?,
+                 account_created_at = ?,
+                 last_updated = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [exp_date, max_connections, active_connections,
+             account_status, is_trial, account_created_at, sourceId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error updating source account info: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                logger.info(`Updated account info for source ${sourceId}`);
+                resolve();
             }
         );
     });
@@ -729,6 +810,12 @@ const getUserIPTVSources = (userId) => {
                 s.username,
                 s.password,
                 s.type,
+                s.exp_date,
+                s.max_connections,
+                s.active_connections,
+                s.account_status,
+                s.is_trial,
+                s.account_created_at,
                 s.last_updated,
                 p.priority,
                 p.is_active,
@@ -755,6 +842,12 @@ const getUserIPTVSources = (userId) => {
                     username: row.username,
                     password: row.password,
                     type: row.type,
+                    exp_date: row.exp_date,
+                    max_connections: row.max_connections,
+                    active_connections: row.active_connections,
+                    account_status: row.account_status,
+                    is_trial: row.is_trial,
+                    account_created_at: row.account_created_at,
                     priority: row.priority,
                     is_active: row.is_active,
                     channel_count: row.channel_count,
@@ -1017,6 +1110,7 @@ const getAlternateFeeds = (userId, channelName, epgChannelId = null) => {
 module.exports = {
     connect,
     saveSource,
+    updateSourceAccountInfo,
     saveCategories,
     saveChannels,
     associateSourceWithSession,
