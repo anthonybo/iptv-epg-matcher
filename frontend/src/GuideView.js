@@ -357,10 +357,10 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full bg-gray-50">
+      <div className="flex items-center justify-center h-full bg-slate-950">
         <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <p className="text-gray-600">Loading your TV Guide...</p>
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+          <p className="text-slate-300">Loading your TV Guide...</p>
         </div>
       </div>
     );
@@ -368,15 +368,15 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full bg-gray-50">
-        <div className="bg-red-50 border border-red-200 rounded-lg p-6 max-w-md">
+      <div className="flex items-center justify-center h-full bg-slate-950">
+        <div className="bg-red-950/50 border border-red-800 rounded-lg p-6 max-w-md">
           <div className="flex items-center mb-2">
-            <svg className="w-6 h-6 text-red-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-6 h-6 text-red-400 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <h3 className="text-lg font-semibold text-red-800">Error Loading Guide</h3>
+            <h3 className="text-lg font-semibold text-red-200">Error Loading Guide</h3>
           </div>
-          <p className="text-sm text-red-700">{error}</p>
+          <p className="text-sm text-red-300">{error}</p>
         </div>
       </div>
     );
@@ -384,13 +384,13 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
 
   if (matchedChannels.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full bg-gray-50">
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6 max-w-md text-center">
-          <svg className="w-16 h-16 text-yellow-600 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="flex items-center justify-center h-full bg-slate-950">
+        <div className="bg-yellow-950/50 border border-yellow-800 rounded-lg p-6 max-w-md text-center">
+          <svg className="w-16 h-16 text-yellow-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
-          <h3 className="text-lg font-semibold text-yellow-800 mb-2">No EPG Matches Yet</h3>
-          <p className="text-sm text-yellow-700 mb-4">
+          <h3 className="text-lg font-semibold text-yellow-200 mb-2">No EPG Matches Yet</h3>
+          <p className="text-sm text-yellow-300 mb-4">
             You haven't matched any channels with EPG data yet. Go to the Player tab to match channels with their program guides.
           </p>
         </div>
