@@ -27,6 +27,7 @@ const { finalizeProcessing } = require('../services/dataProcessingService');
 const { broadcastSSEUpdate } = require('../utils/sseUtils'); // Import the broadcastSSEUpdate function
 const { processWithDetailedUpdates } = require('../services/detailedProgressService');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
+const { optionalAuth } = require('../middleware/authMiddleware');
 
 // Set up upload middleware
 const upload = multer({ dest: 'uploads/' });
@@ -35,15 +36,16 @@ const upload = multer({ dest: 'uploads/' });
  * Save channels to IPTV database for persistence
  * @param {string} sessionId - Session ID
  * @param {Array} channels - Array of channel objects
- * @param {Object} sourceInfo - Source information (url, username, password, type)
+ * @param {Object} sourceInfo - Source information (url, username, password, type, nickname)
+ * @param {number|null} userId - User ID if authenticated
  * @returns {Promise<number>} Source ID
  */
-async function saveChannelsToDatabase(sessionId, channels, sourceInfo) {
+async function saveChannelsToDatabase(sessionId, channels, sourceInfo, userId = null) {
   try {
-    logger.info(`Saving ${channels.length} channels to IPTV database for session ${sessionId}`);
+    logger.info(`Saving ${channels.length} channels to IPTV database for session ${sessionId}${userId ? ` (user ${userId})` : ''}`);
 
     // Create or update source
-    const { url, username, password, type = 'm3u', name } = sourceInfo;
+    const { url, username, password, type = 'm3u', name, nickname } = sourceInfo;
     const sourceId = await iptvDatabaseService.saveSource({
       name: name || `Source for ${sessionId}`,
       url: url || sessionId,
@@ -72,6 +74,20 @@ async function saveChannelsToDatabase(sessionId, channels, sourceInfo) {
     // Associate session with source
     await iptvDatabaseService.associateSourceWithSession(sessionId, sourceId);
     logger.info(`Associated session ${sessionId} with source ${sourceId}`);
+
+    // If user is authenticated, create user preference for this source
+    if (userId) {
+      try {
+        await iptvDatabaseService.createUserIPTVPreference(userId, sourceId, {
+          nickname: nickname || name,
+          isActive: true
+        });
+        logger.info(`Created user preference for user ${userId}, source ${sourceId}`);
+      } catch (prefError) {
+        // Don't fail the whole operation if preference creation fails
+        logger.warn(`Failed to create user preference: ${prefError.message}`);
+      }
+    }
 
     return sourceId;
   } catch (error) {
@@ -425,7 +441,7 @@ async function parseEPGProgressively(epgContent, progressCallback) {
  * Loads channels and EPG data from various sources
  * With completely rewritten cache/reload logic
  */
-router.post('/', upload.single('m3uFile'), async (req, res) => {
+router.post('/', optionalAuth, upload.single('m3uFile'), async (req, res) => {
     // Extract parameters from request
     // Extract and trim all parameters to avoid whitespace issues
     const {
@@ -463,15 +479,21 @@ router.post('/', upload.single('m3uFile'), async (req, res) => {
         });
     }
 
-    logger.info(`Starting load process for session ${sessionId}`);
-    
+    // Check authentication status
+    const userId = req.user?.id;
+    if (userId) {
+        logger.info(`Starting load process for session ${sessionId} with authenticated user ${userId}`);
+    } else {
+        logger.info(`Starting load process for session ${sessionId} without authentication`);
+    }
+
     // Send an immediate response to the client
     res.status(200).json({
         success: true,
         message: 'Load process started',
         sessionId
     });
-    
+
     // Start a progress update right away
     broadcastSSEUpdate({
         type: 'progress',
@@ -480,7 +502,7 @@ router.post('/', upload.single('m3uFile'), async (req, res) => {
         message: 'Starting data loading process...',
         sessionId
     }, sessionId);
-    
+
     // Continue processing in the background
     try {
         // Use the detailed progress service to handle the loading process
@@ -491,7 +513,8 @@ router.post('/', upload.single('m3uFile'), async (req, res) => {
             xtreamUsername,
             xtreamPassword,
             xtreamServer,
-            forceUpdate
+            forceUpdate,
+            userId // Pass authenticated user ID if available
         });
         
         logger.info(`Background processing started for session ${sessionId}`);

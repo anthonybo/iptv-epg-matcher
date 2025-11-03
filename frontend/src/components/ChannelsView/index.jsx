@@ -10,8 +10,31 @@ import ChannelCard from './ChannelCard';
  * @param {Function} onChannelSelect - Callback when a channel is clicked
  * @param {object} selectedChannel - Currently selected channel
  * @param {object} matchedChannels - Matched channel data
+ * @param {object} sourceFilter - IPTV source to filter by (optional)
+ * @param {array} availableSources - List of available IPTV sources
+ * @param {Function} onSourceChange - Callback when source selection changes
  */
-const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChannels = {} }) => {
+const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChannels = {}, sourceFilter = null, availableSources = [], onSourceChange }) => {
+  const [showSourceMenu, setShowSourceMenu] = React.useState(false);
+  const sourceMenuRef = React.useRef(null);
+
+  // Close dropdown when clicking outside
+  React.useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (sourceMenuRef.current && !sourceMenuRef.current.contains(event.target)) {
+        setShowSourceMenu(false);
+      }
+    };
+
+    if (showSourceMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showSourceMenu]);
+
   const {
     channels,
     categories,
@@ -26,7 +49,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     loadMore,
     totalChannels,
     filteredCount
-  } = useChannels(sessionId);
+  } = useChannels(sessionId, sourceFilter?.id);
 
   if (!sessionId) {
     return (
@@ -58,7 +81,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Header with search and stats */}
-        <div className="border-b border-slate-800 bg-slate-900/80 px-6 py-4 backdrop-blur">
+        <div className="relative z-50 border-b border-slate-800 bg-slate-900/80 px-6 py-4 backdrop-blur">
           {/* Error display */}
           {error && (
             <div className="mb-4 flex items-start rounded-xl border border-red-500/40 bg-red-500/10 p-3">
@@ -73,23 +96,91 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
           )}
 
           <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-slate-100">Channels</h2>
-              <p className="mt-0.5 text-sm text-slate-400">
-                {loading && filteredCount === 0 ? (
-                  'Loading channels...'
-                ) : (
-                  <>
-                    Showing <span className="font-medium text-slate-100">{filteredCount.toLocaleString()}</span> of{' '}
-                    <span className="font-medium text-slate-100">{totalChannels.toLocaleString()}</span> channels
-                    {selectedCategories.size > 0 && (
-                      <span className="ml-1 text-blue-400">
-                        ({selectedCategories.size} {selectedCategories.size === 1 ? 'category' : 'categories'} selected)
-                      </span>
-                    )}
-                  </>
-                )}
-              </p>
+            <div className="flex items-center gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-xl font-semibold text-slate-100">Channels</h2>
+                  {availableSources.length > 0 && (
+                    <div className="relative" ref={sourceMenuRef}>
+                      <button
+                        onClick={() => setShowSourceMenu(!showSourceMenu)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-500/20 px-2.5 py-1 text-xs font-medium text-blue-100 hover:bg-blue-500/30 transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+                        </svg>
+                        {sourceFilter ? (sourceFilter.nickname || sourceFilter.name) : 'All Sources'}
+                        <svg className={`w-3.5 h-3.5 transition-transform ${showSourceMenu ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+
+                      {/* Source Dropdown Menu */}
+                      {showSourceMenu && (
+                        <div className="absolute left-0 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[9999]">
+                          <button
+                            onClick={() => {
+                              onSourceChange(null);
+                              setShowSourceMenu(false);
+                            }}
+                            className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm transition-colors hover:bg-slate-800 ${
+                              !sourceFilter ? 'bg-blue-500/20 text-blue-100' : 'text-slate-300'
+                            }`}
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                            </svg>
+                            <div>
+                              <div className="font-medium">All Sources</div>
+                              <div className="text-xs text-slate-500">Show channels from all IPTV sources</div>
+                            </div>
+                          </button>
+
+                          <div className="border-t border-slate-800">
+                            {availableSources.map((source) => (
+                              <button
+                                key={source.id}
+                                onClick={() => {
+                                  onSourceChange(source);
+                                  setShowSourceMenu(false);
+                                }}
+                                className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm transition-colors hover:bg-slate-800 ${
+                                  sourceFilter?.id === source.id ? 'bg-blue-500/20 text-blue-100' : 'text-slate-300'
+                                }`}
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                                </svg>
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-medium truncate">{source.nickname || source.name}</div>
+                                  {source.url && (
+                                    <div className="text-xs text-slate-500 truncate">{source.url}</div>
+                                  )}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <p className="mt-0.5 text-sm text-slate-400">
+                  {loading && filteredCount === 0 ? (
+                    'Loading channels...'
+                  ) : (
+                    <>
+                      Showing <span className="font-medium text-slate-100">{filteredCount.toLocaleString()}</span> of{' '}
+                      <span className="font-medium text-slate-100">{totalChannels.toLocaleString()}</span> channels
+                      {selectedCategories.size > 0 && (
+                        <span className="ml-1 text-blue-400">
+                          ({selectedCategories.size} {selectedCategories.size === 1 ? 'category' : 'categories'} selected)
+                        </span>
+                      )}
+                    </>
+                  )}
+                </p>
+              </div>
             </div>
 
             {/* Search box */}

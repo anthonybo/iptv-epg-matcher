@@ -15,6 +15,10 @@ import ResultView from './ResultView';
 import GuideView from './GuideView';
 import SessionDebugger from './components/SessionDebugger';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
+import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
+import iptvSourcesService from './services/iptvSourcesService';
+import { useAuth } from './contexts/AuthContext';
+import { UserBadge } from './components/AuthWrapper';
 
 const resolveApiBase = () => {
   if (API_BASE_URL) {
@@ -35,6 +39,9 @@ const resolveApiBase = () => {
  * @returns {JSX.Element} App component
  */
 function App() {
+  // Get auth context
+  const { user, isAuthenticated: authIsAuthenticated, loading: authLoading } = useAuth();
+
   // App state
   const [status, setStatus] = useState('');
   const [channels, setChannels] = useState([]);
@@ -56,6 +63,9 @@ function App() {
   const [statusType, setStatusType] = useState('info'); // 'info', 'success', 'error', 'warning'
   const [showEmergencyCategories, setShowEmergencyCategories] = useState(true);
   const [initialized, setInitialized] = useState(false);
+  const [userSources, setUserSources] = useState([]);
+  const [loadingSources, setLoadingSources] = useState(false);
+  const [selectedSourceFilter, setSelectedSourceFilter] = useState(null);
 
   // Check for saved session and validate it on mount
   useEffect(() => {
@@ -118,6 +128,35 @@ function App() {
     const savedMatches = JSON.parse(localStorage.getItem('matchedChannels') || '{}');
     setMatchedChannels(savedMatches);
   }, []);
+
+  // Load user sources if authenticated (wait for auth to be ready)
+  useEffect(() => {
+    const loadUserSources = async () => {
+      // Wait for auth to finish loading
+      if (authLoading) {
+        return;
+      }
+
+      // Only load if user is authenticated
+      if (!authIsAuthenticated) {
+        return;
+      }
+
+      setLoadingSources(true);
+
+      try {
+        const sources = await iptvSourcesService.getUserSources();
+        setUserSources(sources);
+        console.log('[App] Loaded user sources:', sources.length);
+      } catch (err) {
+        console.error('Error loading user sources:', err);
+      } finally {
+        setLoadingSources(false);
+      }
+    };
+
+    loadUserSources();
+  }, [authLoading, authIsAuthenticated]);
 
   useEffect(() => {
     const handleSseMessage = (event) => {
@@ -430,6 +469,17 @@ function App() {
       // Double-check that the session is saved
       console.log(`[App] Re-saving session ID for safety: ${sid}`);
       SessionManager.saveSessionId(sid);
+
+      // Reload user sources if authenticated (to reflect newly loaded source)
+      if (authIsAuthenticated) {
+        try {
+          const sources = await iptvSourcesService.getUserSources();
+          setUserSources(sources);
+          console.log('[App] Reloaded user sources after successful load:', sources.length);
+        } catch (err) {
+          console.error('[App] Error reloading sources after load:', err);
+        }
+      }
 
       // Switch to channels tab
       setActiveTab('channels');
@@ -812,10 +862,104 @@ function App() {
       case 'configure':
         return (
           <div className="space-y-6 px-6 py-8">
+            {/* Page header */}
+            <header className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h2 className="text-3xl font-semibold text-slate-100 mb-2">Load IPTV Sources</h2>
+                <p className="max-w-2xl text-sm leading-relaxed text-slate-400">
+                  Connect to your IPTV provider. Each source you load will be added to your collection with automatic priority management and fallback support.
+                </p>
+              </div>
+            </header>
+
             <SessionDebugger />
+
+            {/* User's Current Sources - Multi-IPTV Support */}
+            {authIsAuthenticated && userSources.length > 0 && (
+              <div className="rounded-xl border border-blue-500/40 bg-blue-500/10 p-6 shadow-lg">
+                <div className="flex items-start justify-between mb-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-blue-100 mb-1">Your IPTV Sources ({userSources.length})</h3>
+                    <p className="text-sm text-blue-200/70">
+                      {userSources.filter(s => s.is_active).length} active source{userSources.filter(s => s.is_active).length !== 1 ? 's' : ''} · Load another below to add more to your collection
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setActiveTab('my-iptvs')}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 border border-blue-400/30 px-3 py-1.5 text-sm font-medium text-blue-100 transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    Manage Sources
+                  </button>
+                </div>
+
+                {/* Sources list */}
+                <div className="space-y-2">
+                  {userSources.slice(0, 3).map((source) => (
+                    <div
+                      key={source.id}
+                      className="flex items-center gap-3 rounded-lg border border-blue-400/20 bg-blue-500/5 p-3"
+                    >
+                      <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-blue-500/20 text-blue-300 text-xs font-bold flex-shrink-0">
+                        {source.priority}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-slate-100 truncate">
+                          {source.nickname || source.name}
+                        </p>
+                        <p className="text-xs text-slate-400 truncate">
+                          {source.type} · {source.channel_count || 0} channels
+                        </p>
+                      </div>
+                      {source.is_active === 1 ? (
+                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-green-500/20 flex-shrink-0">
+                          <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          <span className="text-xs text-green-300 font-medium">Active</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-slate-700/40 flex-shrink-0">
+                          <span className="text-xs text-slate-400 font-medium">Inactive</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {userSources.length > 3 && (
+                    <button
+                      onClick={() => setActiveTab('my-iptvs')}
+                      className="block w-full text-center text-sm text-blue-300 hover:text-blue-200 py-2 rounded-lg hover:bg-blue-500/5 transition-colors"
+                    >
+                      + {userSources.length - 3} more source{userSources.length - 3 !== 1 ? 's' : ''} · Click to view all
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Info banner for authenticated users without sources */}
+            {authIsAuthenticated && userSources.length === 0 && !loadingSources && (
+              <div className="rounded-xl border border-blue-500/40 bg-blue-500/10 p-4">
+                <div className="flex items-start gap-3">
+                  <svg className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <div className="flex-1">
+                    <h3 className="text-sm font-semibold text-blue-200 mb-1">🎉 Multi-IPTV Support Enabled</h3>
+                    <p className="text-sm text-blue-100/80">
+                      Load your first IPTV source below. Each source you add will automatically be prioritized, and streams will failover seamlessly if one source has issues.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
-              <Configuration 
-                onLoad={handleLoad} 
+              <Configuration
+                onLoad={handleLoad}
                 error={loadingError}
                 allowedTabs={['xtream']}
               />
@@ -829,6 +973,9 @@ function App() {
             onChannelSelect={handleChannelSelect}
             selectedChannel={selectedChannel}
             matchedChannels={matchedChannels}
+            sourceFilter={selectedSourceFilter}
+            availableSources={userSources}
+            onSourceChange={(source) => setSelectedSourceFilter(source)}
           />
         );
       case 'guide':
@@ -875,6 +1022,7 @@ function App() {
             matchedChannels={matchedChannels}
             onGenerate={handleGenerate}
             isGenerating={isGenerating}
+            availableSources={userSources}
           />
         );
       case 'result':
@@ -884,6 +1032,27 @@ function App() {
             onCopyToClipboard={copyToClipboard}
             onBackToPlayer={() => setActiveTab('player')}
           />
+        );
+      case 'my-iptvs':
+        return (
+          <div className="px-6 py-8">
+            <MyIPTVs
+              onSourcesUpdated={async () => {
+                // Reload sources after any changes
+                try {
+                  const sources = await iptvSourcesService.getUserSources();
+                  setUserSources(sources);
+                } catch (err) {
+                  console.error('Error reloading sources:', err);
+                }
+              }}
+              onViewChannels={(source) => {
+                // Set the source filter and navigate to channels view
+                setSelectedSourceFilter(source);
+                setActiveTab('channels');
+              }}
+            />
+          </div>
         );
       default:
         return (
@@ -1266,7 +1435,7 @@ function App() {
                 <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
                 <circle cx="12" cy="12" r="3"></circle>
               </svg>
-              Session: {typeof sessionId === 'string' ? sessionId.substring(0, 8) : 'Loading...'}
+{typeof sessionId === 'string' ? sessionId : 'Loading...'}
             </div>
           )}
         </div>
@@ -1294,6 +1463,10 @@ function App() {
               Reload Categories ({categories.length})
             </button>
           )}
+
+          {authIsAuthenticated && user && (
+            <UserBadge user={user} />
+          )}
         </div>
       </header>
 
@@ -1307,6 +1480,7 @@ function App() {
           categoryCount={categories.length}
           matchedChannelCount={Object.keys(matchedChannels).length}
           epgSourceCount={epgSources.length}
+          userSourcesCount={userSources.length}
         />
 
         <main className="flex-1 overflow-y-auto bg-slate-950">

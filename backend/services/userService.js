@@ -289,26 +289,39 @@ async function createUserSession(userId, sessionId, token) {
   const expiresAt = authService.calculateTokenExpiration();
 
   return new Promise((resolve, reject) => {
+    // First delete any existing session with this session_id to avoid duplicates
     db.run(
-      `INSERT INTO user_sessions (user_id, session_id, token, expires_at, created_at)
-       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      [userId, sessionId, token, expiresAt.toISOString()],
-      function(err) {
-        if (err) {
-          logger.error(`Error creating user session: ${err.message}`);
-          reject(new Error('Failed to create session'));
-          return;
+      'DELETE FROM user_sessions WHERE session_id = ?',
+      [sessionId],
+      (deleteErr) => {
+        if (deleteErr) {
+          logger.warn(`Error deleting old session: ${deleteErr.message}`);
+          // Continue anyway - the old session might not exist
         }
 
-        logger.info(`Created session for user ${userId}: ${sessionId}`);
+        // Now insert the new session
+        db.run(
+          `INSERT INTO user_sessions (user_id, session_id, token, expires_at, created_at)
+           VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+          [userId, sessionId, token, expiresAt.toISOString()],
+          function(err) {
+            if (err) {
+              logger.error(`Error creating user session: ${err.message}`);
+              reject(new Error('Failed to create session'));
+              return;
+            }
 
-        resolve({
-          id: this.lastID,
-          userId,
-          sessionId,
-          token,
-          expiresAt: expiresAt.toISOString()
-        });
+            logger.info(`Created session for user ${userId}: ${sessionId}`);
+
+            resolve({
+              id: this.lastID,
+              userId,
+              sessionId,
+              token,
+              expiresAt: expiresAt.toISOString()
+            });
+          }
+        );
       }
     );
   });

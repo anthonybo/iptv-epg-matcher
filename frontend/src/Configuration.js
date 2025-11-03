@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState } from 'react';
 import Dropzone from 'react-dropzone';
-import axios from 'axios';
+import apiClient from './utils/apiClient';
 import LoadingProgress from './LoadingProgress';
 import SessionManager from './utils/sessionManager';
 import { API_BASE_URL } from './config';
@@ -129,7 +129,7 @@ const Configuration = ({
         prepareFormData(formData);
       }
 
-      const response = await axios.post(`${API_BASE_URL}/api/load`, formData, {
+      const response = await apiClient.post('/load', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },

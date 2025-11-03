@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import IPTVPlayer from './IPTVPlayer';
 import EPGMatcher from './EPGMatcher';
+import FeedSelector from './components/FeedSelector/FeedSelector';
 
 /**
  * PlayerView component that combines the video player and EPG matcher
@@ -12,18 +13,23 @@ import EPGMatcher from './EPGMatcher';
  * @param {Object} props.matchedChannels Object mapping channel IDs to matched EPG IDs
  * @param {Function} props.onGenerate Callback to generate credentials
  * @param {boolean} props.isGenerating Flag indicating if generation is in progress
+ * @param {Array} props.availableSources Array of available IPTV sources
  * @returns {JSX.Element} Player view UI
  */
-const PlayerView = ({ 
+const PlayerView = ({
   sessionId,
   selectedChannel,
   onEpgMatch,
   matchedChannels = {},
   onGenerate,
-  isGenerating = false
+  isGenerating = false,
+  availableSources = []
 }) => {
   const [playerType, setPlayerType] = useState('mpegts-player');
   const [currentChannel, setCurrentChannel] = useState(selectedChannel);
+  const [currentFeedUrl, setCurrentFeedUrl] = useState(selectedChannel?.url);
+  const [selectedFeed, setSelectedFeed] = useState(null);
+  const [sourceName, setSourceName] = useState(null);
 
   const playerButtonClasses = (type) => [
     'inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition',
@@ -35,6 +41,29 @@ const PlayerView = ({
   useEffect(() => {
     if (selectedChannel) {
       setCurrentChannel(selectedChannel);
+      setCurrentFeedUrl(selectedChannel.url);
+      setSelectedFeed(null); // Reset feed selection when channel changes
+
+      // Look up source name from availableSources if sourceId is available
+      if (selectedChannel.sourceId && availableSources.length > 0) {
+        console.log('[PlayerView] Looking up source info for sourceId:', selectedChannel.sourceId);
+        const source = availableSources.find(s => s.id === selectedChannel.sourceId);
+        console.log('[PlayerView] Found source:', source);
+        if (source) {
+          const displayName = source.nickname || source.name || source.url;
+          console.log('[PlayerView] Setting source name:', displayName);
+          setSourceName(displayName);
+        } else {
+          console.log('[PlayerView] Source not found in available sources');
+          setSourceName(null);
+        }
+      } else {
+        console.log('[PlayerView] No sourceId on channel or no sources available:', {
+          hasSourceId: !!selectedChannel.sourceId,
+          sourcesCount: availableSources.length
+        });
+        setSourceName(null);
+      }
 
       if (sessionId) {
         console.log('[PlayerView] Ensuring EPG session is initialized for channel', selectedChannel.name);
@@ -64,7 +93,21 @@ const PlayerView = ({
           });
       }
     }
-  }, [selectedChannel, sessionId]);
+  }, [selectedChannel, sessionId, availableSources]);
+
+  // Handle feed selection
+  const handleFeedSelect = (feed) => {
+    console.log('[PlayerView] Feed selected:', feed);
+    setSelectedFeed(feed);
+    setCurrentFeedUrl(feed.url);
+
+    // Update currentChannel with new URL for the player
+    setCurrentChannel(prev => ({
+      ...prev,
+      url: feed.url,
+      source: feed.source
+    }));
+  };
 
   const hasMatches = Object.keys(matchedChannels).length > 0;
 
@@ -77,50 +120,67 @@ const PlayerView = ({
         </div>
         <div className="flex items-center gap-2 rounded-full border border-slate-800/70 bg-slate-900/70 px-3 py-1 text-xs text-slate-400">
           <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
-          {currentChannel ? `Now playing: ${currentChannel.name}` : 'No channel selected'}
+          {currentChannel ? (
+            <span>
+              Now playing: {currentChannel.name}
+              {sourceName && <span className="ml-1 text-slate-500">({sourceName})</span>}
+            </span>
+          ) : (
+            'No channel selected'
+          )}
         </div>
       </header>
 
       <div className="flex flex-col gap-6 lg:flex-row">
         <div className="flex w-full flex-col gap-4 lg:basis-7/12">
-          <div className="flex flex-wrap items-center justify-center gap-3 rounded-3xl border border-slate-800/70 bg-slate-900/60 p-4 shadow-inner shadow-slate-950/20">
-            <button type="button" onClick={() => setPlayerType('mpegts-player')} className={playerButtonClasses('mpegts-player')}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="23 7 16 12 23 17 23 7"></polygon>
-                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-              </svg>
-              TS Player
-            </button>
-            <button type="button" onClick={() => setPlayerType('hls-player')} className={playerButtonClasses('hls-player')}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 22h14a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <path d="M2 15s2-2 4-2 4 2 6 2 4-2 6-2 4 2 4 2"></path>
-                <path d="M2 19s2-2 4-2 4 2 6 2 4-2 6-2 4 2 4 2"></path>
-              </svg>
-              HLS Player
-            </button>
-            <button type="button" onClick={() => setPlayerType('test-video')} className={playerButtonClasses('test-video')}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
-                <line x1="7" y1="2" x2="7" y2="22"></line>
-                <line x1="17" y1="2" x2="17" y2="22"></line>
-                <line x1="2" y1="12" x2="22" y2="12"></line>
-                <line x1="2" y1="7" x2="7" y2="7"></line>
-                <line x1="2" y1="17" x2="7" y2="17"></line>
-                <line x1="17" y1="17" x2="22" y2="17"></line>
-                <line x1="17" y1="7" x2="22" y2="7"></line>
-              </svg>
-              Test Video
-            </button>
-            <button type="button" onClick={() => setPlayerType('vlc-link')} className={playerButtonClasses('vlc-link')}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                <polyline points="15 3 21 3 21 9"></polyline>
-                <line x1="10" y1="14" x2="21" y2="3"></line>
-              </svg>
-              VLC Link
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-slate-800/70 bg-slate-900/60 p-4 shadow-inner shadow-slate-950/20">
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" onClick={() => setPlayerType('mpegts-player')} className={playerButtonClasses('mpegts-player')}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="23 7 16 12 23 17 23 7"></polygon>
+                  <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                </svg>
+                TS Player
+              </button>
+              <button type="button" onClick={() => setPlayerType('hls-player')} className={playerButtonClasses('hls-player')}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 22h14a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <path d="M2 15s2-2 4-2 4 2 6 2 4-2 6-2 4 2 4 2"></path>
+                  <path d="M2 19s2-2 4-2 4 2 6 2 4-2 6-2 4 2 4 2"></path>
+                </svg>
+                HLS Player
+              </button>
+              <button type="button" onClick={() => setPlayerType('test-video')} className={playerButtonClasses('test-video')}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+                  <line x1="7" y1="2" x2="7" y2="22"></line>
+                  <line x1="17" y1="2" x2="17" y2="22"></line>
+                  <line x1="2" y1="12" x2="22" y2="12"></line>
+                  <line x1="2" y1="7" x2="7" y2="7"></line>
+                  <line x1="2" y1="17" x2="7" y2="17"></line>
+                  <line x1="17" y1="17" x2="22" y2="17"></line>
+                  <line x1="17" y1="7" x2="22" y2="7"></line>
+                </svg>
+                Test Video
+              </button>
+              <button type="button" onClick={() => setPlayerType('vlc-link')} className={playerButtonClasses('vlc-link')}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <line x1="10" y1="14" x2="21" y2="3"></line>
+                </svg>
+                VLC Link
+              </button>
+            </div>
+            {currentChannel && (
+              <FeedSelector
+                channel={currentChannel}
+                onFeedSelect={handleFeedSelect}
+                currentFeedUrl={currentFeedUrl}
+                autoFallbackEnabled={true}
+              />
+            )}
           </div>
 
           <div className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-4 shadow-2xl shadow-slate-950/40">

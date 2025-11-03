@@ -39,17 +39,7 @@ const AuthWrapper = ({ children }) => {
 
   // If authenticated or user skipped auth, show the app
   if (isAuthenticated || !showAuth) {
-    return (
-      <>
-        {/* Show user info badge if authenticated */}
-        {isAuthenticated && user && (
-          <div className="fixed right-4 top-4 z-50">
-            <UserBadge user={user} />
-          </div>
-        )}
-        {children}
-      </>
-    );
+    return children;
   }
 
   // Show authentication screens
@@ -107,7 +97,7 @@ const UserBadge = ({ user }) => {
 
       {/* Dropdown Menu */}
       {showMenu && (
-        <div className="absolute right-0 mt-2 w-48 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30">
+        <div className="absolute right-0 mt-2 w-48 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[100]">
           <div className="border-b border-slate-800 px-4 py-3">
             <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Signed in as</p>
             <p className="truncate text-sm font-semibold text-slate-100">{user.email}</p>
@@ -127,4 +117,5 @@ const UserBadge = ({ user }) => {
   );
 };
 
+export { UserBadge };
 export default AuthWrapper;

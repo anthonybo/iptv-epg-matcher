@@ -5,6 +5,7 @@ import { store } from './store';
 import { sseManager, getSessionId } from './api/apiSlice';
 import ChannelsView from './components/ChannelsView';
 import LoadData from './pages/LoadData/LoadData';
+import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
 import { setCurrentSession } from './services/ApiService';
 import SimpleCategories from './SimpleCategories';
 
@@ -70,6 +71,7 @@ function App() {
               <Route path="/" element={<LoadData onSessionUpdate={updateSessionId} />} />
               <Route path="/channels" element={<ChannelsView sessionId={sessionId} />} />
               <Route path="/categories" element={<SimpleCategories />} />
+              <Route path="/my-iptvs" element={<MyIPTVs />} />
             </Routes>
           </div>
         </Router>

@@ -23,7 +23,7 @@ const processWithDetailedUpdates = async (sessionId, options) => {
     return;
   }
   
-  const { m3uUrl, epgUrl, xtreamUsername, xtreamPassword, xtreamServer, forceUpdate, uploadedFiles } = options;
+  const { m3uUrl, epgUrl, xtreamUsername, xtreamPassword, xtreamServer, forceUpdate, uploadedFiles, userId } = options;
   
   // Get or create session
   let session = sessionStorage.getSession(sessionId);
@@ -83,9 +83,9 @@ const processWithDetailedUpdates = async (sessionId, options) => {
       if (channels && channels.length > 0) {
         logger.info(`Successfully loaded ${channels.length} channels from cache`);
         sendProgressUpdate(sessionId, 'cache_loaded', 15, `Loaded ${channels.length} channels from cache`);
-        
+
         // Process the cached channels
-        processChannels(sessionId, channels);
+        processChannels(sessionId, channels, userId, options);
         return;
       } else {
         logger.warn('Cache file exists but contains no valid channels, will load fresh data');
@@ -140,17 +140,25 @@ const processWithDetailedUpdates = async (sessionId, options) => {
       } catch (cacheError) {
         logger.error(`Error saving to cache: ${cacheError.message}`);
       }
-      
+
       // Process the channels
-      processChannels(sessionId, channels);
+      processChannels(sessionId, channels, userId, options);
     } else {
-      logger.warn('No Xtream credentials provided, using test data');
-      channels = generateTestChannels(50);
-      processChannels(sessionId, channels);
+      logger.error('No Xtream credentials provided');
+      broadcastSSEUpdate({
+        type: 'error',
+        message: 'Failed to load channels: No IPTV credentials provided',
+        stage: 'channel_error',
+        progress: 25,
+        sessionId
+      }, sessionId);
+
+      sendProgressUpdate(sessionId, 'error', 100, 'No IPTV credentials provided');
+      return;
     }
   } catch (error) {
     logger.error(`Error loading channels: ${error.message}`);
-    
+
     // Provide clear error feedback to the user
     broadcastSSEUpdate({
       type: 'error',
@@ -159,16 +167,14 @@ const processWithDetailedUpdates = async (sessionId, options) => {
       progress: 25,
       sessionId
     }, sessionId);
-    
-    // Fall back to test data
-    channels = generateTestChannels(50);
-    sendProgressUpdate(sessionId, 'channel_error', 22, `Error loading channels: ${error.message.substring(0, 100)}. Using test data.`);
-    processChannels(sessionId, channels);
+
+    sendProgressUpdate(sessionId, 'error', 100, `Error loading channels: ${error.message}`);
+    return;
   }
 };
 
 // Helper function to process channels after they've been loaded
-async function processChannels(sessionId, channels) {
+async function processChannels(sessionId, channels, userId = null, options = {}) {
   sendProgressUpdate(sessionId, 'processing_channels', 25, `Processing ${channels.length} channels`);
   
   // Generate categories from actual channels
@@ -287,16 +293,25 @@ async function processChannels(sessionId, channels) {
   // Save channels to database for persistence
   try {
     if (channels && channels.length > 0) {
-      logger.info(`Saving ${channels.length} channels to database for persistence`);
+      logger.info(`Saving ${channels.length} channels to database for persistence${userId ? ` (user ${userId})` : ''}`);
 
-      // Get source info from session data
+      // Get credentials from options parameter FIRST (passed from load request),
+      // then fallback to session data if not in options
       const session = sessionStorage.getSession(sessionId);
-      const options = session?.data?.options || {};
-      const { xtreamServer, xtreamUsername, xtreamPassword, m3uUrl } = options;
+      logger.info(`Session data keys: ${Object.keys(session?.data || {}).join(', ')}`);
+      logger.info(`Options keys: ${Object.keys(options || {}).join(', ')}`);
+
+      const sessionData = session?.data || {};
+      const xtreamServer = options.xtreamServer || sessionData.xtreamServer || sessionData.options?.xtreamServer;
+      const xtreamUsername = options.xtreamUsername || sessionData.xtreamUsername || sessionData.options?.xtreamUsername;
+      const xtreamPassword = options.xtreamPassword || sessionData.xtreamPassword || sessionData.options?.xtreamPassword;
+      const m3uUrl = options.m3uUrl || sessionData.m3uUrl || sessionData.options?.m3uUrl;
+
+      logger.info(`Source info from options/session: xtreamServer=${xtreamServer}, xtreamUsername=${xtreamUsername}, m3uUrl=${m3uUrl}, sessionId=${sessionId}`);
 
       // Create source info
       const sourceInfo = {
-        name: xtreamServer ? `Xtream: ${xtreamServer}` : m3uUrl ? `M3U: ${m3uUrl}` : `Session ${sessionId}`,
+        name: xtreamServer || m3uUrl || sessionId,
         url: xtreamServer || m3uUrl || sessionId,
         username: xtreamUsername || '',
         password: xtreamPassword || '',
@@ -324,6 +339,20 @@ async function processChannels(sessionId, channels) {
       // Associate session with source
       await iptvDatabaseService.associateSourceWithSession(sessionId, sourceId);
       logger.info(`Associated session ${sessionId} with source ${sourceId}`);
+
+      // If user is authenticated, create user preference for this source
+      if (userId) {
+        try {
+          await iptvDatabaseService.createUserIPTVPreference(userId, sourceId, {
+            nickname: sourceInfo.name,
+            isActive: true
+          });
+          logger.info(`Created user preference for user ${userId}, source ${sourceId}`);
+        } catch (prefError) {
+          // Don't fail the whole operation if preference creation fails
+          logger.warn(`Failed to create user preference: ${prefError.message}`);
+        }
+      }
     }
   } catch (dbError) {
     logger.error(`Error saving to database: ${dbError.message}`, { stack: dbError.stack });

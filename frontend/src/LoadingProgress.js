@@ -226,6 +226,16 @@ const LoadingProgress = ({
                     if (data.message.toLowerCase().includes('completed')) {
                         updateProgress({ ...data, progress: 100 });
                         setStatus(data.message);
+
+                        // Close the event source
+                        if (eventSourceRef.current) {
+                            eventSourceRef.current.close();
+                        }
+
+                        // Call the onComplete callback
+                        if (onComplete && typeof onComplete === 'function') {
+                            onComplete(data);
+                        }
                     }
                 } else {
                     addLog('Received server message event');

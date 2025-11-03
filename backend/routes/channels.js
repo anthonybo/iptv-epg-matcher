@@ -20,16 +20,13 @@ router.get('/:sessionId', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 100, 1000); // Cap at 1000 channels max
     const category = req.query.category || null;
+    const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null;
+    const searchTerm = req.query.search || null;
 
     // Log debugging info about the request
-    logger.info(`CHANNEL REQUEST RECEIVED: sessionId=${sessionId}`, {
-      url: req.originalUrl,
-      params: req.params,
-      query: req.query,
-      page,
-      limit,
-      category
-    });
+    logger.info(`CHANNEL REQUEST RECEIVED: sessionId=${sessionId}, sourceId=${sourceId}, category=${category}, page=${page}`);
+    console.log('Full request query:', req.query);
+    console.log('URL:', req.originalUrl);
 
     // Also check query parameter as a fallback
     if ((!sessionId || sessionId === 'null' || sessionId === 'undefined') && req.query.sessionId) {
@@ -53,15 +50,18 @@ router.get('/:sessionId', async (req, res) => {
       const result = await iptvDatabaseService.getChannelsForSession(sessionId, {
         page,
         limit,
-        categoryId: category
+        categoryId: category,
+        sourceId,
+        search: searchTerm
       });
 
-      if (result && result.channels && result.channels.length > 0) {
+      if (result && result.channels) {
         logger.info(`Found ${result.channels.length} channels from IPTV database`);
 
         // Transform channels to match expected format
         const transformedChannels = result.channels.map(ch => ({
           id: ch.id,
+          sourceId: ch.sourceId,
           tvgId: ch.tvg?.id || ch.id,
           name: ch.name,
           groupTitle: ch.group?.title || '',
@@ -88,39 +88,22 @@ router.get('/:sessionId', async (req, res) => {
     if (!sessionData) {
       logger.warn(`Session not found: ${sessionId}`);
 
-      // Return test channels for easier debugging
-      const testChannels = generateTestChannels(10);
-      logger.info(`Returning ${testChannels.length} test channels for missing session ${sessionId}`);
-
-      return res.json({
-        channels: testChannels,
-        categories: generateCategories(testChannels),
-        totalChannels: testChannels.length,
-        fromTest: true,
-        message: 'Session not found, returning test data'
+      return res.status(404).json({
+        error: 'Session not found',
+        message: 'No channel data loaded for this session. Please load IPTV data first.',
+        code: 'SESSION_NOT_FOUND'
       });
     }
 
     // Check if channels exist in the session data
     const allChannels = sessionData.data?.channels;
     if (!allChannels || allChannels.length === 0) {
-      // If no channels, return test channels for development
-      const testChannels = generateTestChannels(50);
-      logger.info(`No channels found in session ${sessionId}, returning ${testChannels.length} test channels`);
+      logger.warn(`No channels found in session ${sessionId}`);
 
-      // Update the session with test channels
-      sessionStorage.updateSession(sessionId, {
-        data: {
-          ...(sessionData.data || {}),
-          channels: testChannels
-        }
-      });
-
-      return res.json({
-        channels: testChannels,
-        categories: generateCategories(testChannels),
-        totalChannels: testChannels.length,
-        fromTest: true
+      return res.status(404).json({
+        error: 'No channels found',
+        message: 'No channel data loaded for this session. Please load IPTV data first.',
+        code: 'NO_CHANNELS_FOUND'
       });
     }
 
@@ -209,14 +192,15 @@ router.get('/session/:sessionId', async (req, res) => {
  */
 router.get('/:sessionId/categories', async (req, res) => {
   const { sessionId } = req.params;
+  const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null;
 
-  logger.debug(`REQUEST RECEIVED for categories: sessionId=${sessionId}`);
+  logger.debug(`REQUEST RECEIVED for categories: sessionId=${sessionId}, sourceId=${sourceId}`);
 
   try {
     // Try to get categories from IPTV database first
     try {
-      logger.info(`Fetching categories from IPTV database for session ${sessionId}`);
-      const categories = await iptvDatabaseService.getCategoriesForSession(sessionId);
+      logger.info(`Fetching categories from IPTV database for session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
+      const categories = await iptvDatabaseService.getCategoriesForSession(sessionId, sourceId);
 
       if (categories && categories.length > 0) {
         logger.info(`Found ${categories.length} categories from IPTV database`);

@@ -301,6 +301,7 @@ const indexRouter = require('./routes/index');
 const m3uRouter = require('./routes/m3u');
 const settingsRouter = require('./routes/settings');
 const iptvRoutes = require('./routes/iptv');
+const iptvSourcesRoutes = require('./routes/iptvSources');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -344,6 +345,7 @@ app.use('/api', indexRouter);
 app.use('/api/m3u', m3uRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/iptv', iptvRoutes);
+app.use('/api/iptv', iptvSourcesRoutes); // Multi-IPTV source management
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));

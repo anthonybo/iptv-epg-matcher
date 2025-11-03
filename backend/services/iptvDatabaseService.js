@@ -119,12 +119,29 @@ const initializeTables = () => {
                 FOREIGN KEY(source_id) REFERENCES iptv_sources(id) ON DELETE CASCADE,
                 UNIQUE(session_id, source_id)
             )`,
-            
+
+            // User IPTV preferences (for multi-source management)
+            `CREATE TABLE IF NOT EXISTS user_iptv_preferences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                priority INTEGER DEFAULT 999,
+                is_active BOOLEAN DEFAULT 1,
+                nickname TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_id) REFERENCES iptv_sources(id) ON DELETE CASCADE,
+                UNIQUE(user_id, source_id)
+            )`,
+
             // Create indexes for performance
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_source_id ON iptv_channels(source_id)`,
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_name ON iptv_channels(name)`,
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_epg_id ON iptv_channels(epg_channel_id)`,
-            `CREATE INDEX IF NOT EXISTS idx_session_mappings ON session_iptv_mappings(session_id)`
+            `CREATE INDEX IF NOT EXISTS idx_session_mappings ON session_iptv_mappings(session_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_user ON user_iptv_preferences(user_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_priority ON user_iptv_preferences(user_id, priority)`
         ];
         
         db.serialize(() => {
@@ -396,7 +413,8 @@ const getChannelsForSession = (sessionId, options = {}) => {
             search = null,
             sortBy = 'name',
             sortOrder = 'asc',
-            userId = null
+            userId = null,
+            sourceId = null
         } = options;
 
         const offset = (page - 1) * limit;
@@ -427,6 +445,11 @@ const getChannelsForSession = (sessionId, options = {}) => {
             params.push(`%${search}%`);
         }
 
+        if (sourceId) {
+            whereClause += ' AND c.source_id = ?';
+            params.push(sourceId);
+        }
+
         // Validate sort parameters for security
         const validSortColumns = ['name', 'group_title', 'last_updated'];
         const validSortOrders = ['asc', 'desc'];
@@ -435,12 +458,17 @@ const getChannelsForSession = (sessionId, options = {}) => {
         const sanitizedSortOrder = validSortOrders.includes(sortOrder.toLowerCase()) ?
             sortOrder.toLowerCase() : 'asc';
 
-        db.all(
-            `SELECT c.* FROM iptv_channels c
+        const query = `SELECT c.* FROM iptv_channels c
              JOIN session_iptv_mappings m ON c.source_id = m.source_id
              WHERE ${sessionWhereClause} ${whereClause}
              ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
-             LIMIT ? OFFSET ?`,
+             LIMIT ? OFFSET ?`;
+
+        console.log('[getChannelsForSession] SQL Query:', query);
+        console.log('[getChannelsForSession] Params:', [...params, limit, offset]);
+
+        db.all(
+            query,
             [...params, limit, offset],
             (err, rows) => {
                 if (err) {
@@ -465,6 +493,7 @@ const getChannelsForSession = (sessionId, options = {}) => {
                         resolve({
                             channels: rows.map(row => ({
                                 id: row.channel_id,
+                                sourceId: row.source_id,
                                 name: row.name,
                                 logo: row.logo,
                                 url: row.url,
@@ -489,18 +518,27 @@ const getChannelsForSession = (sessionId, options = {}) => {
 /**
  * Get categories for a session
  * @param {string} sessionId - Session ID
+ * @param {number} sourceId - Optional source ID to filter categories
  * @returns {Promise<Array<Object>>} Categories
  */
-const getCategoriesForSession = (sessionId) => {
+const getCategoriesForSession = (sessionId, sourceId = null) => {
     return new Promise((resolve, reject) => {
+        let whereClause = 'm.session_id = ? AND c.group_title != \'\'';
+        let params = [sessionId];
+
+        if (sourceId) {
+            whereClause += ' AND c.source_id = ?';
+            params.push(sourceId);
+        }
+
         db.all(
             `SELECT DISTINCT c.group_title as name, COUNT(DISTINCT c.channel_id) as channel_count
              FROM iptv_channels c
              JOIN session_iptv_mappings m ON c.source_id = m.source_id
-             WHERE m.session_id = ? AND c.group_title != ''
+             WHERE ${whereClause}
              GROUP BY c.group_title
              ORDER BY c.group_title`,
-            [sessionId],
+            params,
             (err, rows) => {
                 if (err) {
                     logger.error(`Error getting categories for session: ${err.message}`);
@@ -676,6 +714,306 @@ const updateChannelEpgMapping = (sessionId, channelId, epgChannelId) => {
     });
 };
 
+/**
+ * Get all IPTV sources for a user with their preferences
+ * @param {number} userId - User ID
+ * @returns {Promise<Array>} Array of sources with preferences
+ */
+const getUserIPTVSources = (userId) => {
+    return new Promise((resolve, reject) => {
+        db.all(
+            `SELECT
+                s.id as source_id,
+                s.name,
+                s.url,
+                s.username,
+                s.password,
+                s.type,
+                s.last_updated,
+                p.priority,
+                p.is_active,
+                p.nickname,
+                p.created_at as preference_created_at,
+                (SELECT COUNT(*) FROM iptv_channels WHERE source_id = s.id) as channel_count
+             FROM iptv_sources s
+             INNER JOIN user_iptv_preferences p ON s.id = p.source_id
+             WHERE p.user_id = ?
+             ORDER BY p.priority ASC, p.created_at DESC`,
+            [userId],
+            (err, rows) => {
+                if (err) {
+                    logger.error(`Error getting user IPTV sources: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                resolve(rows.map(row => ({
+                    id: row.source_id,
+                    name: row.name,
+                    nickname: row.nickname || row.name,
+                    url: row.url,
+                    username: row.username,
+                    password: row.password,
+                    type: row.type,
+                    priority: row.priority,
+                    is_active: row.is_active,
+                    channel_count: row.channel_count,
+                    last_updated: row.last_updated,
+                    added_at: row.preference_created_at
+                })));
+            }
+        );
+    });
+};
+
+/**
+ * Create or update user IPTV preference
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @param {Object} options - Preference options
+ * @returns {Promise<void>}
+ */
+const createUserIPTVPreference = (userId, sourceId, options = {}) => {
+    return new Promise((resolve, reject) => {
+        const { nickname, priority, isActive = true } = options;
+
+        // If no priority specified, get the next available priority
+        if (priority === undefined || priority === null) {
+            db.get(
+                `SELECT COALESCE(MAX(priority), 0) + 1 as next_priority
+                 FROM user_iptv_preferences
+                 WHERE user_id = ?`,
+                [userId],
+                (err, row) => {
+                    if (err) {
+                        logger.error(`Error getting next priority: ${err.message}`);
+                        reject(err);
+                        return;
+                    }
+
+                    insertPreference(row.next_priority);
+                }
+            );
+        } else {
+            insertPreference(priority);
+        }
+
+        function insertPreference(finalPriority) {
+            db.run(
+                `INSERT INTO user_iptv_preferences (user_id, source_id, priority, is_active, nickname, updated_at)
+                 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                 ON CONFLICT(user_id, source_id)
+                 DO UPDATE SET
+                    priority = excluded.priority,
+                    is_active = excluded.is_active,
+                    nickname = COALESCE(excluded.nickname, nickname),
+                    updated_at = CURRENT_TIMESTAMP`,
+                [userId, sourceId, finalPriority, isActive ? 1 : 0, nickname],
+                function(err) {
+                    if (err) {
+                        logger.error(`Error creating user IPTV preference: ${err.message}`);
+                        reject(err);
+                        return;
+                    }
+
+                    logger.info(`Created IPTV preference for user ${userId}, source ${sourceId}, priority ${finalPriority}`);
+                    resolve();
+                }
+            );
+        }
+    });
+};
+
+/**
+ * Update source priority for a user
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @param {number} newPriority - New priority value
+ * @returns {Promise<void>}
+ */
+const updateSourcePriority = (userId, sourceId, newPriority) => {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE user_iptv_preferences
+             SET priority = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND source_id = ?`,
+            [newPriority, userId, sourceId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error updating source priority: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
+/**
+ * Update source nickname for a user
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @param {string} nickname - New nickname
+ * @returns {Promise<void>}
+ */
+const updateSourceNickname = (userId, sourceId, nickname) => {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE user_iptv_preferences
+             SET nickname = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND source_id = ?`,
+            [nickname, userId, sourceId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error updating source nickname: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
+/**
+ * Toggle source active state for a user
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @param {boolean} isActive - Active state
+ * @returns {Promise<void>}
+ */
+const toggleSourceActive = (userId, sourceId, isActive) => {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE user_iptv_preferences
+             SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = ? AND source_id = ?`,
+            [isActive ? 1 : 0, userId, sourceId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error toggling source active state: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
+/**
+ * Delete user's IPTV source preference (doesn't delete actual source)
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @returns {Promise<void>}
+ */
+const deleteUserSource = (userId, sourceId) => {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `DELETE FROM user_iptv_preferences
+             WHERE user_id = ? AND source_id = ?`,
+            [userId, sourceId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error deleting user source: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
+/**
+ * Get alternate feeds for a channel across user's sources
+ * @param {number} userId - User ID
+ * @param {string} channelName - Channel name to match
+ * @param {string} epgChannelId - EPG channel ID to match (optional)
+ * @returns {Promise<Array<Object>>} Alternate feeds ordered by priority
+ */
+const getAlternateFeeds = (userId, channelName, epgChannelId = null) => {
+    return new Promise((resolve, reject) => {
+        if (!userId || !channelName) {
+            resolve([]);
+            return;
+        }
+
+        // Build query to find matching channels across user's active sources
+        // Match by channel name (case-insensitive) or epg_channel_id
+        const query = `
+            SELECT
+                c.id,
+                c.channel_id,
+                c.name,
+                c.logo,
+                c.url,
+                c.group_title,
+                c.epg_channel_id,
+                s.id as source_id,
+                s.name as source_name,
+                s.type as source_type,
+                p.priority,
+                p.nickname as source_nickname,
+                p.is_active
+            FROM iptv_channels c
+            JOIN iptv_sources s ON c.source_id = s.id
+            JOIN user_iptv_preferences p ON s.id = p.source_id
+            WHERE p.user_id = ?
+                AND p.is_active = 1
+                AND (
+                    LOWER(c.name) = LOWER(?)
+                    ${epgChannelId ? 'OR c.epg_channel_id = ?' : ''}
+                )
+            ORDER BY p.priority ASC, s.name ASC
+        `;
+
+        const params = epgChannelId
+            ? [userId, channelName, epgChannelId]
+            : [userId, channelName];
+
+        db.all(query, params, (err, rows) => {
+            if (err) {
+                logger.error(`Error fetching alternate feeds: ${err.message}`);
+                reject(err);
+                return;
+            }
+
+            if (!rows || rows.length === 0) {
+                resolve([]);
+                return;
+            }
+
+            // Transform results
+            const feeds = rows.map(row => ({
+                id: row.id,
+                channelId: row.channel_id,
+                name: row.name,
+                logo: row.logo,
+                url: row.url,
+                groupTitle: row.group_title,
+                epgChannelId: row.epg_channel_id,
+                source: {
+                    id: row.source_id,
+                    name: row.source_name,
+                    nickname: row.source_nickname || row.source_name,
+                    type: row.source_type,
+                    priority: row.priority,
+                    isActive: row.is_active === 1
+                }
+            }));
+
+            logger.debug(`Found ${feeds.length} alternate feeds for channel "${channelName}"`);
+            resolve(feeds);
+        });
+    });
+};
+
 module.exports = {
     connect,
     saveSource,
@@ -687,5 +1025,13 @@ module.exports = {
     getChannelById,
     cleanupOldSessions,
     searchChannels,
-    updateChannelEpgMapping
+    updateChannelEpgMapping,
+    // Multi-IPTV source management
+    getUserIPTVSources,
+    createUserIPTVPreference,
+    updateSourcePriority,
+    updateSourceNickname,
+    toggleSourceActive,
+    deleteUserSource,
+    getAlternateFeeds
 }; 
