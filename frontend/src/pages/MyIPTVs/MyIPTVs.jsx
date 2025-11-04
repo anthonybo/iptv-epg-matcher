@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import iptvSourcesService from '../../services/iptvSourcesService';
+import Configuration from '../../Configuration';
 
 /**
  * Source card component
@@ -243,11 +244,12 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
 /**
  * My IPTVs management page
  */
-const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
+const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad, loadingError }) => {
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [showAddModal, setShowAddModal] = useState(false);
 
   // Load sources on mount
   useEffect(() => {
@@ -368,13 +370,13 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
           </p>
         </div>
         <button
-          onClick={() => window.history.back()}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800/50 px-4 py-2.5 text-sm font-medium text-slate-300 hover:bg-slate-800 hover:border-slate-600 hover:text-slate-100 transition-all"
+          onClick={() => setShowAddModal(true)}
+          className="inline-flex items-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2.5 text-sm font-semibold text-blue-100 hover:bg-blue-500/30 hover:border-blue-500/60 transition-all shadow-lg shadow-blue-900/20"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
           </svg>
-          Back to Load
+          Add IPTV Source
         </button>
       </header>
 
@@ -418,15 +420,15 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
             </svg>
           </div>
           <h3 className="text-lg font-semibold text-slate-200 mb-2">No IPTV sources yet</h3>
-          <p className="text-sm text-slate-400 mb-4">Load an IPTV source to get started</p>
+          <p className="text-sm text-slate-400 mb-4">Add an IPTV source to get started</p>
           <button
-            onClick={() => window.history.back()}
+            onClick={() => setShowAddModal(true)}
             className="inline-flex items-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2.5 text-sm font-medium text-blue-100 hover:bg-blue-500/30 transition-colors"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
-            Load IPTV Source
+            Add IPTV Source
           </button>
         </div>
       )}
@@ -444,6 +446,41 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp }) => {
               onRefreshAccountInfo={handleRefreshAccountInfo}
             />
           ))}
+        </div>
+      )}
+
+      {/* Add Source Modal */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+              <h3 className="text-xl font-semibold text-slate-100">Add IPTV Source</h3>
+              <button
+                onClick={() => setShowAddModal(false)}
+                className="text-slate-400 hover:text-slate-200 transition-colors p-1 hover:bg-slate-700 rounded-lg"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              <Configuration
+                onLoad={async (data) => {
+                  await onLoad(data);
+                  setShowAddModal(false);
+                  await loadSources();
+                  if (onSourcesUpdated) onSourcesUpdated();
+                  // Note: handleLoad will switch to 'channels' tab, but App.js will handle staying on myiptvs
+                }}
+                error={loadingError}
+                allowedTabs={['xtream']}
+              />
+            </div>
+          </div>
         </div>
       )}
     </div>
