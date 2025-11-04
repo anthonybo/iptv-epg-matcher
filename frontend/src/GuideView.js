@@ -554,10 +554,15 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
 
               {/* Current time indicator */}
               <div
-                className="absolute top-12 bottom-0 w-0.5 bg-red-500 z-20 pointer-events-none"
+                className="absolute top-0 bottom-0 z-20 pointer-events-none"
                 style={{ left: `${currentTimePosition}px` }}
               >
-                <div className="absolute -top-12 -left-2 w-4 h-4 bg-red-500 rounded-full"></div>
+                {/* Time label at top */}
+                <div className="absolute top-2 -translate-x-1/2 px-2 py-1 bg-red-500 text-white text-xs font-bold rounded shadow-lg whitespace-nowrap">
+                  {formatDisplayTime(currentTime)}
+                </div>
+                {/* Vertical line */}
+                <div className="absolute top-12 bottom-0 w-0.5 bg-gradient-to-b from-red-500 to-red-600 shadow-lg shadow-red-500/50"></div>
               </div>
 
               {/* Program rows */}
