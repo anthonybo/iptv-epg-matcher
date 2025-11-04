@@ -11,7 +11,14 @@ export const useChannels = (sessionId, sourceId = null) => {
   const [channels, setChannels] = useState([]);
   const [categories, setCategories] = useState([]);
   const [selectedCategories, setSelectedCategories] = useState(new Set());
-  const [searchTerm, setSearchTerm] = useState('');
+  // Initialize search term from sessionStorage to preserve across navigation
+  const [searchTerm, setSearchTerm] = useState(() => {
+    try {
+      return sessionStorage.getItem('channelsSearchTerm') || '';
+    } catch {
+      return '';
+    }
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [page, setPage] = useState(1);
@@ -57,6 +64,19 @@ export const useChannels = (sessionId, sourceId = null) => {
 
     fetchCategories();
   }, [sessionId, sourceId]);
+
+  // Save search term to sessionStorage whenever it changes
+  useEffect(() => {
+    try {
+      if (searchTerm) {
+        sessionStorage.setItem('channelsSearchTerm', searchTerm);
+      } else {
+        sessionStorage.removeItem('channelsSearchTerm');
+      }
+    } catch (error) {
+      console.error('[useChannels] Error saving search term to sessionStorage:', error);
+    }
+  }, [searchTerm]);
 
   // Reset page and channels when sourceId or searchTerm changes
   useEffect(() => {

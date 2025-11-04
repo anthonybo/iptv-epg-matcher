@@ -16,7 +16,9 @@ const FeedSelector = ({ channel, onFeedSelect, currentFeedUrl, autoFallbackEnabl
   const [loading, setLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [error, setError] = useState(null);
+  const [dropdownPosition, setDropdownPosition] = useState({ top: 0, right: 0 });
   const dropdownRef = useRef(null);
+  const buttonRef = useRef(null);
 
   // Load alternate feeds when channel changes
   useEffect(() => {
@@ -45,10 +47,22 @@ const FeedSelector = ({ channel, onFeedSelect, currentFeedUrl, autoFallbackEnabl
     loadFeeds();
   }, [channel]);
 
+  // Calculate dropdown position when opened
+  useEffect(() => {
+    if (isOpen && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setDropdownPosition({
+        top: rect.bottom + 8, // 8px spacing below button
+        right: window.innerWidth - rect.right
+      });
+    }
+  }, [isOpen]);
+
   // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target) &&
+          buttonRef.current && !buttonRef.current.contains(event.target)) {
         setIsOpen(false);
       }
     };
@@ -69,9 +83,10 @@ const FeedSelector = ({ channel, onFeedSelect, currentFeedUrl, autoFallbackEnabl
   const currentPriority = currentFeed?.source?.priority || null;
 
   return (
-    <div className="relative inline-block" ref={dropdownRef}>
+    <div className="relative inline-block">
       {/* Feed selector button */}
       <button
+        ref={buttonRef}
         onClick={() => setIsOpen(!isOpen)}
         className="inline-flex items-center gap-2 rounded-lg bg-slate-800/90 border border-slate-700 px-3 py-2 text-sm font-medium text-slate-300 hover:bg-slate-700 hover:border-slate-600 hover:text-slate-100 transition-all shadow-lg"
         title="Select alternate feed"
@@ -106,7 +121,14 @@ const FeedSelector = ({ channel, onFeedSelect, currentFeedUrl, autoFallbackEnabl
 
       {/* Dropdown menu */}
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-80 rounded-xl border border-slate-700 bg-slate-900 shadow-2xl z-50 overflow-hidden">
+        <div
+          ref={dropdownRef}
+          className="fixed w-80 rounded-xl border border-slate-700 bg-slate-900 shadow-2xl z-[9999] overflow-hidden"
+          style={{
+            top: `${dropdownPosition.top}px`,
+            right: `${dropdownPosition.right}px`
+          }}
+        >
           {/* Header */}
           <div className="px-4 py-3 border-b border-slate-700 bg-slate-800/50">
             <div className="flex items-center justify-between mb-1">

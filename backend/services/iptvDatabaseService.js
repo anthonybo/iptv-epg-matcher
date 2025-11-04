@@ -539,11 +539,34 @@ const getChannelsForSession = (sessionId, options = {}) => {
         const sanitizedSortOrder = validSortOrders.includes(sortOrder.toLowerCase()) ?
             sortOrder.toLowerCase() : 'asc';
 
-        const query = `SELECT c.* FROM iptv_channels c
-             JOIN session_iptv_mappings m ON c.source_id = m.source_id
-             WHERE ${sessionWhereClause} ${whereClause}
-             ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
-             LIMIT ? OFFSET ?`;
+        // Build query with user preferences to get custom nicknames
+        // For sources with auto-generated "Legacy IPTV Source" names, prefer showing the URL
+        const query = userId
+            ? `SELECT c.*,
+                      COALESCE(
+                          p.nickname,
+                          CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END,
+                          s.url
+                      ) as source_name,
+                      s.url as source_url,
+                      s.type as source_type
+               FROM iptv_channels c
+               JOIN session_iptv_mappings m ON c.source_id = m.source_id
+               LEFT JOIN iptv_sources s ON c.source_id = s.id
+               LEFT JOIN user_iptv_preferences p ON s.id = p.source_id AND p.user_id = ${userId}
+               WHERE ${sessionWhereClause} ${whereClause}
+               ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
+               LIMIT ? OFFSET ?`
+            : `SELECT c.*,
+                      CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
+                      s.url as source_url,
+                      s.type as source_type
+               FROM iptv_channels c
+               JOIN session_iptv_mappings m ON c.source_id = m.source_id
+               LEFT JOIN iptv_sources s ON c.source_id = s.id
+               WHERE ${sessionWhereClause} ${whereClause}
+               ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
+               LIMIT ? OFFSET ?`;
 
         console.log('[getChannelsForSession] SQL Query:', query);
         console.log('[getChannelsForSession] Params:', [...params, limit, offset]);
@@ -572,16 +595,31 @@ const getChannelsForSession = (sessionId, options = {}) => {
                         }
 
                         resolve({
-                            channels: rows.map(row => ({
-                                id: row.channel_id,
-                                sourceId: row.source_id,
-                                name: row.name,
-                                logo: row.logo,
-                                url: row.url,
-                                group: { title: row.group_title },
-                                tvg: { id: row.epg_channel_id },
-                                categories: row.categories ? JSON.parse(row.categories) : []
-                            })),
+                            channels: rows.map(row => {
+                                // Extract base URL from channel URL if source name is invalid
+                                let displayName = row.source_name;
+                                if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+                                    try {
+                                        const urlObj = new URL(row.url);
+                                        displayName = `${urlObj.protocol}//${urlObj.host}`;
+                                    } catch {
+                                        displayName = row.source_url || `Source ${row.source_id}`;
+                                    }
+                                }
+
+                                return {
+                                    id: row.channel_id,
+                                    sourceId: row.source_id,
+                                    sourceName: displayName,
+                                    sourceType: row.source_type,
+                                    name: row.name,
+                                    logo: row.logo,
+                                    url: row.url,
+                                    group: { title: row.group_title },
+                                    tvg: { id: row.epg_channel_id },
+                                    categories: row.categories ? JSON.parse(row.categories) : []
+                                };
+                            }),
                             pagination: {
                                 total: countRow.total,
                                 page,

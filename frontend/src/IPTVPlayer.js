@@ -412,24 +412,47 @@ const IPTVPlayer = ({
         });
         
         player.attachMediaElement(videoEl);
+
+        // Add error event listener before loading
+        player.on(window.mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+          log('error', 'mpegts player error', { errorType, errorDetail, errorInfo });
+          setLoading(false);
+
+          // Handle specific error types
+          if (errorType === window.mpegts.ErrorTypes.NETWORK_ERROR) {
+            if (errorDetail === window.mpegts.ErrorDetails.NETWORK_STATUS_CODE_INVALID) {
+              // HTTP error (like 404)
+              const statusCode = errorInfo?.code || 'unknown';
+              const message = errorInfo?.msg || 'Unknown error';
+              setError(`Channel not found or unavailable (HTTP ${statusCode}: ${message}). Try selecting a different channel or checking your IPTV source.`);
+            } else {
+              setError(`Network error loading stream: ${errorDetail}. Check your connection and try again.`);
+            }
+          } else if (errorType === window.mpegts.ErrorTypes.MEDIA_ERROR) {
+            setError(`Media error: The stream format is not supported or the stream is corrupted. Try another channel.`);
+          } else {
+            setError(`Stream playback error. Try another channel or player method.`);
+          }
+        });
+
         player.load();
-        
+
         videoEl.addEventListener('playing', () => {
           log('info', 'Video playing');
           setLoading(false);
           setError(null);
         });
-        
+
         videoEl.addEventListener('error', () => {
           log('error', 'Video error', { error: videoEl.error });
           setError('Error playing video. Try another method or channel.');
           setLoading(false);
         });
-        
+
         player.play().catch(e => {
           log('warn', 'Autoplay prevented', { error: e.message });
         });
-        
+
         playerInstanceRef.current = player;
       } else {
         log('error', 'MSE not supported in this browser');
@@ -951,7 +974,7 @@ const formatTime = (date) => {
       )}
       
       {/* Player container */}
-      <div 
+      <div
         ref={containerRef}
         style={{
           width: '100%',
@@ -959,7 +982,80 @@ const formatTime = (date) => {
           backgroundColor: '#000'
         }}
       />
-      
+
+      {/* Error notification overlay */}
+      {error && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          zIndex: 100,
+          backgroundColor: 'rgba(220, 38, 38, 0.95)',
+          color: 'white',
+          padding: '20px 30px',
+          borderRadius: '12px',
+          boxShadow: '0 10px 40px rgba(0, 0, 0, 0.5)',
+          maxWidth: '80%',
+          textAlign: 'center'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '12px',
+            marginBottom: '12px'
+          }}>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <span style={{
+              fontSize: '18px',
+              fontWeight: 'bold'
+            }}>
+              Stream Error
+            </span>
+          </div>
+          <p style={{
+            margin: '0 0 16px 0',
+            fontSize: '14px',
+            lineHeight: '1.5'
+          }}>
+            {error}
+          </p>
+          <button
+            onClick={() => setError(null)}
+            style={{
+              backgroundColor: 'rgba(255, 255, 255, 0.2)',
+              color: 'white',
+              border: 'none',
+              padding: '8px 20px',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: '600',
+              transition: 'background-color 0.2s'
+            }}
+            onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.3)'}
+            onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.2)'}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Channel info overlay (toggleable) */}
       {selectedChannel && showChannelInfo && (
         <>

@@ -28,8 +28,8 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}`);
             const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
                 page: 1,
-                limit: 50000, // Load all channels
-                userId: userId || null
+                limit: 999999 // Essentially unlimited - load ALL channels for streaming
+                // NOTE: Don't pass userId here - session_iptv_mappings table only has session_id
             });
 
             if (dbResult && dbResult.channels && dbResult.channels.length > 0) {
@@ -45,6 +45,29 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                     url: ch.url,
                     categories: ch.categories || []
                 }));
+
+                // Debug: Log first few channels to see their structure
+                const samples = channels.slice(0, 5).map(ch => ({
+                    id: ch.id,
+                    tvgId: ch.tvgId,
+                    name: ch.name
+                }));
+                logger.info(`Sample channels from database: ${JSON.stringify(samples, null, 2)}`);
+
+                // Debug: Find NHL channels if we're looking for one
+                if (channelId.toLowerCase().includes('nhl') || channelId.toLowerCase().includes('699083') || channelId.toLowerCase().includes('xtream')) {
+                    const nhlChannels = channels.filter(ch =>
+                        ch.name.toLowerCase().includes('nhl') ||
+                        ch.id.toLowerCase().includes('nhl') ||
+                        ch.id.includes('699083') ||
+                        ch.id.includes('xtream')
+                    ).slice(0, 10);
+                    logger.info(`Found ${nhlChannels.length} NHL/matching channels: ${JSON.stringify(nhlChannels.map(ch => ({
+                        id: ch.id,
+                        tvgId: ch.tvgId,
+                        name: ch.name
+                    })), null, 2)}`);
+                }
             }
         } catch (dbError) {
             logger.warn(`Error loading channels from database: ${dbError.message}, falling back to in-memory`);
@@ -75,26 +98,44 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         let normalizedChannelId = channelId;
         let channel;
 
-        // Try to find the channel with the exact ID first
-        channel = channels.find(ch => ch.tvgId === channelId);
+        logger.info(`Looking for channel with ID: "${channelId}" among ${channels.length} channels`);
 
-        // If not found, try adding 'channel_' prefix if it's not already there
+        // Try multiple lookup strategies
+        // 1. Try by ID first (most reliable)
+        channel = channels.find(ch => ch.id === channelId);
+        if (channel) {
+            logger.info(`Found channel by ID match`);
+        }
+
+        // 2. If not found, try by tvgId
+        if (!channel) {
+            channel = channels.find(ch => ch.tvgId === channelId);
+        }
+
+        // 3. If not found, try adding 'channel_' prefix
         if (!channel && !channelId.startsWith('channel_')) {
             normalizedChannelId = `channel_${channelId}`;
-            channel = channels.find(ch => ch.tvgId === normalizedChannelId);
-            logger.info(`Channel not found with ID ${channelId}, trying with prefix: ${normalizedChannelId}`);
+            channel = channels.find(ch => ch.id === normalizedChannelId || ch.tvgId === normalizedChannelId);
+            if (channel) {
+                logger.info(`Found channel with prefix: ${normalizedChannelId}`);
+            }
         }
 
-        // If still not found and has 'channel_' prefix, try without it
+        // 4. If still not found and has 'channel_' prefix, try without it
         if (!channel && channelId.startsWith('channel_')) {
             normalizedChannelId = channelId.replace(/^channel_/, '');
-            channel = channels.find(ch => ch.tvgId === normalizedChannelId);
-            logger.info(`Channel not found with ID ${channelId}, trying without prefix: ${normalizedChannelId}`);
+            channel = channels.find(ch => ch.id === normalizedChannelId || ch.tvgId === normalizedChannelId);
+            if (channel) {
+                logger.info(`Found channel without prefix: ${normalizedChannelId}`);
+            }
         }
-        
+
         if (!channel) {
-            logger.error(`Channel not found: ${channelId} in session ${sessionId}`);
-            return res.status(404).json({ error: 'Channel not found' });
+            logger.error(`Channel not found: ${channelId} in session ${sessionId}. Tried ID and tvgId lookups.`);
+            return res.status(404).json({
+                error: 'Channel not found',
+                details: `Could not find channel with ID "${channelId}" in session. Make sure the channel is loaded.`
+            });
         }
         
         if (!channel.url) {

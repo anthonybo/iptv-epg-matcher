@@ -122,9 +122,41 @@ function App() {
     }
   }, [initialized]); // Only depend on initialized state
 
+  // Fetch matched channels from backend
+  const fetchMatchedChannels = async (sid) => {
+    try {
+      console.log(`[App] Fetching matched channels for session: ${sid}`);
+      const response = await apiClient.get(`/epg/${sid}/matched-channels`);
+
+      if (response.data && Array.isArray(response.data.channels)) {
+        // Transform array of matched channels into a map for easy lookup
+        const matchesMap = response.data.channels.reduce((acc, channel) => {
+          // Use both the channel ID and tvgId as keys for flexible matching
+          if (channel.id) {
+            acc[channel.id] = true;
+          }
+          if (channel.tvgId && channel.tvgId !== channel.id) {
+            acc[channel.tvgId] = true;
+          }
+          return acc;
+        }, {});
+
+        console.log(`[App] Loaded ${response.data.channels.length} matched channels`);
+        setMatchedChannels(matchesMap);
+        saveMatchedChannels(matchesMap);
+        return matchesMap;
+      }
+    } catch (error) {
+      console.error('[App] Error fetching matched channels:', error);
+      // Fall back to localStorage on error
+      const savedMatches = JSON.parse(localStorage.getItem('matchedChannels') || '{}');
+      setMatchedChannels(savedMatches);
+    }
+  };
+
   // Load saved matched channels on mount
   useEffect(() => {
-    // Load any previously matched channels
+    // Load any previously matched channels from localStorage initially
     const savedMatches = JSON.parse(localStorage.getItem('matchedChannels') || '{}');
     setMatchedChannels(savedMatches);
   }, []);
@@ -1023,6 +1055,7 @@ function App() {
             onGenerate={handleGenerate}
             isGenerating={isGenerating}
             availableSources={userSources}
+            onBackToChannels={() => setActiveTab('channels')}
           />
         );
       case 'result':
@@ -1217,27 +1250,47 @@ function App() {
     );
   };
 
-  // Ensure categories are loaded when switching to channels tab
+  // Ensure categories and matched channels are loaded when switching tabs
   useEffect(() => {
     // Use a timestamp cache to prevent repeated fetches
     const now = Date.now();
     const lastCategoryFetch = window.lastCategoryFetchTime || 0;
+    const lastMatchesFetch = window.lastMatchesFetchTime || 0;
     const CACHE_LIFETIME = 60000; // 1 minute
-    
-    const loadCategoriesIfNeeded = async () => {
-      if (activeTab === 'channels' && categories.length === 0 && sessionId) {
-        // Only fetch if it's been more than CACHE_LIFETIME since last fetch
-        if (now - lastCategoryFetch > CACHE_LIFETIME) {
-          console.log(`[App] Loading categories for session: ${sessionId} (cache expired)`);
-          window.lastCategoryFetchTime = now;
-          await fetchCategoriesFromApi(sessionId);
-        } else {
-          console.log(`[App] Using cached categories (fetched ${(now - lastCategoryFetch)/1000}s ago)`);
+
+    const loadDataIfNeeded = async () => {
+      if (activeTab === 'channels' && sessionId) {
+        // Load categories if needed
+        if (categories.length === 0) {
+          if (now - lastCategoryFetch > CACHE_LIFETIME) {
+            console.log(`[App] Loading categories for session: ${sessionId} (cache expired)`);
+            window.lastCategoryFetchTime = now;
+            await fetchCategoriesFromApi(sessionId);
+          } else {
+            console.log(`[App] Using cached categories (fetched ${(now - lastCategoryFetch)/1000}s ago)`);
+          }
+        }
+
+        // Always refresh matched channels when switching to channels view
+        // This ensures we have the latest match status
+        if (now - lastMatchesFetch > 5000) { // Refresh if more than 5 seconds since last fetch
+          console.log(`[App] Refreshing matched channels for session: ${sessionId}`);
+          window.lastMatchesFetchTime = now;
+          await fetchMatchedChannels(sessionId);
+        }
+      }
+
+      // Also refresh matched channels when switching to guide view
+      if (activeTab === 'guide' && sessionId) {
+        if (now - lastMatchesFetch > 5000) { // Refresh if more than 5 seconds since last fetch
+          console.log(`[App] Refreshing matched channels for Guide view`);
+          window.lastMatchesFetchTime = now;
+          await fetchMatchedChannels(sessionId);
         }
       }
     };
-    
-    loadCategoriesIfNeeded();
+
+    loadDataIfNeeded();
   }, [activeTab, categories.length, sessionId]);
 
   // Server Status Button component

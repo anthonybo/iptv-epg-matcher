@@ -14,6 +14,7 @@ import FeedSelector from './components/FeedSelector/FeedSelector';
  * @param {Function} props.onGenerate Callback to generate credentials
  * @param {boolean} props.isGenerating Flag indicating if generation is in progress
  * @param {Array} props.availableSources Array of available IPTV sources
+ * @param {Function} props.onBackToChannels Callback to return to channels view
  * @returns {JSX.Element} Player view UI
  */
 const PlayerView = ({
@@ -23,7 +24,8 @@ const PlayerView = ({
   matchedChannels = {},
   onGenerate,
   isGenerating = false,
-  availableSources = []
+  availableSources = [],
+  onBackToChannels
 }) => {
   const [playerType, setPlayerType] = useState('mpegts-player');
   const [currentChannel, setCurrentChannel] = useState(selectedChannel);
@@ -44,24 +46,24 @@ const PlayerView = ({
       setCurrentFeedUrl(selectedChannel.url);
       setSelectedFeed(null); // Reset feed selection when channel changes
 
-      // Look up source name from availableSources if sourceId is available
-      if (selectedChannel.sourceId && availableSources.length > 0) {
-        console.log('[PlayerView] Looking up source info for sourceId:', selectedChannel.sourceId);
-        const source = availableSources.find(s => s.id === selectedChannel.sourceId);
-        console.log('[PlayerView] Found source:', source);
-        if (source) {
-          const displayName = source.nickname || source.name || source.url;
-          console.log('[PlayerView] Setting source name:', displayName);
-          setSourceName(displayName);
-        } else {
-          console.log('[PlayerView] Source not found in available sources');
-          setSourceName(null);
-        }
+      // Set source name from channel data (comes from backend now)
+      console.log('[PlayerView] Channel changed:', {
+        channelName: selectedChannel.name,
+        sourceId: selectedChannel.sourceId,
+        sourceName: selectedChannel.sourceName
+      });
+
+      if (selectedChannel.sourceName) {
+        // Use source name from the channel data (includes the actual IPTV source name)
+        console.log('[PlayerView] Using source name from channel:', selectedChannel.sourceName);
+        setSourceName(selectedChannel.sourceName);
+      } else if (selectedChannel.sourceId) {
+        // Fallback to sourceId if no source name provided
+        const fallbackName = `Source ${selectedChannel.sourceId}`;
+        console.log('[PlayerView] No sourceName in channel, using fallback:', fallbackName);
+        setSourceName(fallbackName);
       } else {
-        console.log('[PlayerView] No sourceId on channel or no sources available:', {
-          hasSourceId: !!selectedChannel.sourceId,
-          sourcesCount: availableSources.length
-        });
+        console.log('[PlayerView] No source information available');
         setSourceName(null);
       }
 
@@ -101,32 +103,62 @@ const PlayerView = ({
     setSelectedFeed(feed);
     setCurrentFeedUrl(feed.url);
 
+    // Update source name from the selected feed
+    const displayName = feed.source.nickname || feed.source.name;
+    console.log('[PlayerView] Updating source name to:', displayName);
+    setSourceName(displayName);
+
     // Update currentChannel with new URL for the player
     setCurrentChannel(prev => ({
       ...prev,
       url: feed.url,
-      source: feed.source
+      source: feed.source,
+      sourceId: feed.source.id
     }));
   };
 
   const hasMatches = Object.keys(matchedChannels).length > 0;
 
+  console.log('[PlayerView] Rendering with sourceName:', sourceName);
+
   return (
     <div className="space-y-6 px-6 py-8">
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-3xl font-semibold text-slate-100">Video Preview</h2>
-          <p className="text-sm text-slate-400">Preview live streams and match them with accurate EPG entries.</p>
+        <div className="flex items-center gap-3">
+          {onBackToChannels && (
+            <button
+              onClick={onBackToChannels}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-slate-800 hover:text-slate-100"
+              title="Back to Channels"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"></line>
+                <polyline points="12 19 5 12 12 5"></polyline>
+              </svg>
+              Back to Channels
+            </button>
+          )}
+          <div>
+            <h2 className="text-3xl font-semibold text-slate-100">Video Preview</h2>
+            <p className="text-sm text-slate-400">Preview live streams and match them with accurate EPG entries.</p>
+          </div>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-slate-800/70 bg-slate-900/70 px-3 py-1 text-xs text-slate-400">
+        <div className="flex items-center gap-2 rounded-full border border-slate-800/70 bg-slate-900/70 px-4 py-2 text-xs">
           <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
           {currentChannel ? (
-            <span>
-              Now playing: {currentChannel.name}
-              {sourceName && <span className="ml-1 text-slate-500">({sourceName})</span>}
-            </span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-slate-400">Now playing:</span>
+              <span className="font-medium text-slate-100">{currentChannel.name}</span>
+              <span className="text-slate-600">•</span>
+              <span className="inline-flex items-center gap-1.5 rounded-md bg-blue-500/20 px-2.5 py-1 text-blue-200 border-2 border-blue-500/40 font-semibold text-sm">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                </svg>
+                <span>{sourceName || 'Unknown Source'}</span>
+              </span>
+            </div>
           ) : (
-            'No channel selected'
+            <span className="text-slate-400">No channel selected</span>
           )}
         </div>
       </header>

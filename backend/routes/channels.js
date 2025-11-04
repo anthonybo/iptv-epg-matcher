@@ -6,12 +6,13 @@ const router = express.Router();
 const logger = require('../config/logger');
 const sessionStorage = require('../utils/sessionStorage');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
+const { authMiddleware } = require('../middleware/authMiddleware');
 
 /**
  * GET /api/channels/:sessionId
  * Gets paginated channels, optionally filtered by category
  */
-router.get('/:sessionId', async (req, res) => {
+router.get('/:sessionId', authMiddleware, async (req, res) => {
   try {
     // Get session ID from path parameter or query parameter
     let sessionId = req.params.sessionId;
@@ -46,13 +47,15 @@ router.get('/:sessionId', async (req, res) => {
 
     // Try to get channels from IPTV database first
     try {
-      logger.info(`Fetching channels from IPTV database for session ${sessionId}`);
+      const userId = req.user?.id || null;
+      logger.info(`Fetching channels from IPTV database for session ${sessionId}, user ${userId}`);
       const result = await iptvDatabaseService.getChannelsForSession(sessionId, {
         page,
         limit,
         categoryId: category,
         sourceId,
-        search: searchTerm
+        search: searchTerm,
+        userId
       });
 
       if (result && result.channels) {
@@ -62,6 +65,8 @@ router.get('/:sessionId', async (req, res) => {
         const transformedChannels = result.channels.map(ch => ({
           id: ch.id,
           sourceId: ch.sourceId,
+          sourceName: ch.sourceName,
+          sourceType: ch.sourceType,
           tvgId: ch.tvg?.id || ch.id,
           name: ch.name,
           groupTitle: ch.group?.title || '',
@@ -69,6 +74,16 @@ router.get('/:sessionId', async (req, res) => {
           url: ch.url,
           categories: ch.categories || []
         }));
+
+        // Debug: Log channel IDs for NHL network searches
+        if (searchTerm && searchTerm.toLowerCase().includes('nhl')) {
+          logger.info(`NHL search results - returning ${transformedChannels.length} channels with IDs: ${JSON.stringify(transformedChannels.map(ch => ({
+            id: ch.id,
+            tvgId: ch.tvgId,
+            name: ch.name,
+            sourceId: ch.sourceId
+          })), null, 2)}`);
+        }
 
         return res.json({
           channels: transformedChannels,

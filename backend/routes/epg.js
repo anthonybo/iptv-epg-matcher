@@ -1269,11 +1269,32 @@ router.post('/:sessionId/match', async (req, res) => {
         logger.info(`Deleted old matches for user ${userId}, channel ${m3uChannel.id}`);
       }
 
+      // Get source_id from the IPTV channel
+      let iptvSourceId = null;
+      if (m3uChannel.id) {
+        try {
+          const sourceResult = await new Promise((resolve, reject) => {
+            iptvDb.get(`
+              SELECT source_id FROM iptv_channels WHERE channel_id = ?
+            `, [m3uChannel.id], (err, row) => {
+              if (err) reject(err);
+              else resolve(row);
+            });
+          });
+          iptvSourceId = sourceResult?.source_id || null;
+          if (iptvSourceId) {
+            logger.info(`Found source_id ${iptvSourceId} for channel ${m3uChannel.id}`);
+          }
+        } catch (sourceErr) {
+          logger.warn(`Could not get source_id for channel ${m3uChannel.id}: ${sourceErr.message}`);
+        }
+      }
+
       await new Promise((resolve, reject) => {
         iptvDb.run(`
           INSERT OR REPLACE INTO epg_matches
-          (session_id, user_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          (session_id, user_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, iptv_source_id, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         `, [
           sessionId,
           userId || null,
@@ -1282,7 +1303,8 @@ router.post('/:sessionId/match', async (req, res) => {
           epgChannel.id,
           epgChannel.name,
           epgChannel.source_name || 'Unknown',
-          epgChannel.source_id || ''
+          epgChannel.source_id || '',
+          iptvSourceId
         ], (err) => {
           if (err) reject(err);
           else resolve();
@@ -1305,6 +1327,54 @@ router.post('/:sessionId/match', async (req, res) => {
     logger.error(`Error matching channels: ${error.message}`);
     return res.status(500).json({
       error: `Failed to match channels: ${error.message}`,
+      success: false
+    });
+  }
+});
+
+/**
+ * DELETE /:sessionId/match/:iptvChannelId
+ * Remove a match for an IPTV channel
+ */
+router.delete('/:sessionId/match/:iptvChannelId', async (req, res) => {
+  try {
+    const { sessionId, iptvChannelId } = req.params;
+    const userId = req.user?.id;
+
+    logger.info(`Deleting match for channel ${iptvChannelId} in session ${sessionId}${userId ? ` (user ${userId})` : ''}`);
+
+    // Delete from database
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    let query, params;
+    if (userId) {
+      // Delete for authenticated user (across all sessions)
+      query = 'DELETE FROM epg_matches WHERE user_id = ? AND iptv_channel_id = ?';
+      params = [userId, iptvChannelId];
+    } else {
+      // Delete for session only
+      query = 'DELETE FROM epg_matches WHERE session_id = ? AND iptv_channel_id = ?';
+      params = [sessionId, iptvChannelId];
+    }
+
+    await new Promise((resolve, reject) => {
+      iptvDb.run(query, params, function(err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      });
+    });
+
+    logger.info(`Deleted match for channel ${iptvChannelId}${userId ? ` (user ${userId})` : ''}`);
+
+    return res.json({
+      success: true,
+      message: 'Match deleted successfully'
+    });
+  } catch (error) {
+    logger.error(`Error deleting match: ${error.message}`);
+    return res.status(500).json({
+      error: `Failed to delete match: ${error.message}`,
       success: false
     });
   }
@@ -1339,7 +1409,8 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           epg_channel_id,
           epg_channel_name,
           epg_source_name,
-          epg_source_id
+          epg_source_id,
+          iptv_source_id
         FROM epg_matches
         WHERE user_id = ? OR session_id = ?
         ORDER BY iptv_channel_name
@@ -1353,7 +1424,8 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           epg_channel_id,
           epg_channel_name,
           epg_source_name,
-          epg_source_id
+          epg_source_id,
+          iptv_source_id
         FROM epg_matches
         WHERE session_id = ?
         ORDER BY iptv_channel_name
@@ -1396,20 +1468,146 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           continue;
         }
 
-        // Get full IPTV channel info from IPTV database
+        // Get full IPTV channel info from IPTV database, including source info
         let iptvChannelData = null;
+        let iptvSourceInfo = null;
         try {
+          logger.info(`Looking for IPTV channel with ID: ${iptvChannelId}`);
+
           const iptvChannel = await new Promise((resolve, reject) => {
             iptvDb.all(`
-              SELECT channel_id, name, logo, url, group_title, epg_channel_id
-              FROM iptv_channels
-              WHERE channel_id = ?
+              SELECT c.channel_id, c.name, c.logo, c.url, c.group_title, c.epg_channel_id, c.source_id,
+                     CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
+                     s.url as source_url,
+                     s.type as source_type
+              FROM iptv_channels c
+              LEFT JOIN iptv_sources s ON c.source_id = s.id
+              WHERE c.channel_id = ?
             `, [iptvChannelId], (err, rows) => {
               if (err) reject(err);
               else resolve(rows && rows.length > 0 ? rows[0] : null);
             });
           });
           iptvChannelData = iptvChannel;
+
+          if (!iptvChannelData) {
+            logger.warn(`No IPTV channel found for ID: ${iptvChannelId}`);
+
+            // Use stored source_id from match as fallback
+            if (match.iptv_source_id) {
+              logger.info(`Using stored source_id ${match.iptv_source_id} from match`);
+
+              const sourceInfo = await new Promise((resolve, reject) => {
+                iptvDb.get(`
+                  SELECT id,
+                         CASE WHEN name LIKE 'Legacy IPTV Source%' THEN url ELSE name END as name,
+                         url,
+                         type
+                  FROM iptv_sources
+                  WHERE id = ?
+                `, [match.iptv_source_id], (err, row) => {
+                  if (err) reject(err);
+                  else resolve(row);
+                });
+              });
+
+              if (sourceInfo) {
+                // Get user's nickname if authenticated
+                if (userId) {
+                  const sourcePrefs = await new Promise((resolve, reject) => {
+                    iptvDb.get(`
+                      SELECT nickname FROM user_iptv_preferences
+                      WHERE user_id = ? AND source_id = ?
+                    `, [userId, sourceInfo.id], (err, row) => {
+                      if (err) reject(err);
+                      else resolve(row);
+                    });
+                  });
+
+                  // Determine display name with fallback logic
+                  let displayName = sourcePrefs?.nickname || sourceInfo.name;
+                  if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+                    displayName = sourceInfo.url || `Source ${sourceInfo.id}`;
+                  }
+
+                  iptvSourceInfo = {
+                    id: sourceInfo.id,
+                    name: displayName,
+                    type: sourceInfo.type
+                  };
+                } else {
+                  // Determine display name with fallback logic
+                  let displayName = sourceInfo.name;
+                  if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+                    displayName = sourceInfo.url || `Source ${sourceInfo.id}`;
+                  }
+
+                  iptvSourceInfo = {
+                    id: sourceInfo.id,
+                    name: displayName,
+                    type: sourceInfo.type
+                  };
+                }
+              }
+            }
+          } else {
+            logger.info(`Found IPTV channel: ${iptvChannelData.name}, source_id: ${iptvChannelData.source_id}`);
+          }
+
+          // Get user's nickname for this source if available
+          if (iptvChannel && iptvChannel.source_id && userId) {
+            const sourcePrefs = await new Promise((resolve, reject) => {
+              iptvDb.get(`
+                SELECT nickname FROM user_iptv_preferences
+                WHERE user_id = ? AND source_id = ?
+              `, [userId, iptvChannel.source_id], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+              });
+            });
+
+            // Determine display name with fallback logic
+            let displayName = sourcePrefs?.nickname || iptvChannel.source_name;
+
+            // Fallback: if source name is invalid, extract URL from channel
+            if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+              try {
+                const urlObj = new URL(iptvChannel.url);
+                displayName = `${urlObj.protocol}//${urlObj.host}`;
+                logger.info(`Extracted URL fallback for source ${iptvChannel.source_id}: ${displayName}`);
+              } catch (urlError) {
+                displayName = iptvChannel.source_url || `Source ${iptvChannel.source_id}`;
+                logger.warn(`Failed to extract URL for source ${iptvChannel.source_id}, using: ${displayName}`);
+              }
+            }
+
+            iptvSourceInfo = {
+              id: iptvChannel.source_id,
+              name: displayName,
+              type: iptvChannel.source_type
+            };
+          } else if (iptvChannel && iptvChannel.source_id) {
+            // Determine display name with fallback logic
+            let displayName = iptvChannel.source_name;
+
+            // Fallback: if source name is invalid, extract URL from channel
+            if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+              try {
+                const urlObj = new URL(iptvChannel.url);
+                displayName = `${urlObj.protocol}//${urlObj.host}`;
+                logger.info(`Extracted URL fallback for source ${iptvChannel.source_id}: ${displayName}`);
+              } catch (urlError) {
+                displayName = iptvChannel.source_url || `Source ${iptvChannel.source_id}`;
+                logger.warn(`Failed to extract URL for source ${iptvChannel.source_id}, using: ${displayName}`);
+              }
+            }
+
+            iptvSourceInfo = {
+              id: iptvChannel.source_id,
+              name: displayName,
+              type: iptvChannel.source_type
+            };
+          }
         } catch (dbError) {
           logger.warn(`Could not fetch IPTV channel data for ${iptvChannelId}: ${dbError.message}`);
         }
@@ -1458,6 +1656,7 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           },
           epgId: epgChannelId,
           epgSource: epgSourceName || channelInfo.source_name,
+          iptvSource: iptvSourceInfo,
           programs: formattedPrograms
         });
       } catch (channelError) {
