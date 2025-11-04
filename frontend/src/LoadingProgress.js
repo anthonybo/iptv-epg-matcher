@@ -22,6 +22,7 @@ const LoadingProgress = ({
     const [status, setStatus] = useState('Connecting to server...');
     const [error, setError] = useState(null);
     const [logs, setLogs] = useState([]);
+    const [hasFailed, setHasFailed] = useState(false);
     const eventSourceRef = useRef(null);
     const logsEndRef = useRef(null);
 
@@ -136,6 +137,18 @@ const LoadingProgress = ({
     };
 
     const updateProgress = (data) => {
+        // Check if this is actually an error based on the message or stage
+        const isError = data.stage?.includes('error') ||
+                       data.message?.toLowerCase().includes('error') ||
+                       data.message?.toLowerCase().includes('failed');
+
+        if (isError) {
+            setError(data.message || 'An error occurred during processing');
+            setHasFailed(true);
+            addLog(`Error: ${data.message}`);
+            return;
+        }
+
         const numericProgress =
             data.progress !== undefined
                 ? toNumericProgress(data.progress)
@@ -180,8 +193,9 @@ const LoadingProgress = ({
             case 'error':
                 // Processing error
                 setError(data.message || 'An error occurred during processing');
+                setHasFailed(true);
                 addLog(`Error: ${data.message}`);
-                
+
                 // Close the event source
                 if (eventSourceRef.current) {
                     eventSourceRef.current.close();
@@ -275,15 +289,16 @@ const LoadingProgress = ({
                 </div>
                 <div style={{
                     minWidth: '120px',
-                    background: 'rgba(15, 118, 110, 0.15)',
-                    border: '1px solid rgba(45, 212, 191, 0.35)',
-                    color: '#5eead4',
+                    background: (hasFailed || error) ? 'rgba(220, 38, 38, 0.15)' : 'rgba(15, 118, 110, 0.15)',
+                    border: (hasFailed || error) ? '1px solid rgba(248, 113, 113, 0.45)' : '1px solid rgba(45, 212, 191, 0.35)',
+                    color: (hasFailed || error) ? '#fca5a5' : '#5eead4',
                     padding: '6px 14px',
                     borderRadius: '40px',
                     fontSize: '13px',
+                    fontWeight: '600',
                     textAlign: 'center'
                 }}>
-                    {progress.toFixed(0)}% complete
+                    {(hasFailed || error) ? 'Failed' : `${progress.toFixed(0)}% complete`}
                 </div>
             </header>
 
@@ -306,7 +321,9 @@ const LoadingProgress = ({
                             width: `${progress}%`,
                             height: '100%',
                             borderRadius: '999px',
-                            background: 'linear-gradient(90deg, #22d3ee, #38bdf8)',
+                            background: (hasFailed || error)
+                                ? 'linear-gradient(90deg, #ef4444, #dc2626)'
+                                : 'linear-gradient(90deg, #22d3ee, #38bdf8)',
                             transition: 'width 250ms ease'
                         }}
                     />

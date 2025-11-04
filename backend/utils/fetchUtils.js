@@ -5,7 +5,7 @@ const { STREAM_TIMEOUT } = require('../config/constants');
 
 /**
  * Fetches content from a URL and returns the response
- * 
+ *
  * @param {string} url - URL to fetch
  * @param {Object} options - Fetch options (timeout, headers, etc.)
  * @returns {Promise<Response>} Fetch response
@@ -15,12 +15,47 @@ async function fetchURL(url, options = {}) {
   logger.info(`Fetching URL: ${url}`);
   try {
     const response = await fetch(url, options);
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    if (!response.ok) {
+      // Build a more descriptive error message
+      const statusText = response.statusText || 'Unknown Error';
+      let errorMessage = `HTTP ${response.status}: ${statusText}`;
+
+      // Add additional context for non-standard status codes
+      if (response.status >= 500 && response.status < 600) {
+        errorMessage += ' (Server Error)';
+      }
+
+      // Try to get response body for more details (limit to first 500 chars)
+      try {
+        const body = await response.text();
+        if (body && body.length > 0) {
+          const preview = body.substring(0, 500);
+          logger.error(`Response body preview: ${preview}`);
+          // Don't include the body in the thrown error to avoid exposing sensitive info
+        }
+      } catch (bodyError) {
+        // Ignore if we can't read the body
+      }
+
+      throw new Error(errorMessage);
+    }
     logger.info(`Fetched response from ${url} with status ${response.status}`);
     return response;
   } catch (e) {
-    logger.error(`Fetch failed for ${url}: ${e.message}`);
-    throw e;
+    // Enhance error message for network errors
+    let errorMsg = e.message;
+    if (e.code === 'ENOTFOUND') {
+      errorMsg = `Unable to reach server: ${url} (DNS lookup failed)`;
+    } else if (e.code === 'ECONNREFUSED') {
+      errorMsg = `Connection refused by server: ${url}`;
+    } else if (e.code === 'ETIMEDOUT') {
+      errorMsg = `Request timed out: ${url}`;
+    } else if (e.code === 'CERT_HAS_EXPIRED' || e.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
+      errorMsg = `SSL certificate error for ${url}`;
+    }
+
+    logger.error(`Fetch failed for ${url}: ${errorMsg}`);
+    throw new Error(errorMsg);
   }
 }
 

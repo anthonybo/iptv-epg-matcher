@@ -73,6 +73,22 @@ class IPTVSourcesService {
   }
 
   /**
+   * Update source credentials (URL, username, password)
+   * @param {number} sourceId - Source ID
+   * @param {Object} credentials - { url, username, password }
+   * @returns {Promise<Object>} Response data
+   */
+  async updateSourceCredentials(sourceId, credentials) {
+    try {
+      const response = await apiClient.put(`/iptv/sources/${sourceId}/credentials`, credentials);
+      return response.data;
+    } catch (error) {
+      console.error('Error updating source credentials:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Batch reorder sources (for drag-and-drop)
    * @param {Array<{sourceId: number, priority: number}>} sources - Sources with new priorities
    * @returns {Promise<Object>} Response data

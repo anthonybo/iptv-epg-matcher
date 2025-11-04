@@ -5,11 +5,17 @@ import Configuration from '../../Configuration';
 /**
  * Source card component
  */
-const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo }) => {
+const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo, onEditCredentials }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [nickname, setNickname] = useState(source.nickname || source.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showEditCredentials, setShowEditCredentials] = useState(false);
+  const [credentials, setCredentials] = useState({
+    url: source.url || '',
+    username: source.username || '',
+    password: source.password || ''
+  });
 
   const handleSaveNickname = async () => {
     if (nickname.trim() && nickname !== source.nickname) {
@@ -40,6 +46,15 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
       console.error('Error refreshing account info:', error);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleSaveCredentials = async () => {
+    try {
+      await onEditCredentials(source.id, credentials);
+      setShowEditCredentials(false);
+    } catch (error) {
+      console.error('Error updating credentials:', error);
     }
   };
 
@@ -86,6 +101,18 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
                 )}
+              </button>
+            )}
+            {source.type === 'xtream' && (
+              <button
+                onClick={() => setShowEditCredentials(true)}
+                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-amber-400 transition-opacity"
+                title="Edit credentials"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
               </button>
             )}
             <button
@@ -237,6 +264,101 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
           </>
         )}
       </div>
+
+      {/* Edit Credentials Modal */}
+      {showEditCredentials && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-lg w-full">
+            {/* Modal Header */}
+            <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+              <h3 className="text-xl font-semibold text-slate-100">Edit Credentials</h3>
+              <button
+                onClick={() => setShowEditCredentials(false)}
+                className="text-slate-400 hover:text-slate-200 transition-colors p-1 hover:bg-slate-700 rounded-lg"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSaveCredentials();
+              }}
+              className="p-6 space-y-4"
+            >
+              <div>
+                <label htmlFor={`url-${source.id}`} className="block text-sm font-medium text-slate-300 mb-2">
+                  Server URL
+                </label>
+                <input
+                  id={`url-${source.id}`}
+                  type="url"
+                  name="url"
+                  autoComplete="url"
+                  value={credentials.url}
+                  onChange={(e) => setCredentials({ ...credentials, url: e.target.value })}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+                  placeholder="http://example.com:8080"
+                  required
+                />
+              </div>
+
+              <div>
+                <label htmlFor={`username-${source.id}`} className="block text-sm font-medium text-slate-300 mb-2">
+                  Username
+                </label>
+                <input
+                  id={`username-${source.id}`}
+                  type="text"
+                  name="username"
+                  autoComplete="username"
+                  value={credentials.username}
+                  onChange={(e) => setCredentials({ ...credentials, username: e.target.value })}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+                  placeholder="username"
+                />
+              </div>
+
+              <div>
+                <label htmlFor={`password-${source.id}`} className="block text-sm font-medium text-slate-300 mb-2">
+                  Password
+                </label>
+                <input
+                  id={`password-${source.id}`}
+                  type="password"
+                  name="password"
+                  autoComplete="current-password"
+                  value={credentials.password}
+                  onChange={(e) => setCredentials({ ...credentials, password: e.target.value })}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/60"
+                  placeholder="password"
+                />
+              </div>
+
+              {/* Modal Footer */}
+              <div className="bg-slate-800 px-6 py-4 -mx-6 -mb-6 border-t border-slate-700 flex gap-3 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowEditCredentials(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-700 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-blue-500 hover:bg-blue-600 text-white font-medium transition-colors"
+                >
+                  Save & Refresh
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -324,6 +446,32 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad,
         message: errorMsg
       });
       setTimeout(() => setNotification(null), 5000);
+    }
+  };
+
+  const handleEditCredentials = async (sourceId, credentials) => {
+    try {
+      // Update credentials
+      await iptvSourcesService.updateSourceCredentials(sourceId, credentials);
+
+      // Show success notification
+      setNotification({
+        type: 'success',
+        message: 'Credentials updated successfully! Refreshing channels...'
+      });
+      setTimeout(() => setNotification(null), 5000);
+
+      // Refresh account info to fetch new channels with updated credentials
+      await handleRefreshAccountInfo(sourceId);
+    } catch (err) {
+      console.error('Error updating credentials:', err);
+      const errorMsg = err.response?.data?.error || 'Failed to update credentials';
+      setNotification({
+        type: 'error',
+        message: errorMsg
+      });
+      setTimeout(() => setNotification(null), 5000);
+      throw err; // Re-throw so SourceCard can handle it
     }
   };
 
@@ -444,6 +592,7 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad,
               onDelete={handleDelete}
               onViewChannels={handleViewChannels}
               onRefreshAccountInfo={handleRefreshAccountInfo}
+              onEditCredentials={handleEditCredentials}
             />
           ))}
         </div>

@@ -66,13 +66,18 @@ const AuthWrapper = ({ children }) => {
  * UserBadge Component
  * Shows logged in user info with logout button
  */
-const UserBadge = ({ user }) => {
+const UserBadge = ({ user, onOpenSessionDebugger, onOpenServerStatus }) => {
   const { logout } = useAuth();
   const [showMenu, setShowMenu] = useState(false);
 
   const handleLogout = async () => {
     await logout();
     window.location.reload();
+  };
+
+  const handleMenuItemClick = (callback) => {
+    setShowMenu(false);
+    callback?.();
   };
 
   return (
@@ -97,11 +102,42 @@ const UserBadge = ({ user }) => {
 
       {/* Dropdown Menu */}
       {showMenu && (
-        <div className="absolute right-0 mt-2 w-48 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[100]">
+        <div className="absolute right-0 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[100]">
           <div className="border-b border-slate-800 px-4 py-3">
             <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Signed in as</p>
             <p className="truncate text-sm font-semibold text-slate-100">{user.email}</p>
           </div>
+
+          {/* Debugging Section */}
+          <div className="border-b border-slate-800">
+            <div className="px-4 py-2">
+              <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Debug Tools</p>
+            </div>
+            {onOpenServerStatus && (
+              <button
+                onClick={() => handleMenuItemClick(onOpenServerStatus)}
+                className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-medium text-cyan-300 transition-colors hover:bg-slate-800"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+                </svg>
+                Server Status
+              </button>
+            )}
+            {onOpenSessionDebugger && (
+              <button
+                onClick={() => handleMenuItemClick(onOpenSessionDebugger)}
+                className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-medium text-blue-300 transition-colors hover:bg-slate-800"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Session Debugger
+              </button>
+            )}
+          </div>
+
           <button
             onClick={handleLogout}
             className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-medium text-rose-300 transition-colors hover:bg-slate-800"

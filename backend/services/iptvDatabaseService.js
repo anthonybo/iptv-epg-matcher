@@ -1010,6 +1010,42 @@ const updateSourceNickname = (userId, sourceId, nickname) => {
 };
 
 /**
+ * Update source credentials (URL, username, password)
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @param {Object} credentials - { url, username, password }
+ * @returns {Promise<void>}
+ */
+const updateSourceCredentials = (userId, sourceId, credentials) => {
+    return new Promise((resolve, reject) => {
+        const { url, username, password } = credentials;
+
+        db.run(
+            `UPDATE iptv_sources
+             SET url = ?, username = ?, password = ?, last_updated = CURRENT_TIMESTAMP
+             WHERE id = ? AND id IN (
+                 SELECT source_id FROM user_iptv_preferences WHERE user_id = ?
+             )`,
+            [url, username || null, password || null, sourceId, userId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error updating source credentials: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                if (this.changes === 0) {
+                    reject(new Error('Source not found or user does not have access'));
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
+/**
  * Toggle source active state for a user
  * @param {number} userId - User ID
  * @param {number} sourceId - Source ID
@@ -1163,6 +1199,7 @@ module.exports = {
     createUserIPTVPreference,
     updateSourcePriority,
     updateSourceNickname,
+    updateSourceCredentials,
     toggleSourceActive,
     deleteUserSource,
     getAlternateFeeds

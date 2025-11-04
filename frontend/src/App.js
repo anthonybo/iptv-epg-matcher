@@ -66,6 +66,7 @@ function App() {
   const [userSources, setUserSources] = useState([]);
   const [loadingSources, setLoadingSources] = useState(false);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState(null);
+  const [showServerStatus, setShowServerStatus] = useState(false);
 
   // Check for saved session and validate it on mount
   useEffect(() => {
@@ -1184,12 +1185,18 @@ function App() {
     loadDataIfNeeded();
   }, [activeTab, categories.length, sessionId]);
 
-  // Server Status Button component
-  const ServerStatusButton = ({ onOpenSessionDebugger }) => {
+  // Server Status Modal component
+  const ServerStatusModal = ({ isOpen, onClose }) => {
     const [isChecking, setIsChecking] = useState(false);
     const [statusData, setStatusData] = useState(null);
-    const [showDetails, setShowDetails] = useState(false);
     const [isReloadingEpg, setIsReloadingEpg] = useState(false);
+
+    // Load status when modal opens
+    React.useEffect(() => {
+      if (isOpen && !statusData) {
+        checkServerStatus();
+      }
+    }, [isOpen]);
 
     const forceReloadEpg = async () => {
       if (window.confirm('Force reload EPG sources from the server configuration? This will add all configured EPG sources to your session.')) {
@@ -1271,75 +1278,102 @@ function App() {
         .join(', ');
     };
 
-    return (
-      <div className="fixed bottom-3 right-3 z-50 text-xs">
-        {statusData && showDetails && (
-          <div className="absolute bottom-12 right-0 w-72 space-y-3 rounded-2xl border border-slate-800 bg-slate-950/95 p-4 text-slate-200 shadow-xl shadow-slate-950/40">
-            <div className="flex items-center justify-between text-sm font-semibold text-slate-100">
-              <span>Server Status</span>
-              <button
-                type="button"
-                onClick={() => setShowDetails(false)}
-                className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-400 transition hover:bg-slate-800 hover:text-slate-100"
-              >
-                ×
-              </button>
-            </div>
-            <dl className="space-y-1 text-slate-300">
-              <div className="flex justify-between"><dt>Uptime</dt><dd>{Math.floor(statusData.uptime / 60)} minutes</dd></div>
-              <div className="flex justify-between"><dt>Memory</dt><dd className="text-right">{formatMemory(statusData.memory)}</dd></div>
-              <div className="flex justify-between"><dt>Sessions</dt><dd>{statusData.sessions.count}</dd></div>
-              {statusData.sessions.oldest && (
-                <div className="flex justify-between"><dt>Oldest</dt><dd>{new Date(statusData.sessions.oldest.lastAccessed).toLocaleTimeString()}</dd></div>
-              )}
-            </dl>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={triggerCleanup}
-                disabled={isChecking}
-                className="flex-1 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isChecking ? 'Working…' : 'Cleanup Sessions'}
-              </button>
-              <button
-                type="button"
-                onClick={forceReloadEpg}
-                disabled={isReloadingEpg}
-                className="flex-1 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-[11px] font-semibold text-sky-200 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isReloadingEpg ? 'Loading…' : 'Force Reload EPG'}
-              </button>
-            </div>
-            <div className="text-[10px] text-slate-500">
-              Last checked: {new Date(statusData.timestamp).toLocaleTimeString()}
-            </div>
-          </div>
-        )}
+    if (!isOpen) return null;
 
-        <div className="flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              if (statusData && !showDetails) {
-                setShowDetails(true);
-              } else {
-                checkServerStatus();
-                setShowDetails(true);
-              }
-            }}
-            disabled={isChecking}
-            className="rounded-xl bg-cyan-600 px-3 py-2 text-[11px] font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {isChecking ? 'Checking…' : statusData ? 'Status ●' : 'Status'}
-          </button>
-          <button
-            type="button"
-            onClick={onOpenSessionDebugger}
-            className="rounded-xl bg-blue-600 px-3 py-2 text-[11px] font-semibold text-white shadow-lg shadow-blue-900/30 transition hover:bg-blue-500"
-          >
-            Session Debugger
-          </button>
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+        <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-lg w-full">
+          {/* Modal Header */}
+          <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+            <h3 className="text-xl font-semibold text-slate-100">Server Status</h3>
+            <button
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-200 transition-colors p-1 hover:bg-slate-700 rounded-lg"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Modal Content */}
+          <div className="p-6">
+            {isChecking && !statusData ? (
+              <div className="flex items-center justify-center py-12">
+                <div className="text-center">
+                  <div className="inline-block w-8 h-8 border-2 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mb-3"></div>
+                  <p className="text-sm text-slate-400">Checking server status...</p>
+                </div>
+              </div>
+            ) : statusData ? (
+              <div className="space-y-4">
+                <dl className="space-y-3 text-slate-300">
+                  <div className="flex justify-between border-b border-slate-800 pb-2">
+                    <dt className="font-medium text-slate-400">Uptime</dt>
+                    <dd className="text-slate-100">{Math.floor(statusData.uptime / 60)} minutes</dd>
+                  </div>
+                  <div className="flex justify-between border-b border-slate-800 pb-2">
+                    <dt className="font-medium text-slate-400">Memory</dt>
+                    <dd className="text-right text-slate-100 text-sm">{formatMemory(statusData.memory)}</dd>
+                  </div>
+                  <div className="flex justify-between border-b border-slate-800 pb-2">
+                    <dt className="font-medium text-slate-400">Sessions</dt>
+                    <dd className="text-slate-100">{statusData.sessions.count}</dd>
+                  </div>
+                  {statusData.sessions.oldest && (
+                    <div className="flex justify-between border-b border-slate-800 pb-2">
+                      <dt className="font-medium text-slate-400">Oldest Session</dt>
+                      <dd className="text-slate-100">{new Date(statusData.sessions.oldest.lastAccessed).toLocaleTimeString()}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                <div className="flex gap-2 pt-4">
+                  <button
+                    type="button"
+                    onClick={triggerCleanup}
+                    disabled={isChecking}
+                    className="flex-1 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-2.5 text-sm font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isChecking ? 'Working…' : 'Cleanup Sessions'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={forceReloadEpg}
+                    disabled={isReloadingEpg}
+                    className="flex-1 rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-2.5 text-sm font-semibold text-sky-200 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isReloadingEpg ? 'Loading…' : 'Force Reload EPG'}
+                  </button>
+                </div>
+
+                <div className="text-xs text-slate-500 text-center pt-2">
+                  Last checked: {new Date(statusData.timestamp).toLocaleTimeString()}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-slate-400">
+                Failed to load server status
+              </div>
+            )}
+          </div>
+
+          {/* Modal Footer */}
+          <div className="bg-slate-800 px-6 py-4 border-t border-slate-700 flex gap-3 justify-end">
+            <button
+              onClick={checkServerStatus}
+              disabled={isChecking}
+              className="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white font-medium transition-colors disabled:opacity-60"
+            >
+              {isChecking ? 'Refreshing...' : 'Refresh'}
+            </button>
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-700 transition-colors"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1409,7 +1443,11 @@ function App() {
           )}
 
           {authIsAuthenticated && user && (
-            <UserBadge user={user} />
+            <UserBadge
+              user={user}
+              onOpenSessionDebugger={() => setSessionDebuggerOpen(true)}
+              onOpenServerStatus={() => setShowServerStatus(true)}
+            />
           )}
         </div>
       </header>
@@ -1437,7 +1475,13 @@ function App() {
         onClose={() => setSessionDebuggerOpen(false)}
       />
 
-      <ServerStatusButton onOpenSessionDebugger={() => setSessionDebuggerOpen(true)} />
+      {/* Server Status Modal */}
+      {showServerStatus && (
+        <ServerStatusModal
+          isOpen={showServerStatus}
+          onClose={() => setShowServerStatus(false)}
+        />
+      )}
     </div>
   );
 }

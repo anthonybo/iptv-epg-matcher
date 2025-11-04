@@ -148,13 +148,10 @@ const processWithDetailedUpdates = async (sessionId, options) => {
       logger.error('No Xtream credentials provided');
       broadcastSSEUpdate({
         type: 'error',
-        message: 'Failed to load channels: No IPTV credentials provided',
+        message: 'No IPTV credentials provided',
         stage: 'channel_error',
-        progress: 25,
         sessionId
       }, sessionId);
-
-      sendProgressUpdate(sessionId, 'error', 100, 'No IPTV credentials provided');
       return;
     }
   } catch (error) {
@@ -163,13 +160,10 @@ const processWithDetailedUpdates = async (sessionId, options) => {
     // Provide clear error feedback to the user
     broadcastSSEUpdate({
       type: 'error',
-      message: `Failed to load channels: ${error.message}`,
+      message: `Error loading channels: ${error.message}`,
       stage: 'channel_error',
-      progress: 25,
       sessionId
     }, sessionId);
-
-    sendProgressUpdate(sessionId, 'error', 100, `Error loading channels: ${error.message}`);
     return;
   }
 };
@@ -406,13 +400,20 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
  */
 const sendProgressUpdate = (sessionId, stage, progress, message) => {
   if (!sessionId) return;
-  
+
   logger.debug(`Progress update [${sessionId}]: ${stage} - ${progress}% - ${message}`);
-  
+
   try {
+    // Determine event type based on stage
+    const eventType = stage === 'error' || stage === 'fetch_error' || stage === 'channel_error' || stage === 'cache_error'
+      ? 'error'
+      : stage === 'complete'
+        ? 'complete'
+        : 'progress';
+
     // Make sure we have app available from the global context
     const app = global.app;
-    
+
     // First try the direct app.locals approach if available
     if (app && app.locals && app.locals.sessions && app.locals.sessions[sessionId]) {
       const session = app.locals.sessions[sessionId];
@@ -420,24 +421,28 @@ const sendProgressUpdate = (sessionId, stage, progress, message) => {
         session.clients.forEach(client => {
           if (!client.res.writableEnded) {
             const data = JSON.stringify({
-              type: 'progress',
+              type: eventType,
               stage,
               message,
               percentage: progress,
               timestamp: new Date().toISOString(),
               sessionId
             });
+            // Send with named event type for error and complete events
+            if (eventType !== 'progress') {
+              client.res.write(`event: ${eventType}\n`);
+            }
             client.res.write(`data: ${data}\n\n`);
           }
         });
-        logger.debug(`Direct SSE update sent to ${session.clients.length} clients`);
+        logger.debug(`Direct SSE update (${eventType}) sent to ${session.clients.length} clients`);
         return;
       }
     }
-    
+
     // Fall back to the broadcastSSEUpdate function
     broadcastSSEUpdate({
-      type: 'progress',
+      type: eventType,
       stage,
       message,
       percentage: progress,

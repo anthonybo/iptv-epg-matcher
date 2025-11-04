@@ -117,6 +117,11 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
                 client.send(data.type, data);
               } else if (client.res && !client.res.writableEnded) {
                 const dataString = JSON.stringify(data);
+                const eventType = data.type || 'message';
+                // Send event type for named events (error, complete, etc.)
+                if (eventType !== 'message' && eventType !== 'progress') {
+                  client.res.write(`event: ${eventType}\n`);
+                }
                 client.res.write(`data: ${dataString}\n\n`);
               }
             } catch (clientError) {

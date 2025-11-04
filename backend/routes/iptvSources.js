@@ -128,6 +128,43 @@ router.put('/sources/:sourceId/nickname', requireAuth, async (req, res) => {
 });
 
 /**
+ * PUT /api/iptv/sources/:sourceId/credentials
+ * Update source credentials (URL, username, password)
+ */
+router.put('/sources/:sourceId/credentials', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const sourceId = parseInt(req.params.sourceId);
+        const { url, username, password } = req.body;
+
+        if (!url) {
+            return res.status(400).json({
+                success: false,
+                error: 'URL is required'
+            });
+        }
+
+        // Update credentials in database
+        await iptvDatabaseService.updateSourceCredentials(userId, sourceId, {
+            url,
+            username,
+            password
+        });
+
+        res.json({
+            success: true,
+            message: 'Source credentials updated successfully'
+        });
+    } catch (error) {
+        logger.error(`Error updating source credentials: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update source credentials'
+        });
+    }
+});
+
+/**
  * PUT /api/iptv/sources/reorder
  * Batch update priorities for multiple sources (for drag-and-drop reordering)
  */
