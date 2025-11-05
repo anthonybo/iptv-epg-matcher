@@ -3,6 +3,7 @@ import { useChannels } from './hooks/useChannels';
 import CategorySidebar from './CategorySidebar';
 import ChannelGrid from './ChannelGrid';
 import ChannelCard from './ChannelCard';
+import ChannelTable from './ChannelTable';
 
 /**
  * ChannelsView - Main view for browsing and filtering channels
@@ -16,7 +17,17 @@ import ChannelCard from './ChannelCard';
  */
 const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChannels = {}, sourceFilter = null, availableSources = [], onSourceChange }) => {
   const [showSourceMenu, setShowSourceMenu] = React.useState(false);
+  const [viewMode, setViewMode] = React.useState(() => {
+    // Load view preference from localStorage
+    return localStorage.getItem('channelsViewMode') || 'table';
+  });
   const sourceMenuRef = React.useRef(null);
+
+  // Save view mode preference to localStorage
+  const handleViewModeChange = (mode) => {
+    setViewMode(mode);
+    localStorage.setItem('channelsViewMode', mode);
+  };
 
   // Close dropdown when clicking outside
   React.useEffect(() => {
@@ -183,50 +194,113 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
               </div>
             </div>
 
-            {/* Search box */}
-            <div className="relative w-80">
-              <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-                <svg className="h-5 w-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-              </div>
-              <input
-                type="text"
-                placeholder="Search channels..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="block w-full rounded-lg border border-slate-800/80 bg-slate-900/70 py-2 pl-10 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-              />
-              {searchTerm && (
+            {/* View Toggle and Search */}
+            <div className="flex items-center gap-3">
+              {/* View Mode Toggle */}
+              <div className="flex items-center rounded-lg border border-slate-800/80 bg-slate-900/70 p-1">
                 <button
-                  onClick={() => setSearchTerm('')}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500 transition-colors hover:text-slate-200"
+                  onClick={() => handleViewModeChange('grid')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                    viewMode === 'grid'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Grid view"
                 >
-                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
                   </svg>
+                  Grid
                 </button>
-              )}
+                <button
+                  onClick={() => handleViewModeChange('table')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                    viewMode === 'table'
+                      ? 'bg-blue-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Table view"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                  </svg>
+                  Table
+                </button>
+              </div>
+
+              {/* Search box */}
+              <div className="relative w-80">
+                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                  <svg className="h-5 w-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+                <input
+                  type="text"
+                  placeholder="Search channels..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="block w-full rounded-lg border border-slate-800/80 bg-slate-900/70 py-2 pl-10 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                />
+                {searchTerm && (
+                  <button
+                    onClick={() => setSearchTerm('')}
+                    className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500 transition-colors hover:text-slate-200"
+                  >
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Channel Grid Area */}
-        <div className="flex-1 overflow-auto px-6 py-4">
-          <ChannelGrid
-            channels={channels}
-            loading={loading}
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            ChannelCard={(props) => (
-              <ChannelCard
-                {...props}
-                onClick={() => onChannelSelect && onChannelSelect(props.channel)}
-                isSelected={selectedChannel?.id === props.channel.id}
-                isMatched={matchedChannels[props.channel.id] || matchedChannels[props.channel.tvgId]}
+        {/* Channel Display Area */}
+        <div className="flex-1 overflow-hidden">
+          {viewMode === 'grid' ? (
+            <div className="h-full overflow-auto px-6 py-4">
+              <ChannelGrid
+                channels={channels}
+                loading={loading}
+                hasMore={hasMore}
+                onLoadMore={loadMore}
+                ChannelCard={(props) => (
+                  <ChannelCard
+                    {...props}
+                    onClick={() => onChannelSelect && onChannelSelect(props.channel)}
+                    isSelected={selectedChannel?.id === props.channel.id}
+                    isMatched={matchedChannels[props.channel.id] || matchedChannels[props.channel.tvgId]}
+                  />
+                )}
               />
-            )}
-          />
+            </div>
+          ) : (
+            <div className="h-full px-6 py-4">
+              <ChannelTable
+                channels={channels}
+                loading={loading}
+                hasMore={hasMore}
+                onLoadMore={loadMore}
+                onChannelClick={onChannelSelect}
+                selectedChannel={selectedChannel}
+                matchedChannels={matchedChannels}
+                onEdit={(channel) => {
+                  console.log('Edit channel:', channel);
+                  // TODO: Implement edit functionality
+                }}
+                onDelete={(channel) => {
+                  console.log('Delete channel:', channel);
+                  // TODO: Implement delete functionality
+                }}
+                onPlay={(channel) => {
+                  console.log('Play channel:', channel);
+                  // TODO: Implement play functionality
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>
