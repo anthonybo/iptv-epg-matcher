@@ -16,7 +16,11 @@ const IPTVPlayer = ({
   sessionId,
   selectedChannel,
   playbackMethod = 'mpegts-player',
-  matchedChannels = {}
+  matchedChannels = {},
+  theatreMode = false,
+  showChannelInfo: externalShowChannelInfo,
+  showEpgInfo: externalShowEpgInfo,
+  showDebug: externalShowDebug
 }) => {
   // Helper to get channel ID from either 'id' or 'tvgId' field
   const getChannelId = () => selectedChannel?.id || selectedChannel?.tvgId;
@@ -24,14 +28,19 @@ const IPTVPlayer = ({
   // Helper to get group title from either 'groupTitle' or 'group.title' field
   const getGroupTitle = () => selectedChannel?.groupTitle || selectedChannel?.group?.title || '';
 
-  // State
+  // State - use external state in theatre mode, internal state otherwise
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState([]);
-  const [showDebug, setShowDebug] = useState(false);
-  const [showChannelInfo, setShowChannelInfo] = useState(false);
-  const [showEpgInfo, setShowEpgInfo] = useState(false);
+  const [internalShowDebug, setInternalShowDebug] = useState(false);
+  const [internalShowChannelInfo, setInternalShowChannelInfo] = useState(false);
+  const [internalShowEpgInfo, setInternalShowEpgInfo] = useState(false);
   const [epgData, setEpgData] = useState(null);
+
+  // Use external state in theatre mode, internal state otherwise
+  const showDebug = theatreMode && externalShowDebug !== undefined ? externalShowDebug : internalShowDebug;
+  const showChannelInfo = theatreMode && externalShowChannelInfo !== undefined ? externalShowChannelInfo : internalShowChannelInfo;
+  const showEpgInfo = theatreMode && externalShowEpgInfo !== undefined ? externalShowEpgInfo : internalShowEpgInfo;
   
   // Refs
   const containerRef = useRef(null);
@@ -58,6 +67,7 @@ const IPTVPlayer = ({
   // Initialize component
   useEffect(() => {
     log('info', 'IPTVPlayer component mounting');
+    console.log('[IPTVPlayer] Theatre mode prop:', theatreMode);
 
     // Load required scripts
     loadScripts();
@@ -69,6 +79,11 @@ const IPTVPlayer = ({
       cleanupPlayer();
     };
   }, []);
+
+  // Debug theatre mode changes
+  useEffect(() => {
+    console.log('[IPTVPlayer] Theatre mode changed:', theatreMode);
+  }, [theatreMode]);
 
   // Try to load EPG data when channel changes
   useEffect(() => {
@@ -286,6 +301,8 @@ const IPTVPlayer = ({
         width: '100%',
         height: '100%',
         autoPlay: true,
+        hideMediaControl: theatreMode, // Hide controls in theatre mode
+        disableVideoTagContextMenu: theatreMode,
         hlsjsConfig: {
           enableWorker: true,
           lowLatencyMode: true,
@@ -397,7 +414,7 @@ const IPTVPlayer = ({
       videoEl.id = 'mpegts-video';
       videoEl.style.width = '100%';
       videoEl.style.height = '100%';
-      videoEl.controls = true;
+      videoEl.controls = !theatreMode; // Hide controls in theatre mode
       containerRef.current.appendChild(videoEl);
       
       if (window.mpegts.getFeatureList().mseLivePlayback) {
@@ -557,7 +574,7 @@ const IPTVPlayer = ({
     const videoEl = document.createElement('video');
     videoEl.style.width = '100%';
     videoEl.style.height = '100%';
-    videoEl.controls = true;
+    videoEl.controls = !theatreMode; // Hide controls in theatre mode
     videoEl.src = testUrl;
     containerRef.current.appendChild(videoEl);
     
@@ -580,17 +597,17 @@ const IPTVPlayer = ({
 
   // Toggle debug panel
   const toggleDebug = () => {
-    setShowDebug(prev => !prev);
+    setInternalShowDebug(prev => !prev);
   };
 
   // Toggle channel info overlay
   const toggleChannelInfo = () => {
-    setShowChannelInfo(prev => !prev);
+    setInternalShowChannelInfo(prev => !prev);
   };
-  
+
   // Toggle EPG info overlay
   const toggleEpgInfo = () => {
-    setShowEpgInfo(prev => !prev);
+    setInternalShowEpgInfo(prev => !prev);
   };
 
   // Format time for display
@@ -632,17 +649,17 @@ const formatTime = (date) => {
     }
   };
 
-  return (
-    <div style={{ 
-      position: 'relative', 
-      width: '100%', 
-      height: '400px',
-      backgroundColor: '#000',
-      borderRadius: '8px',
-      overflow: 'hidden',
-      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
-    }}>
-      {/* Control buttons section */}
+  // Render control buttons only in normal mode (not in theatre mode)
+  const renderControlButtons = () => {
+    console.log('[IPTVPlayer] renderControlButtons called, theatreMode:', theatreMode, 'typeof:', typeof theatreMode);
+
+    if (theatreMode === true || theatreMode === 'true') {
+      console.log('[IPTVPlayer] Skipping button render - in theatre mode');
+      return null;
+    }
+
+    console.log('[IPTVPlayer] Rendering control buttons - not in theatre mode');
+    return (
       <div style={{
         position: 'absolute',
         top: '10px',
@@ -672,15 +689,15 @@ const formatTime = (date) => {
           onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(30, 30, 30, 0.8)'}
           onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'}
         >
-          <svg 
-            xmlns="http://www.w3.org/2000/svg" 
-            width="16" 
-            height="16" 
-            viewBox="0 0 24 24" 
-            fill="none" 
-            stroke="currentColor" 
-            strokeWidth="2" 
-            strokeLinecap="round" 
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
             strokeLinejoin="round"
           >
             {showChannelInfo ? (
@@ -700,7 +717,7 @@ const formatTime = (date) => {
             )}
           </svg>
         </button>
-        
+
         {/* Toggle EPG info overlay with indicator for matched channels */}
         <button
           onClick={toggleEpgInfo}
@@ -723,15 +740,15 @@ const formatTime = (date) => {
           onMouseOver={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[getChannelId()] ? 'rgba(0, 180, 60, 0.8)' : 'rgba(30, 30, 30, 0.8)'}
           onMouseOut={(e) => e.currentTarget.style.backgroundColor = selectedChannel && matchedChannels[getChannelId()] ? 'rgba(0, 150, 50, 0.5)' : 'rgba(0, 0, 0, 0.5)'}
         >
-          <svg 
-            xmlns="http://www.w3.org/2000/svg" 
-            width="16" 
-            height="16" 
-            viewBox="0 0 24 24" 
-            fill="none" 
-            stroke="currentColor" 
-            strokeWidth="2" 
-            strokeLinecap="round" 
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
             strokeLinejoin="round"
           >
             {showEpgInfo ? (
@@ -754,7 +771,7 @@ const formatTime = (date) => {
             )}
           </svg>
         </button>
-        
+
         {/* Debug toggle */}
         <button
           onClick={toggleDebug}
@@ -776,23 +793,37 @@ const formatTime = (date) => {
           onMouseOver={(e) => e.currentTarget.style.backgroundColor = 'rgba(30, 30, 30, 0.8)'}
           onMouseOut={(e) => e.currentTarget.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'}
         >
-          <svg 
-            xmlns="http://www.w3.org/2000/svg" 
-            width="16" 
-            height="16" 
-            viewBox="0 0 24 24" 
-            fill="none" 
-            stroke="currentColor" 
-            strokeWidth="2" 
-            strokeLinecap="round" 
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
             strokeLinejoin="round"
           >
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
           </svg>
         </button>
       </div>
-      
-      
+    );
+  };
+
+  return (
+    <div style={{
+      position: 'relative',
+      width: '100%',
+      height: theatreMode ? '100%' : '400px',
+      backgroundColor: '#000',
+      borderRadius: theatreMode ? '0' : '8px',
+      overflow: 'hidden',
+      boxShadow: theatreMode ? 'none' : '0 4px 12px rgba(0, 0, 0, 0.15)'
+    }}>
+      {/* Control buttons section - Only render in normal mode, not in theatre mode */}
+      {renderControlButtons()}
+
       {/* Debug panel */}
       {showDebug && (
         <div style={{

@@ -13,6 +13,7 @@ import ChannelsView from './components/ChannelsView';
 import PlayerView from './PlayerView';
 import ResultView from './ResultView';
 import GuideView from './GuideView';
+import TheatreView from './TheatreView';
 import SessionDebugger from './components/SessionDebugger';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
@@ -67,6 +68,7 @@ function App() {
   const [loadingSources, setLoadingSources] = useState(false);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState(null);
   const [showServerStatus, setShowServerStatus] = useState(false);
+  const [isTheatreMode, setIsTheatreMode] = useState(false);
 
   // Global background loading state (shared across all pages)
   const [backgroundLoadings, setBackgroundLoadings] = useState(new Map());
@@ -945,6 +947,10 @@ function App() {
           </div>
         );
       case 'player':
+        // Don't render PlayerView when in theatre mode to avoid duplicate IPTVPlayer instances
+        if (isTheatreMode) {
+          return null;
+        }
         return (
           <PlayerView
             sessionId={sessionId}
@@ -955,6 +961,8 @@ function App() {
             isGenerating={isGenerating}
             availableSources={userSources}
             onBackToChannels={() => setActiveTab('channels')}
+            onToggleTheatre={() => setIsTheatreMode(!isTheatreMode)}
+            isTheatreMode={isTheatreMode}
           />
         );
       case 'result':
@@ -1392,6 +1400,17 @@ function App() {
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 font-sans text-slate-100">
+      {/* Theatre Mode Overlay */}
+      {isTheatreMode && (
+        <TheatreView
+          sessionId={sessionId}
+          selectedChannel={selectedChannel}
+          matchedChannels={matchedChannels}
+          onEpgMatch={handleEpgMatch}
+          onExitTheatre={() => setIsTheatreMode(false)}
+        />
+      )}
+
       <header className="flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20">
         <div className="flex items-center gap-3">
           <button

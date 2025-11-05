@@ -25,7 +25,9 @@ const PlayerView = ({
   onGenerate,
   isGenerating = false,
   availableSources = [],
-  onBackToChannels
+  onBackToChannels,
+  onToggleTheatre,
+  isTheatreMode = false
 }) => {
   const [playerType, setPlayerType] = useState('mpegts-player');
   const [currentChannel, setCurrentChannel] = useState(selectedChannel);
@@ -204,6 +206,21 @@ const PlayerView = ({
                 </svg>
                 VLC Link
               </button>
+
+              {onToggleTheatre && (
+                <button
+                  type="button"
+                  onClick={onToggleTheatre}
+                  className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/20 px-3 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/30"
+                  title="Open theatre mode"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="7" width="20" height="15" rx="2" ry="2"></rect>
+                    <polyline points="17 2 12 7 7 2"></polyline>
+                  </svg>
+                  Theatre Mode
+                </button>
+              )}
             </div>
             {currentChannel && (
               <FeedSelector

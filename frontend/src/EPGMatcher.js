@@ -13,7 +13,7 @@ import StatusDisplay from './StatusDisplay';
  * @param {Object} props.matchedChannels Current matched channels
  * @returns {JSX.Element} EPGMatcher component
  */
-const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = {} }) => {
+const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = {}, compactMode = false }) => {
     const [session, setSession] = useState(sessionId);
     const [epgSearch, setEpgSearch] = useState("");
     const [searchResults, setSearchResults] = useState([]);
@@ -1021,8 +1021,8 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         const { channel, programs } = epgData;
 
         return (
-            <div className="mt-6 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40">
-                <div className="flex items-center border-b border-slate-800 bg-slate-900/60 p-4">
+            <div className={compactMode ? "flex flex-1 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40" : "mt-6 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40"}>
+                <div className="flex flex-shrink-0 items-center border-b border-slate-800 bg-slate-900/60 p-4">
                     {channel.icon && (
                         <img
                             src={channel.icon}
@@ -1040,7 +1040,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 </div>
 
                 {currentProgram && (
-                    <div className="border-b border-emerald-500/30 bg-emerald-500/10 p-4">
+                    <div className="flex-shrink-0 border-b border-emerald-500/30 bg-emerald-500/10 p-4">
                         <div className="mb-2 flex justify-between">
                             <h4 className="m-0 font-medium text-emerald-100">
                                 {currentProgram.title}
@@ -1061,7 +1061,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 )}
 
                 {programs && programs.length > 0 ? (
-                    <div className="max-h-[300px] overflow-y-auto">
+                    <div className={compactMode ? "flex-1 overflow-y-auto" : "max-h-[300px] overflow-y-auto"}>
                         {programs.map((program, index) => {
                             const isCurrentProgram = currentProgram && program.id === currentProgram.id;
                             if (isCurrentProgram && currentProgram) {
@@ -1106,23 +1106,26 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     };
 
     return (
-        <div className="epg-matcher-container mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl backdrop-blur">
-            {/* Header with toggle buttons */}
-            <div className="mb-4 flex items-center justify-between border-b border-slate-800 pb-3">
-                <h3 className="m-0 text-xl font-semibold text-slate-100">EPG Information</h3>
-            </div>
+        <div className={compactMode ? "epg-matcher-container flex h-full flex-col overflow-hidden p-3" : "epg-matcher-container mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl backdrop-blur"}>
+            {/* Header - Hidden in compact mode */}
+            {!compactMode && (
+                <div className="mb-4 flex items-center justify-between border-b border-slate-800 pb-3">
+                    <h3 className="m-0 text-xl font-semibold text-slate-100">EPG Information</h3>
+                </div>
+            )}
 
             {/* Show program data if available after a match */}
             {epgData && <EpgProgramDisplay />}
 
             {/* Error message */}
             {error && (
-                <div className="mb-6">
+                <div className={compactMode ? "mb-3" : "mb-6"}>
                     <StatusDisplay message={error} type="error" />
                 </div>
             )}
 
-            {/* Search Form */}
+            {/* Search Form - Hidden in compact mode (already watching a channel) */}
+            {!compactMode && (
             <div className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner">
                 <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3">
                     <div className="flex items-center gap-3">
@@ -1175,9 +1178,10 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     )}
                 </form>
             </div>
+            )}
 
-            {/* Search Results */}
-            {searching ? (
+            {/* Search Results - Hidden in compact mode */}
+            {!compactMode && (searching ? (
                 <div className="py-5 text-center">
                     <div className="mb-2 text-2xl">⏳</div>
                     <p className="text-slate-400">Searching EPG data...</p>
@@ -1282,10 +1286,10 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 <div className="mb-6">
                     <StatusDisplay message={searchStatus} type="warning" />
                 </div>
-            ) : null}
+            ) : null)}
 
-            {/* Debug Panel (Collapsible) */}
-            {debugMode && (
+            {/* Debug Panel (Collapsible) - Hidden in compact mode */}
+            {!compactMode && debugMode && (
                 <div className="mb-4 max-h-[200px] overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/60 p-3 font-mono text-xs">
                     <strong className="text-slate-200">Debug Info:</strong>
                     <div className="text-slate-400"><strong className="text-slate-300">Session ID:</strong> {session || 'None'}</div>
