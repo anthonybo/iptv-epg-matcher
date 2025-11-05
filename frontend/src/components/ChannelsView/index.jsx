@@ -4,6 +4,7 @@ import CategorySidebar from './CategorySidebar';
 import ChannelGrid from './ChannelGrid';
 import ChannelCard from './ChannelCard';
 import ChannelTable from './ChannelTable';
+import PiPPlayer from './PiPPlayer';
 
 /**
  * ChannelsView - Main view for browsing and filtering channels
@@ -21,12 +22,22 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     // Load view preference from localStorage
     return localStorage.getItem('channelsViewMode') || 'table';
   });
+  const [pipChannel, setPipChannel] = React.useState(null);
   const sourceMenuRef = React.useRef(null);
 
   // Save view mode preference to localStorage
   const handleViewModeChange = (mode) => {
     setViewMode(mode);
     localStorage.setItem('channelsViewMode', mode);
+  };
+
+  // Handle PiP preview
+  const handlePipPreview = (channel) => {
+    setPipChannel(channel);
+  };
+
+  const handleClosePip = () => {
+    setPipChannel(null);
   };
 
   // Close dropdown when clicking outside
@@ -286,23 +297,21 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
                 onChannelClick={onChannelSelect}
                 selectedChannel={selectedChannel}
                 matchedChannels={matchedChannels}
-                onEdit={(channel) => {
-                  console.log('Edit channel:', channel);
-                  // TODO: Implement edit functionality
-                }}
-                onDelete={(channel) => {
-                  console.log('Delete channel:', channel);
-                  // TODO: Implement delete functionality
-                }}
-                onPlay={(channel) => {
-                  console.log('Play channel:', channel);
-                  // TODO: Implement play functionality
-                }}
+                onPreview={handlePipPreview}
               />
             </div>
           )}
         </div>
       </div>
+
+      {/* PiP Player */}
+      {pipChannel && (
+        <PiPPlayer
+          channel={pipChannel}
+          sessionId={sessionId}
+          onClose={handleClosePip}
+        />
+      )}
     </div>
   );
 };

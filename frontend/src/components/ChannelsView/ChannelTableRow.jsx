@@ -9,9 +9,7 @@ import React, { useState } from 'react';
  * @param {boolean} isMatched - Whether this channel is matched with EPG
  * @param {Function} onToggle - Callback when toggle is clicked
  * @param {Function} onClick - Callback when row is clicked
- * @param {Function} onEdit - Callback when edit button is clicked
- * @param {Function} onDelete - Callback when delete button is clicked
- * @param {Function} onPlay - Callback when play button is clicked
+ * @param {Function} onPreview - Callback when preview button is clicked
  */
 const ChannelTableRow = ({
   channel,
@@ -21,9 +19,7 @@ const ChannelTableRow = ({
   isMatched,
   onToggle,
   onClick,
-  onEdit,
-  onDelete,
-  onPlay
+  onPreview
 }) => {
   const [imageError, setImageError] = useState(false);
 
@@ -144,42 +140,28 @@ const ChannelTableRow = ({
       {/* Actions */}
       <td className="px-4 py-3">
         <div className="flex items-center justify-end gap-1.5">
-          {/* Edit */}
+          {/* PiP Preview */}
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onEdit && onEdit(channel);
+              onPreview && onPreview(channel);
             }}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors"
-            title="Edit channel"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-purple-400 hover:bg-purple-500/10 transition-colors"
+            title="Preview in PiP"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
           </button>
 
-          {/* Delete */}
+          {/* Go to Player */}
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onDelete && onDelete(channel);
+              onClick && onClick(channel);
             }}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            title="Delete channel"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-          </button>
-
-          {/* Play */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onPlay && onPlay(channel);
-            }}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-green-400 hover:bg-green-500/10 transition-colors"
-            title="Play channel"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
+            title="Open in Player"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />

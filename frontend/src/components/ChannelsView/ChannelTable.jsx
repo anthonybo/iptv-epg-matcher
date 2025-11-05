@@ -37,9 +37,7 @@ const TableRowSkeleton = () => (
  * @param {Function} onChannelClick - Callback when a channel is clicked
  * @param {object} selectedChannel - Currently selected/active channel
  * @param {object} matchedChannels - Matched channel data
- * @param {Function} onEdit - Callback when edit button is clicked
- * @param {Function} onDelete - Callback when delete button is clicked
- * @param {Function} onPlay - Callback when play button is clicked
+ * @param {Function} onPreview - Callback when preview button is clicked
  */
 const ChannelTable = ({
   channels,
@@ -49,9 +47,7 @@ const ChannelTable = ({
   onChannelClick,
   selectedChannel,
   matchedChannels = {},
-  onEdit,
-  onDelete,
-  onPlay
+  onPreview
 }) => {
   const [selectedChannels, setSelectedChannels] = useState(new Set());
   const [sortColumn, setSortColumn] = useState(null);
@@ -329,9 +325,7 @@ const ChannelTable = ({
                   isMatched={matchedChannels[channel.id] || matchedChannels[channel.tvgId]}
                   onToggle={toggleChannel}
                   onClick={onChannelClick}
-                  onEdit={onEdit}
-                  onDelete={onDelete}
-                  onPlay={onPlay}
+                  onPreview={onPreview}
                 />
               );
             })}

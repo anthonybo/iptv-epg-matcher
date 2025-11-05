@@ -1,0 +1,121 @@
+import React, { useState } from 'react';
+import IPTVPlayer from '../../IPTVPlayer';
+
+/**
+ * PiPPlayer - Picture-in-Picture video player for channel preview
+ * Shows a small floating player in the bottom-right corner
+ *
+ * @param {Object} channel - Channel to preview
+ * @param {string} sessionId - Session ID for stream URL
+ * @param {Function} onClose - Callback when player is closed
+ */
+const PiPPlayer = ({ channel, sessionId, onClose }) => {
+  const [isMinimized, setIsMinimized] = useState(false);
+
+  if (!channel) return null;
+
+  return (
+    <div
+      className={`fixed z-[9999] transition-all duration-300 ${
+        isMinimized
+          ? 'bottom-4 right-4 w-16 h-16'
+          : 'bottom-4 right-4 w-96 h-64'
+      }`}
+      style={{
+        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)'
+      }}
+    >
+      <div className="relative w-full h-full rounded-xl overflow-hidden border-2 border-slate-700 bg-slate-950 flex flex-col">
+        {/* Header */}
+        {!isMinimized && (
+          <div className="flex-shrink-0 z-50 bg-slate-950 px-3 py-2 flex items-center justify-between border-b border-slate-800">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              {channel.logo || channel.tvgLogo ? (
+                <img
+                  src={channel.logo || channel.tvgLogo}
+                  alt={channel.name}
+                  className="w-6 h-6 object-contain flex-shrink-0"
+                />
+              ) : null}
+              <span className="text-xs font-medium text-slate-200 truncate">
+                {channel.name}
+              </span>
+            </div>
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {/* Minimize button */}
+              <button
+                onClick={() => setIsMinimized(!isMinimized)}
+                className="p-1 rounded hover:bg-slate-800/60 text-slate-400 hover:text-slate-200 transition-colors"
+                title="Minimize"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {/* Close button */}
+              <button
+                onClick={onClose}
+                className="p-1 rounded hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors"
+                title="Close"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Minimized view */}
+        {isMinimized && (
+          <button
+            onClick={() => setIsMinimized(false)}
+            className="w-full h-full flex items-center justify-center bg-slate-900 hover:bg-slate-800 transition-colors"
+            title="Expand player"
+          >
+            {channel.logo || channel.tvgLogo ? (
+              <img
+                src={channel.logo || channel.tvgLogo}
+                alt={channel.name}
+                className="w-8 h-8 object-contain"
+              />
+            ) : (
+              <svg className="w-6 h-6 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            )}
+          </button>
+        )}
+
+        {/* Video player */}
+        {!isMinimized && (
+          <div className="flex-1 bg-black overflow-hidden relative pip-player-container">
+            <style>{`
+              .pip-player-container video {
+                width: 100% !important;
+                height: 100% !important;
+                object-fit: contain !important;
+              }
+              .pip-player-container > div {
+                width: 100% !important;
+                height: 100% !important;
+              }
+            `}</style>
+            <div className="absolute inset-0">
+              <IPTVPlayer
+                sessionId={sessionId}
+                selectedChannel={channel}
+                playbackMethod="mpegts-player"
+                matchedChannels={{}}
+                theatreMode={true}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default PiPPlayer;
