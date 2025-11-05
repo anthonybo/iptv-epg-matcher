@@ -217,7 +217,59 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
         const userId = req.user.id;
         const sourceId = parseInt(req.params.sourceId);
 
+        logger.info(`User ${userId} deleting source ${sourceId}`);
+
+        // Get source details before deleting to clean up cache
+        // Use getUserIPTVSources to ensure user owns this source
+        const userSources = await iptvDatabaseService.getUserIPTVSources(userId);
+        const source = userSources.find(s => s.id === sourceId);
+
+        if (source) {
+            logger.info(`Source ${sourceId} details:`, {
+                type: source.type,
+                url: source.url,
+                has_mac: !!source.mac_address,
+                has_username: !!source.username
+            });
+
+            // Generate cache key based on source type
+            let cacheKey;
+            if (source.type === 'xtream' && source.url && source.username && source.password) {
+                cacheKey = `${source.url}:${source.username}:${source.password}`.replace(/[\/\\:]/g, '_');
+                logger.info(`Generated Xtream cache key: ${cacheKey}`);
+            } else if (source.type === 'stalker' && source.url && source.mac_address) {
+                cacheKey = `${source.url}:${source.mac_address}`.replace(/[\/\\:]/g, '_');
+                logger.info(`Generated Stalker cache key: ${cacheKey}`);
+            } else {
+                logger.warn(`Could not generate cache key for source ${sourceId} (type: ${source.type})`);
+            }
+
+            // Delete cache file if cacheKey exists
+            if (cacheKey) {
+                const path = require('path');
+                const fs = require('fs');
+                const cacheDir = path.join(process.cwd(), 'cache');
+                const cacheFile = path.join(cacheDir, `${cacheKey}_channels.json`);
+
+                logger.info(`Looking for cache file: ${cacheFile}`);
+
+                if (fs.existsSync(cacheFile)) {
+                    try {
+                        fs.unlinkSync(cacheFile);
+                        logger.info(`✓ Deleted cache file for source ${sourceId}: ${cacheFile}`);
+                    } catch (cacheError) {
+                        logger.warn(`✗ Failed to delete cache file: ${cacheError.message}`);
+                    }
+                } else {
+                    logger.info(`Cache file does not exist: ${cacheFile}`);
+                }
+            }
+        } else {
+            logger.warn(`Source ${sourceId} not found in database`);
+        }
+
         await iptvDatabaseService.deleteUserSource(userId, sourceId);
+        logger.info(`Deleted user preference for user ${userId}, source ${sourceId}`);
 
         res.json({
             success: true,
@@ -234,7 +286,7 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
 
 /**
  * POST /api/iptv/sources/:sourceId/refresh-account-info
- * Re-fetch channels and account information from Xtream API
+ * Re-fetch channels and account information from Xtream API or Stalker portal
  */
 router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, res) => {
     try {
@@ -245,6 +297,10 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         const sources = await iptvDatabaseService.getUserIPTVSources(userId);
         const source = sources.find(s => s.id === sourceId);
 
+        logger.info(`[REFRESH DEBUG] Found ${sources.length} sources for user ${userId}`);
+        logger.info(`[REFRESH DEBUG] Looking for source ID ${sourceId}`);
+        logger.info(`[REFRESH DEBUG] Source found: ${JSON.stringify(source, null, 2)}`);
+
         if (!source) {
             return res.status(404).json({
                 success: false,
@@ -252,78 +308,160 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             });
         }
 
-        // Check if this is an Xtream source
-        if (source.type !== 'xtream' || !source.url || !source.username || !source.password) {
+        // Delete cache file BEFORE refreshing to ensure fresh data
+        const path = require('path');
+        const fs = require('fs');
+        const cacheDir = path.join(process.cwd(), 'cache');
+
+        let cacheKey;
+        if (source.type === 'xtream' && source.url && source.username && source.password) {
+            cacheKey = `${source.url}:${source.username}:${source.password}`.replace(/[\/\\:]/g, '_');
+        } else if (source.type === 'stalker' && source.url && source.mac_address) {
+            cacheKey = `${source.url}:${source.mac_address}`.replace(/[\/\\:]/g, '_');
+        }
+
+        if (cacheKey) {
+            const cacheFile = path.join(cacheDir, `${cacheKey}_channels.json`);
+            if (fs.existsSync(cacheFile)) {
+                try {
+                    fs.unlinkSync(cacheFile);
+                    logger.info(`Deleted cache file before refresh: ${cacheFile}`);
+                } catch (cacheError) {
+                    logger.warn(`Failed to delete cache file before refresh: ${cacheError.message}`);
+                }
+            } else {
+                logger.info(`No cache file to delete: ${cacheFile}`);
+            }
+        }
+
+        // Check source type and validate credentials
+        logger.info(`[REFRESH DEBUG] Source type: ${source.type}`);
+        logger.info(`[REFRESH DEBUG] Source URL: ${source.url}`);
+        logger.info(`[REFRESH DEBUG] Source mac_address: ${source.mac_address}`);
+
+        if (source.type === 'xtream') {
+            if (!source.url || !source.username || !source.password) {
+                logger.error('[REFRESH DEBUG] Xtream source validation failed - missing credentials');
+                return res.status(400).json({
+                    success: false,
+                    error: 'Xtream source missing required credentials'
+                });
+            }
+        } else if (source.type === 'stalker') {
+            if (!source.url || !source.mac_address) {
+                logger.error(`[REFRESH DEBUG] Stalker source validation failed - url: ${!!source.url}, mac_address: ${!!source.mac_address}`);
+                return res.status(400).json({
+                    success: false,
+                    error: 'Stalker source missing required credentials'
+                });
+            }
+        } else {
+            logger.error(`[REFRESH DEBUG] Unknown source type: ${source.type}`);
             return res.status(400).json({
                 success: false,
-                error: 'Can only refresh data for Xtream sources with valid credentials'
+                error: 'Can only refresh Xtream or Stalker sources'
             });
         }
 
-        logger.info(`Refreshing channels and account info for source ${sourceId}`);
+        logger.info(`Refreshing channels and account info for ${source.type} source ${sourceId}`);
 
-        // 1. Fetch fresh channels from Xtream API (force refresh to bypass cache)
-        const channelsResult = await epgService.loadXtreamEPG(
-            source.url,
-            source.username,
-            source.password,
-            {
-                onProgress: () => {}, // No-op progress callback
-                maxChannelsToProcess: 0, // No limit
-                forceRefresh: true // Force fresh fetch from API, bypass cache
+        let channelsResult;
+        let accountInfo;
+        let categories;
+
+        if (source.type === 'xtream') {
+            // 1. Fetch fresh channels from Xtream API (force refresh to bypass cache)
+            channelsResult = await epgService.loadXtreamEPG(
+                source.url,
+                source.username,
+                source.password,
+                {
+                    onProgress: () => {}, // No-op progress callback
+                    maxChannelsToProcess: 0, // No limit
+                    forceRefresh: true // Force fresh fetch from API, bypass cache
+                }
+            );
+
+            if (!channelsResult.success || !channelsResult.channels) {
+                throw new Error('Failed to fetch channels from Xtream API');
             }
-        );
 
-        if (!channelsResult.success || !channelsResult.channels) {
-            throw new Error('Failed to fetch channels from Xtream API');
+            // 2. Fetch fresh account info
+            accountInfo = await epgService.fetchXtreamAccountInfo(
+                source.url,
+                source.username,
+                source.password
+            );
+        } else if (source.type === 'stalker') {
+            // 1. Fetch fresh channels from Stalker portal
+            const stalkerService = require('../services/stalkerService');
+            const stalkerResult = await stalkerService.loadStalkerEPG(
+                source.url,
+                source.mac_address,
+                {
+                    onProgress: (progress) => {
+                        logger.info(`Stalker refresh progress: ${progress.message}`);
+                    }
+                }
+            );
+
+            if (!stalkerResult.success || !stalkerResult.channels) {
+                throw new Error(stalkerResult.error || 'Failed to fetch channels from Stalker portal');
+            }
+
+            channelsResult = stalkerResult;
+            accountInfo = stalkerResult.accountInfo;
+            categories = stalkerResult.categories;
         }
 
         // Debug logging
-        logger.info(`Received ${channelsResult.channels.length} channels from Xtream API`);
+        logger.info(`Received ${channelsResult.channels.length} channels from ${source.type} source`);
         if (channelsResult.channels.length > 0) {
             logger.info(`Sample channel data: ${JSON.stringify(channelsResult.channels[0], null, 2)}`);
 
             // Count how many channels have groups
-            const channelsWithGroups = channelsResult.channels.filter(ch => ch.group && ch.group !== 'Uncategorized').length;
+            const channelsWithGroups = channelsResult.channels.filter(ch => (ch.group || ch.groupTitle) && (ch.group || ch.groupTitle) !== 'Uncategorized').length;
             logger.info(`Channels with valid groups: ${channelsWithGroups} / ${channelsResult.channels.length}`);
         }
 
-        // 2. Fetch fresh account info
-        const accountInfo = await epgService.fetchXtreamAccountInfo(
-            source.url,
-            source.username,
-            source.password
-        );
-
         // 3. Update source with account info (this will also delete old channels)
         const sourceInfo = {
+            user_id: userId,
             name: source.name,
             url: source.url,
-            username: source.username,
-            password: source.password,
             type: source.type,
             ...accountInfo
         };
 
+        // Add type-specific credentials
+        if (source.type === 'xtream') {
+            sourceInfo.username = source.username;
+            sourceInfo.password = source.password;
+        } else if (source.type === 'stalker') {
+            sourceInfo.mac_address = source.mac_address;
+        }
+
         await iptvDatabaseService.saveSource(sourceInfo);
         logger.info(`Updated source ${sourceId} with fresh account info`);
 
-        // 4. Generate categories from channels
-        const categoryMap = channelsResult.channels.reduce((acc, ch) => {
-            const groupTitle = ch.group || 'Uncategorized';
-            acc[groupTitle] = (acc[groupTitle] || 0) + 1;
-            return acc;
-        }, {});
+        // 4. Generate categories from channels (if not already provided by Stalker)
+        if (!categories) {
+            const categoryMap = channelsResult.channels.reduce((acc, ch) => {
+                const groupTitle = ch.groupTitle || ch.group || 'Uncategorized';
+                acc[groupTitle] = (acc[groupTitle] || 0) + 1;
+                return acc;
+            }, {});
 
-        logger.info(`Category breakdown: ${JSON.stringify(categoryMap, null, 2)}`);
+            logger.info(`Category breakdown: ${JSON.stringify(categoryMap, null, 2)}`);
 
-        const categories = Object.entries(categoryMap)
-            .map(([name, count]) => ({
-                id: name,
-                name,
-                count
-            }))
-            .sort((a, b) => a.name.localeCompare(b.name));
+            categories = Object.entries(categoryMap)
+                .map(([name, count]) => ({
+                    id: name,
+                    name,
+                    count
+                }))
+                .sort((a, b) => a.name.localeCompare(b.name));
+        }
 
         logger.info(`Generated ${categories.length} categories`);
         await iptvDatabaseService.saveCategories(sourceId, categories);
@@ -335,7 +473,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             name: ch.name,
             logo: ch.logo || '',
             url: ch.url,
-            group: { title: ch.group || 'Uncategorized' },
+            group: { title: ch.groupTitle || ch.group || 'Uncategorized' },
             tvg: { id: ch.epgChannelId || '' },
             categories: []
         }));

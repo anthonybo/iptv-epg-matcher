@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { addAuthToStreamUrl } from './utils/streamAuth';
 
 /**
  * HLSPlayer - Uses HLS.js library to play MPEG-TS streams
@@ -76,7 +77,8 @@ const HLSPlayer = ({ sessionId, selectedChannel }) => {
       });
 
       // Create URL for the backend proxy endpoint
-      const proxyUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channelId)}`;
+      const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channelId)}`;
+      const proxyUrl = addAuthToStreamUrl(baseUrl);
       console.log('[INFO] Using proxy stream URL:', proxyUrl);
       
       // Create HLS instance

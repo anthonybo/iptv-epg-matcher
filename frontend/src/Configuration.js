@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Dropzone from 'react-dropzone';
 import apiClient from './utils/apiClient';
 import LoadingProgress from './LoadingProgress';
@@ -22,6 +22,7 @@ const Configuration = ({
   description,
   showFooter = true,
   showSummaryButton = true,
+  onLoadingChange, // Callback when loading state changes: (isLoading, sessionId, status, variant)
 }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [m3uFile, setM3uFile] = useState(null);
@@ -35,7 +36,10 @@ const Configuration = ({
   const [xtreamPassword, setXtreamPassword] = useState('');
   const [xtreamServer, setXtreamServer] = useState('');
 
-  const normalizedTabs = Array.isArray(allowedTabs) && allowedTabs.length ? allowedTabs : ['xtream', 'epg'];
+  const [stalkerPortalUrl, setStalkerPortalUrl] = useState('');
+  const [stalkerMacAddress, setStalkerMacAddress] = useState('');
+
+  const normalizedTabs = Array.isArray(allowedTabs) && allowedTabs.length ? allowedTabs : ['xtream', 'stalker', 'epg'];
   const allowedTabKey = normalizedTabs.join('|');
   const [activeTab, setActiveTab] = useState(() => {
     if (initialTab && normalizedTabs.includes(initialTab)) {
@@ -46,7 +50,8 @@ const Configuration = ({
 
   const isEpgAllowed = normalizedTabs.includes('epg');
   const isXtreamAllowed = normalizedTabs.includes('xtream');
-  const isEpgOnly = isEpgAllowed && !isXtreamAllowed;
+  const isStalkerAllowed = normalizedTabs.includes('stalker');
+  const isEpgOnly = isEpgAllowed && !isXtreamAllowed && !isStalkerAllowed;
 
   useEffect(() => {
     const preferredTab = initialTab && normalizedTabs.includes(initialTab)
@@ -87,7 +92,31 @@ const Configuration = ({
     if (storedUsername) setXtreamUsername(storedUsername);
     if (storedPassword) setXtreamPassword(storedPassword);
     if (storedServer) setXtreamServer(storedServer);
+
+    // Load Stalker credentials
+    const storedPortalUrl = localStorage.getItem('stalkerPortalUrl');
+    const storedMacAddress = localStorage.getItem('stalkerMacAddress');
+    if (storedPortalUrl) setStalkerPortalUrl(storedPortalUrl);
+    if (storedMacAddress) setStalkerMacAddress(storedMacAddress);
   }, []);
+
+  // Track previous loading state to avoid infinite loops
+  const prevLoadingState = useRef({ isLoading: false, processingSessionId: null, status: '', statusVariant: 'info' });
+
+  // Notify parent component when loading state changes
+  useEffect(() => {
+    const prev = prevLoadingState.current;
+    const hasChanged =
+      prev.isLoading !== isLoading ||
+      prev.processingSessionId !== processingSessionId ||
+      prev.status !== status ||
+      prev.statusVariant !== statusVariant;
+
+    if (hasChanged && onLoadingChange) {
+      onLoadingChange(isLoading, processingSessionId, status, statusVariant);
+      prevLoadingState.current = { isLoading, processingSessionId, status, statusVariant };
+    }
+  }, [isLoading, processingSessionId, status, statusVariant, onLoadingChange]);
 
   const saveCredentials = () => {
     try {
@@ -96,6 +125,15 @@ const Configuration = ({
       localStorage.setItem('xtreamServer', xtreamServer);
     } catch (storageError) {
       console.error('Error saving credentials:', storageError);
+    }
+  };
+
+  const saveStalkerCredentials = () => {
+    try {
+      localStorage.setItem('stalkerPortalUrl', stalkerPortalUrl);
+      localStorage.setItem('stalkerMacAddress', stalkerMacAddress);
+    } catch (storageError) {
+      console.error('Error saving Stalker credentials:', storageError);
     }
   };
 
@@ -182,6 +220,24 @@ const Configuration = ({
     });
   };
 
+  const handleStalkerLoad = async () => {
+    if (!stalkerPortalUrl || !stalkerMacAddress) {
+      setStatusMessage('Provide both Portal URL and MAC address to continue.', 'error');
+      return;
+    }
+
+    saveStalkerCredentials();
+
+    await submitLoadRequest({
+      startMessage: 'Connecting to MAG/Stalker portal...',
+      successMessage: 'Channels are loading from Stalker portal!',
+      prepareFormData: (formData) => {
+        formData.append('portalUrl', stalkerPortalUrl.trim());
+        formData.append('macAddress', stalkerMacAddress.trim());
+      },
+    });
+  };
+
   const handleEpgLoad = async () => {
     if (!epgUrl) {
       setStatusMessage('Enter an EPG URL before loading.', 'error');
@@ -258,6 +314,12 @@ const Configuration = ({
         onComplete={handleProcessComplete}
         onChannelsAvailable={handleChannelsAvailable}
         onEpgSourceAvailable={handleEpgSourceAvailable}
+        onCancel={() => {
+          // Reset loading state so user can fix their input
+          setIsLoading(false);
+          setProcessingSessionId(null);
+          setStatus('');
+        }}
       />
     );
   }
@@ -270,7 +332,7 @@ const Configuration = ({
         'Return to Channels or Player to match listings.',
       ]
     : [
-        'Enter Xtream credentials or point to an M3U playlist.',
+        'Enter Xtream/Stalker credentials or point to an M3U playlist.',
         'Load channels and let the progress screen finish.',
         'Open the EPG tab to add or refresh guide data.',
         'Match channels with guide entries and export what you need.',
@@ -307,6 +369,16 @@ const Configuration = ({
                 disabled={isLoading && activeTab !== 'xtream'}
               >
                 Xtream Login
+              </button>
+            )}
+            {isStalkerAllowed && (
+              <button
+                type="button"
+                className={tabButtonClasses('stalker')}
+                onClick={() => setActiveTab('stalker')}
+                disabled={isLoading && activeTab !== 'stalker'}
+              >
+                MAG/Stalker
               </button>
             )}
             {isEpgAllowed && (
@@ -426,6 +498,53 @@ const Configuration = ({
                 disabled={isLoading}
               >
                 {isLoading ? 'Processing…' : 'Load Xtream Channels'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {isStalkerAllowed && activeTab === 'stalker' && (
+          <div className="mt-8 space-y-10">
+            <section className="space-y-4">
+              <h3 className="text-lg font-semibold text-slate-100">MAG/Stalker Middleware</h3>
+              <div className="grid gap-6 md:grid-cols-2">
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-200">Portal URL</span>
+                  <input
+                    type="text"
+                    placeholder="http://portal.url/stalker_portal/"
+                    value={stalkerPortalUrl}
+                    onChange={(e) => setStalkerPortalUrl(e.target.value)}
+                    disabled={isLoading}
+                    className={inputClasses}
+                  />
+                </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-semibold text-slate-200">MAC Address</span>
+                  <input
+                    type="text"
+                    placeholder="00:1A:79:CE:23:42"
+                    value={stalkerMacAddress}
+                    onChange={(e) => setStalkerMacAddress(e.target.value)}
+                    disabled={isLoading}
+                    className={inputClasses}
+                  />
+                </label>
+              </div>
+              <p className="text-xs text-slate-400">
+                Connect to your MAG/Stalker middleware portal using the portal URL and MAC address.
+                Credentials are stored in your browser for quick access.
+              </p>
+            </section>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-purple-500 via-purple-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-purple-900/40 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleStalkerLoad}
+                disabled={isLoading}
+              >
+                {isLoading ? 'Processing…' : 'Load MAG/Stalker Channels'}
               </button>
             </div>
           </div>

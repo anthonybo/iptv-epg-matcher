@@ -84,7 +84,7 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
             {source.nickname || source.name}
           </h3>
           <div className="flex items-center gap-1">
-            {source.type === 'xtream' && (
+            {(source.type === 'xtream' || source.type === 'stalker') && (
               <button
                 onClick={handleRefresh}
                 disabled={isRefreshing}
@@ -366,12 +366,24 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
 /**
  * My IPTVs management page
  */
-const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad, loadingError }) => {
+const MyIPTVs = ({
+  onSourcesUpdated,
+  onViewChannels: onViewChannelsProp,
+  onLoad,
+  loadingError,
+  backgroundLoadings,
+  setBackgroundLoadings,
+  showLoadingPicker,
+  setShowLoadingPicker,
+  showAddModal,
+  setShowAddModal
+}) => {
   const [sources, setSources] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [notification, setNotification] = useState(null);
-  const [showAddModal, setShowAddModal] = useState(false);
+  const [isRefreshingAll, setIsRefreshingAll] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
 
   // Load sources on mount
   useEffect(() => {
@@ -449,6 +461,43 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad,
     }
   };
 
+  const handleRefreshAll = async () => {
+    if (isRefreshingAll || sources.length === 0) return;
+
+    setIsRefreshingAll(true);
+    setRefreshProgress({ current: 0, total: sources.length });
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < sources.length; i++) {
+      const source = sources[i];
+      setRefreshProgress({ current: i + 1, total: sources.length });
+
+      try {
+        await iptvSourcesService.refreshAccountInfo(source.id);
+        successCount++;
+      } catch (err) {
+        console.error(`Error refreshing source ${source.id}:`, err);
+        failCount++;
+      }
+    }
+
+    // Reload sources to get updated data
+    await loadSources();
+    if (onSourcesUpdated) onSourcesUpdated();
+
+    setIsRefreshingAll(false);
+    setRefreshProgress({ current: 0, total: 0 });
+
+    // Show final summary
+    setNotification({
+      type: failCount === 0 ? 'success' : 'warning',
+      message: `Refresh complete! ${successCount} succeeded, ${failCount} failed.`
+    });
+    setTimeout(() => setNotification(null), 5000);
+  };
+
   const handleEditCredentials = async (sourceId, credentials) => {
     try {
       // Update credentials
@@ -517,15 +566,38 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad,
             Manage your IPTV sources and click on one to view its channels
           </p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="inline-flex items-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2.5 text-sm font-semibold text-blue-100 hover:bg-blue-500/30 hover:border-blue-500/60 transition-all shadow-lg shadow-blue-900/20"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-          </svg>
-          Add IPTV Source
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleRefreshAll}
+            disabled={isRefreshingAll || sources.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-emerald-100 hover:bg-emerald-500/30 hover:border-emerald-500/60 transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isRefreshingAll ? (
+              <>
+                <svg className="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {refreshProgress.current}/{refreshProgress.total}
+              </>
+            ) : (
+              <>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                Refresh All
+              </>
+            )}
+          </button>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="inline-flex items-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2.5 text-sm font-semibold text-blue-100 hover:bg-blue-500/30 hover:border-blue-500/60 transition-all shadow-lg shadow-blue-900/20"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+            Add IPTV Source
+          </button>
+        </div>
       </header>
 
       {/* Loading state */}
@@ -598,39 +670,68 @@ const MyIPTVs = ({ onSourcesUpdated, onViewChannels: onViewChannelsProp, onLoad,
         </div>
       )}
 
-      {/* Add Source Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-            {/* Modal Header */}
-            <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-              <h3 className="text-xl font-semibold text-slate-100">Add IPTV Source</h3>
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-slate-200 transition-colors p-1 hover:bg-slate-700 rounded-lg"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
+      {/* Add Source Modal - Keep mounted to preserve loading state */}
+      {/* Only render when there are background loadings OR modal is explicitly shown */}
+      {(showAddModal || backgroundLoadings.size > 0) && (
+        <div className={`fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 transition-opacity duration-200 ${showAddModal ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
+          <div className={`bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col transition-transform duration-200 ${showAddModal ? 'scale-100' : 'scale-95'}`}>
+          {/* Modal Header */}
+          <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+            <h3 className="text-xl font-semibold text-slate-100">Add IPTV Source</h3>
+            <button
+              onClick={() => setShowAddModal(false)}
+              className="text-slate-400 hover:text-slate-200 transition-colors p-1 hover:bg-slate-700 rounded-lg"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
 
-            {/* Modal Content */}
-            <div className="flex-1 overflow-y-auto p-6">
-              <Configuration
-                onLoad={async (data) => {
-                  await onLoad(data);
-                  setShowAddModal(false);
-                  await loadSources();
-                  if (onSourcesUpdated) onSourcesUpdated();
-                  // Note: handleLoad will switch to 'channels' tab, but App.js will handle staying on myiptvs
-                }}
-                error={loadingError}
-                allowedTabs={['xtream']}
-              />
-            </div>
+          {/* Modal Content */}
+          <div className="flex-1 overflow-y-auto p-6">
+            <Configuration
+              onLoad={async (data) => {
+                await onLoad(data);
+                setShowAddModal(false);
+                setBackgroundLoadings(new Map()); // Clear all background loadings on completion
+                await loadSources();
+                if (onSourcesUpdated) onSourcesUpdated();
+                // Note: handleLoad will switch to 'channels' tab, but App.js will handle staying on myiptvs
+              }}
+              error={loadingError}
+              allowedTabs={['xtream', 'stalker']}
+              onLoadingChange={(isLoading, sessionId, status, variant) => {
+                // Track loading state even when modal is closed
+                if (isLoading && sessionId) {
+                  // Extract source name from status message if possible
+                  let sourceName = 'IPTV Source';
+                  if (status) {
+                    // Try to extract portal URL or server from status
+                    const portalMatch = status.match(/portal[:\s]+([^\s,]+)/i);
+                    const serverMatch = status.match(/server[:\s]+([^\s,]+)/i);
+                    if (portalMatch) sourceName = portalMatch[1];
+                    else if (serverMatch) sourceName = serverMatch[1];
+                  }
+
+                  setBackgroundLoadings(prev => {
+                    const next = new Map(prev);
+                    next.set(sessionId, { sessionId, status, variant, sourceName });
+                    return next;
+                  });
+                } else if (sessionId) {
+                  // Remove this session from background loadings
+                  setBackgroundLoadings(prev => {
+                    const next = new Map(prev);
+                    next.delete(sessionId);
+                    return next;
+                  });
+                }
+              }}
+            />
           </div>
         </div>
+      </div>
       )}
     </div>
   );

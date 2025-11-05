@@ -45,12 +45,14 @@ async function saveChannelsToDatabase(sessionId, channels, sourceInfo, userId = 
     logger.info(`Saving ${channels.length} channels to IPTV database for session ${sessionId}${userId ? ` (user ${userId})` : ''}`);
 
     // Create or update source
-    const { url, username, password, type = 'm3u', name, nickname } = sourceInfo;
+    const { url, username, password, type = 'm3u', name, nickname, mac_address } = sourceInfo;
     const sourceId = await iptvDatabaseService.saveSource({
+      user_id: userId,
       name: name || `Source for ${sessionId}`,
       url: url || sessionId,
       username: username || '',
       password: password || '',
+      mac_address: mac_address || null,
       type
     });
 
@@ -451,6 +453,8 @@ router.post('/', optionalAuth, upload.single('m3uFile'), async (req, res) => {
         xtreamUsername: rawXtreamUsername,
         xtreamPassword: rawXtreamPassword,
         xtreamServer: rawXtreamServer,
+        portalUrl: rawPortalUrl,
+        macAddress: rawMacAddress,
         forceUpdate = false
     } = req.body;
 
@@ -460,6 +464,8 @@ router.post('/', optionalAuth, upload.single('m3uFile'), async (req, res) => {
     const xtreamUsername = rawXtreamUsername ? rawXtreamUsername.trim() : rawXtreamUsername;
     const xtreamPassword = rawXtreamPassword ? rawXtreamPassword.trim() : rawXtreamPassword;
     const xtreamServer = rawXtreamServer ? rawXtreamServer.trim() : rawXtreamServer;
+    const portalUrl = rawPortalUrl ? rawPortalUrl.trim() : rawPortalUrl;
+    const macAddress = rawMacAddress ? rawMacAddress.trim() : rawMacAddress;
     const m3uFile = req.file; // Access uploaded file from multer
 
     // Log what was received for debugging
@@ -468,7 +474,8 @@ router.post('/', optionalAuth, upload.single('m3uFile'), async (req, res) => {
         hasM3uFile: !!m3uFile,
         hasM3uUrl: !!m3uUrl,
         hasEpgUrl: !!epgUrl,
-        hasXtreamCreds: !!(xtreamUsername && xtreamPassword && xtreamServer)
+        hasXtreamCreds: !!(xtreamUsername && xtreamPassword && xtreamServer),
+        hasStalkerCreds: !!(portalUrl && macAddress)
     });
 
     if (!sessionId) {
@@ -513,6 +520,8 @@ router.post('/', optionalAuth, upload.single('m3uFile'), async (req, res) => {
             xtreamUsername,
             xtreamPassword,
             xtreamServer,
+            portalUrl,
+            macAddress,
             forceUpdate,
             userId // Pass authenticated user ID if available
         });

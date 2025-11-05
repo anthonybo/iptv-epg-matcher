@@ -205,17 +205,18 @@ router.get('/session/:sessionId', async (req, res) => {
  * GET /api/channels/:sessionId/categories
  * Gets channel categories with counts
  */
-router.get('/:sessionId/categories', async (req, res) => {
+router.get('/:sessionId/categories', authMiddleware, async (req, res) => {
   const { sessionId } = req.params;
   const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null;
+  const userId = req.user?.id || null;
 
-  logger.debug(`REQUEST RECEIVED for categories: sessionId=${sessionId}, sourceId=${sourceId}`);
+  logger.debug(`REQUEST RECEIVED for categories: sessionId=${sessionId}, sourceId=${sourceId}, userId=${userId}`);
 
   try {
     // Try to get categories from IPTV database first
     try {
-      logger.info(`Fetching categories from IPTV database for session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
-      const categories = await iptvDatabaseService.getCategoriesForSession(sessionId, sourceId);
+      logger.info(`Fetching categories from IPTV database for session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}${userId ? ` (user ${userId})` : ''}`);
+      const categories = await iptvDatabaseService.getCategoriesForSession(sessionId, sourceId, userId);
 
       if (categories && categories.length > 0) {
         logger.info(`Found ${categories.length} categories from IPTV database`);

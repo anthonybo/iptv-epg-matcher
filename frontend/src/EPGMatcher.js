@@ -373,10 +373,20 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         generateEpgIdSuggestions(channelName);
 
         // Check if we already have a match for this channel
-        if (session && matchedChannels[selectedChannel.tvgId]) {
-            fetchEpgData(matchedChannels[selectedChannel.tvgId]);
-        } else {
-            fetchEpgData(selectedChannel.tvgId);
+        // Try both tvgId and id as the channel identifier
+        const channelIdentifier = selectedChannel.tvgId || selectedChannel.id;
+        const matchedEpgId = channelIdentifier ? matchedChannels[channelIdentifier] : null;
+
+        console.log('[EPGMatcher] Channel changed:', {
+            channelId: channelIdentifier,
+            matchedEpgId: matchedEpgId,
+            hasSession: !!session
+        });
+
+        if (session && matchedEpgId) {
+            fetchEpgData(matchedEpgId);
+        } else if (channelIdentifier) {
+            fetchEpgData(channelIdentifier);
         }
     }, [session, selectedChannel, matchedChannels]);
 

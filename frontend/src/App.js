@@ -68,6 +68,11 @@ function App() {
   const [selectedSourceFilter, setSelectedSourceFilter] = useState(null);
   const [showServerStatus, setShowServerStatus] = useState(false);
 
+  // Global background loading state (shared across all pages)
+  const [backgroundLoadings, setBackgroundLoadings] = useState(new Map());
+  const [showLoadingPicker, setShowLoadingPicker] = useState(false);
+  const [showAddModal, setShowAddModal] = useState(false);
+
   // Check for saved session and validate it on mount
   useEffect(() => {
     // Setup session listener to respond to session updates
@@ -132,12 +137,12 @@ function App() {
       if (response.data && Array.isArray(response.data.channels)) {
         // Transform array of matched channels into a map for easy lookup
         const matchesMap = response.data.channels.reduce((acc, channel) => {
-          // Use both the channel ID and tvgId as keys for flexible matching
-          if (channel.id) {
-            acc[channel.id] = true;
+          // Use both the channel ID and tvgId as keys, storing the EPG channel ID as the value
+          if (channel.id && channel.epgId) {
+            acc[channel.id] = channel.epgId;
           }
-          if (channel.tvgId && channel.tvgId !== channel.id) {
-            acc[channel.tvgId] = true;
+          if (channel.tvgId && channel.tvgId !== channel.id && channel.epgId) {
+            acc[channel.tvgId] = channel.epgId;
           }
           return acc;
         }, {});
@@ -984,6 +989,12 @@ function App() {
                 setSelectedSourceFilter(source);
                 setActiveTab('channels');
               }}
+              backgroundLoadings={backgroundLoadings}
+              setBackgroundLoadings={setBackgroundLoadings}
+              showLoadingPicker={showLoadingPicker}
+              setShowLoadingPicker={setShowLoadingPicker}
+              showAddModal={showAddModal}
+              setShowAddModal={setShowAddModal}
             />
           </div>
         );
@@ -1469,6 +1480,119 @@ function App() {
           {renderActiveTabContent()}
         </main>
       </div>
+
+      {/* Global Background Loading Badge - visible across all pages */}
+      {backgroundLoadings.size > 0 && (
+        <div
+          className="fixed bottom-6 right-6 z-50 cursor-pointer group"
+          onClick={() => {
+            if (backgroundLoadings.size === 1) {
+              // Only one load - navigate to MyIPTVs and open modal
+              setActiveTab('myiptvs');
+              setShowAddModal(true);
+            } else {
+              // Multiple loads - show picker
+              setShowLoadingPicker(true);
+            }
+          }}
+          title={`${backgroundLoadings.size} source${backgroundLoadings.size > 1 ? 's' : ''} loading - click to view`}
+        >
+          {/* Badge with pulsing animation */}
+          <div className="relative">
+            {/* Pulsing background */}
+            <div className="absolute inset-0 bg-blue-500 rounded-full animate-ping opacity-75"></div>
+
+            {/* Main badge - icon with optional count */}
+            <div className="relative bg-gradient-to-br from-blue-500 to-blue-600 rounded-full p-3 shadow-lg border border-blue-400/30 transition-all duration-200 group-hover:scale-110 group-hover:shadow-xl">
+              {/* Spinning loader icon */}
+              <svg className="w-6 h-6 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+
+              {/* Count badge for multiple loads */}
+              {backgroundLoadings.size > 1 && (
+                <div className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center border-2 border-slate-900">
+                  {backgroundLoadings.size}
+                </div>
+              )}
+
+              {/* Tooltip on hover */}
+              <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72">
+                <div className="bg-slate-800 text-white text-xs rounded-lg shadow-xl p-3 border border-slate-600 max-h-64 overflow-y-auto">
+                  <div className="font-semibold mb-2">
+                    {backgroundLoadings.size === 1 ? 'Background Loading' : `${backgroundLoadings.size} Sources Loading`}
+                  </div>
+
+                  {/* List all loading sources */}
+                  <div className="space-y-2">
+                    {Array.from(backgroundLoadings.values()).map((loading) => (
+                      <div key={loading.sessionId} className="border-t border-slate-700 pt-2 first:border-t-0 first:pt-0">
+                        <div className="font-medium text-blue-300 mb-0.5">{loading.sourceName}</div>
+                        <div className="text-slate-300 text-[11px]">{loading.status || 'Processing...'}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-2 text-slate-400 text-[10px] border-t border-slate-700 pt-2">
+                    {backgroundLoadings.size === 1 ? 'Click to view details' : 'Click to select which source to view'}
+                  </div>
+                  {/* Arrow */}
+                  <div className="absolute top-full right-6 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-slate-800"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Loading Picker Modal - shows when multiple loads and badge clicked */}
+      {showLoadingPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-md w-full">
+            {/* Header */}
+            <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-100">Background Loads ({backgroundLoadings.size})</h3>
+              <button
+                onClick={() => setShowLoadingPicker(false)}
+                className="text-slate-400 hover:text-slate-200 transition-colors p-1 hover:bg-slate-700 rounded-lg"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* List of loading sources */}
+            <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
+              {Array.from(backgroundLoadings.values()).map((loading) => (
+                <div
+                  key={loading.sessionId}
+                  className="bg-slate-800 rounded-lg p-4 border border-slate-700 hover:border-slate-600 transition-colors"
+                >
+                  <div className="flex items-start gap-3">
+                    {/* Spinning icon */}
+                    <svg className="w-5 h-5 text-blue-400 animate-spin flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-slate-100 mb-1">{loading.sourceName}</div>
+                      <div className="text-sm text-slate-400 break-words">{loading.status || 'Processing...'}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div className="bg-slate-800 px-6 py-3 border-t border-slate-700 text-xs text-slate-400">
+              These sources are loading in the background. Close this modal to continue working.
+            </div>
+          </div>
+        </div>
+      )}
 
       <SessionDebugger
         isOpen={sessionDebuggerOpen}

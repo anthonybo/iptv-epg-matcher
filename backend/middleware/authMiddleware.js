@@ -13,9 +13,15 @@ const logger = require('../config/logger');
  */
 async function authMiddleware(req, res, next) {
   try {
-    // Extract token from Authorization header
+    // Extract token from Authorization header or query parameter (for video streaming)
     const authHeader = req.headers.authorization;
-    const token = authService.extractTokenFromHeader(authHeader);
+    let token = authService.extractTokenFromHeader(authHeader);
+
+    // Fallback to query parameter for streaming endpoints (video players can't send headers)
+    if (!token && req.query.token) {
+      token = req.query.token;
+      logger.debug('Using token from query parameter for streaming');
+    }
 
     if (!token) {
       // No token provided, continue without user

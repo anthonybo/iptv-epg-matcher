@@ -24,7 +24,7 @@ const processWithDetailedUpdates = async (sessionId, options) => {
     return;
   }
   
-  const { m3uUrl, epgUrl, xtreamUsername, xtreamPassword, xtreamServer, forceUpdate, uploadedFiles, userId } = options;
+  const { m3uUrl, epgUrl, xtreamUsername, xtreamPassword, xtreamServer, portalUrl, macAddress, forceUpdate, uploadedFiles, userId } = options;
   
   // Get or create session
   let session = sessionStorage.getSession(sessionId);
@@ -62,9 +62,11 @@ const processWithDetailedUpdates = async (sessionId, options) => {
   sendProgressUpdate(sessionId, 'checking_cache', 5, 'Checking for cached data');
   
   // Determine cache key and files
-  const cacheKey = xtreamUsername && xtreamPassword && xtreamServer 
+  const cacheKey = xtreamUsername && xtreamPassword && xtreamServer
     ? `${xtreamServer}:${xtreamUsername}:${xtreamPassword}`.replace(/[\/\\:]/g, '_')
-    : `default_${sessionId}`;
+    : portalUrl && macAddress
+      ? `${portalUrl}:${macAddress}`.replace(/[\/\\:]/g, '_')
+      : `default_${sessionId}`;
     
   const cacheDir = path.join(process.cwd(), 'cache');
   const cacheChannelsFile = path.join(cacheDir, `${cacheKey}_channels.json`);
@@ -144,8 +146,61 @@ const processWithDetailedUpdates = async (sessionId, options) => {
 
       // Process the channels
       processChannels(sessionId, channels, userId, options);
+    } else if (portalUrl && macAddress) {
+      // Load channels from Stalker/MAG portal
+      logger.info(`Loading channels from Stalker portal: ${portalUrl}`);
+
+      const stalkerService = require('./stalkerService');
+
+      sendProgressUpdate(sessionId, 'loading_stalker', 18, 'Connecting to Stalker portal');
+
+      // Create progress callback for Stalker pagination
+      const onProgress = (progressInfo) => {
+        const { channelsLoaded, totalChannels, page, message } = progressInfo;
+        // Map progress from 18% to 24% based on channel loading progress
+        const baseProgress = 18;
+        const progressRange = 6; // 18% to 24%
+        const loadProgress = Math.floor((channelsLoaded / totalChannels) * progressRange);
+        const currentProgress = Math.min(baseProgress + loadProgress, 24);
+
+        sendProgressUpdate(
+          sessionId,
+          'loading_stalker_channels',
+          currentProgress,
+          `${message} - ${Math.floor((channelsLoaded / totalChannels) * 100)}%`
+        );
+      };
+
+      const stalkerResult = await stalkerService.loadStalkerEPG(portalUrl, macAddress, { onProgress });
+
+      if (!stalkerResult.success) {
+        throw new Error(stalkerResult.error || 'Failed to load from Stalker portal');
+      }
+
+      channels = stalkerResult.channels;
+
+      if (!channels || channels.length === 0) {
+        throw new Error('No channels found from Stalker portal');
+      }
+
+      logger.info(`Successfully loaded ${channels.length} channels from Stalker portal`);
+
+      // Save to cache
+      try {
+        if (!fs.existsSync(cacheDir)) {
+          fs.mkdirSync(cacheDir, { recursive: true });
+        }
+
+        fs.writeFileSync(cacheChannelsFile, JSON.stringify(channels, null, 2));
+        logger.info(`Saved ${channels.length} channels to cache: ${cacheChannelsFile}`);
+      } catch (cacheError) {
+        logger.error(`Error saving to cache: ${cacheError.message}`);
+      }
+
+      // Process the channels with Stalker account info
+      processChannels(sessionId, channels, userId, { ...options, stalkerAccountInfo: stalkerResult.accountInfo, stalkerCategories: stalkerResult.categories });
     } else {
-      logger.error('No Xtream credentials provided');
+      logger.error('No IPTV credentials provided');
       broadcastSSEUpdate({
         type: 'error',
         message: 'No IPTV credentials provided',
@@ -301,16 +356,20 @@ async function processChannels(sessionId, channels, userId = null, options = {})
       const xtreamUsername = options.xtreamUsername || sessionData.xtreamUsername || sessionData.options?.xtreamUsername;
       const xtreamPassword = options.xtreamPassword || sessionData.xtreamPassword || sessionData.options?.xtreamPassword;
       const m3uUrl = options.m3uUrl || sessionData.m3uUrl || sessionData.options?.m3uUrl;
+      const portalUrl = options.portalUrl || sessionData.portalUrl || sessionData.options?.portalUrl;
+      const macAddress = options.macAddress || sessionData.macAddress || sessionData.options?.macAddress;
 
-      logger.info(`Source info from options/session: xtreamServer=${xtreamServer}, xtreamUsername=${xtreamUsername}, m3uUrl=${m3uUrl}, sessionId=${sessionId}`);
+      logger.info(`Source info from options/session: xtreamServer=${xtreamServer}, xtreamUsername=${xtreamUsername}, portalUrl=${portalUrl}, macAddress=${macAddress}, m3uUrl=${m3uUrl}, sessionId=${sessionId}`);
 
       // Create source info
       const sourceInfo = {
-        name: xtreamServer || m3uUrl || sessionId,
-        url: xtreamServer || m3uUrl || sessionId,
+        user_id: userId,
+        name: xtreamServer || portalUrl || m3uUrl || sessionId,
+        url: xtreamServer || portalUrl || m3uUrl || sessionId,
         username: xtreamUsername || '',
         password: xtreamPassword || '',
-        type: xtreamServer ? 'xtream' : m3uUrl ? 'm3u' : 'unknown'
+        mac_address: macAddress || null,
+        type: xtreamServer ? 'xtream' : portalUrl ? 'stalker' : m3uUrl ? 'm3u' : 'unknown'
       };
 
       // Fetch account info from Xtream API if this is an Xtream source
@@ -329,6 +388,12 @@ async function processChannels(sessionId, channels, userId = null, options = {})
         } catch (accountError) {
           logger.warn(`Could not fetch account info: ${accountError.message}`);
         }
+      }
+
+      // Fetch account info from Stalker portal if this is a Stalker source
+      if (portalUrl && macAddress && options.stalkerAccountInfo) {
+        logger.info('Using Stalker account info from portal response');
+        Object.assign(sourceInfo, options.stalkerAccountInfo);
       }
 
       // Save source

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { addAuthToStreamUrl } from './utils/streamAuth';
 
 /**
  * Enhanced IPTVPlayer - Browser-compatible player for IPTV streams
@@ -57,14 +58,12 @@ const IPTVPlayer = ({
   // Initialize component
   useEffect(() => {
     log('info', 'IPTVPlayer component mounting');
-    
+
     // Load required scripts
     loadScripts();
-    
-    // Show channel info by default, but only show EPG info if there's a match
-    setShowChannelInfo(true);
-    setShowEpgInfo(true);
-    
+
+    // Overlays are hidden by default - user can toggle them with the icons
+
     return () => {
       log('info', 'IPTVPlayer component unmounting');
       cleanupPlayer();
@@ -263,8 +262,9 @@ const IPTVPlayer = ({
     }
     
     // Get URL from the backend proxy
-    const proxyHlsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
-    
+    const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
+    const proxyHlsUrl = addAuthToStreamUrl(baseUrl);
+
     log('info', 'Initializing Clappr player', { url: proxyHlsUrl });
     
     try {
@@ -374,10 +374,11 @@ const IPTVPlayer = ({
     }
     
     log('info', 'Initializing mpegts.js player');
-    
+
     // Get URL for TS stream
-    let proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
-    
+    const baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    let proxyTsUrl = addAuthToStreamUrl(baseTsUrl);
+
     // Validate the URL before using it
     proxyTsUrl = validateStreamUrl(proxyTsUrl);
     if (!proxyTsUrl) {
@@ -469,8 +470,9 @@ const IPTVPlayer = ({
   // Initialize VLC link page
   const initializeVlcLink = () => {
     log('info', 'Initializing VLC link page');
-    
-    const proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+
+    const baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    const proxyTsUrl = addAuthToStreamUrl(baseTsUrl);
     
     // Create new player container
     while (containerRef.current.firstChild) {

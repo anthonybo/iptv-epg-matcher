@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactPlayer from 'react-player';
+import { addAuthToStreamUrl } from './utils/streamAuth';
 
 /**
  * ReactPlayerComponent - Uses ReactPlayer to handle various stream formats
@@ -14,6 +15,7 @@ const ReactPlayerComponent = ({ sessionId, selectedChannel }) => {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [showChannelInfo, setShowChannelInfo] = useState(false);
   const playerRef = useRef(null);
 
   // Log component lifecycle
@@ -40,7 +42,8 @@ const ReactPlayerComponent = ({ sessionId, selectedChannel }) => {
       setStreamUrl(selectedChannel.url);
     } else {
       // Fall back to the proxy stream URL
-      const proxyUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+      const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+      const proxyUrl = addAuthToStreamUrl(baseUrl);
       console.log('[INFO] Using proxy stream URL:', proxyUrl);
       setStreamUrl(proxyUrl);
     }
@@ -175,16 +178,39 @@ const ReactPlayerComponent = ({ sessionId, selectedChannel }) => {
         </div>
       )}
 
-      {/* Channel info */}
+      {/* Toggle button for channel info */}
       {selectedChannel && (
-        <div style={{ 
-          position: 'absolute', 
-          bottom: '10px', 
-          left: '10px', 
+        <button
+          onClick={() => setShowChannelInfo(prev => !prev)}
+          title={showChannelInfo ? "Hide channel info" : "Show channel info"}
+          style={{
+            position: 'absolute',
+            top: '10px',
+            right: '10px',
+            zIndex: 10,
+            padding: '8px',
+            background: 'rgba(0, 0, 0, 0.7)',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '16px'
+          }}
+        >
+          ℹ️
+        </button>
+      )}
+
+      {/* Channel info overlay */}
+      {selectedChannel && showChannelInfo && (
+        <div style={{
+          position: 'absolute',
+          bottom: '10px',
+          left: '10px',
           right: '10px',
           zIndex: 5,
-          padding: '5px 10px', 
-          background: 'rgba(0, 0, 0, 0.7)', 
+          padding: '5px 10px',
+          background: 'rgba(0, 0, 0, 0.7)',
           color: 'white',
           borderRadius: '4px',
           fontSize: '12px'

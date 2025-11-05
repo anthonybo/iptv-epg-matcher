@@ -28,8 +28,8 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}`);
             const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
                 page: 1,
-                limit: 999999 // Essentially unlimited - load ALL channels for streaming
-                // NOTE: Don't pass userId here - session_iptv_mappings table only has session_id
+                limit: 999999, // Essentially unlimited - load ALL channels for streaming
+                userId: userId // Pass userId for authenticated users - enables per-user channel queries
             });
 
             if (dbResult && dbResult.channels && dbResult.channels.length > 0) {
@@ -144,17 +144,40 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         }
         
         logger.info(`Streaming channel: ${channel.name} (${normalizedChannelId}) from URL: ${channel.url}`);
-        
+
+        // Handle Stalker portal URLs - extract actual stream URL from cmd parameter
+        let streamUrl = channel.url;
+        if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
+            try {
+                // Parse URL to extract cmd parameter
+                const url = new URL(channel.url);
+                const cmd = url.searchParams.get('cmd');
+
+                if (cmd) {
+                    // Extract actual stream URL from cmd (format: "ffmpeg http://...")
+                    const match = cmd.match(/ffmpeg\s+(.+)/);
+                    if (match && match[1]) {
+                        streamUrl = match[1];
+                        logger.info(`Extracted Stalker stream URL: ${streamUrl}`);
+                    } else {
+                        logger.warn(`Could not extract stream URL from Stalker cmd parameter: ${cmd.substring(0, 100)}`);
+                    }
+                }
+            } catch (error) {
+                logger.error(`Error parsing Stalker URL: ${error.message}`);
+            }
+        }
+
         // Option 1: Simple redirect to the original URL
         if (req.query.redirect === 'true') {
-            return res.redirect(channel.url);
+            return res.redirect(streamUrl);
         }
         
         // For HEAD requests, don't try to stream, just check availability
         if (req.method === 'HEAD') {
             try {
                 // Test if the URL is reachable
-                const testResponse = await fetch(channel.url, {
+                const testResponse = await fetch(streamUrl, {
                     method: 'HEAD',
                     timeout: 5000,
                     headers: {
@@ -179,16 +202,16 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 // DNS resolution errors
                 if (error.code === 'ENOTFOUND') {
                     errorMessage = 'Stream source domain cannot be resolved';
-                    logger.error(`DNS resolution failed for stream URL: ${channel.url}`);
+                    logger.error(`DNS resolution failed for stream URL: ${streamUrl}`);
                 } else if (error.code === 'ETIMEDOUT' || error.cause?.code === 'ETIMEDOUT') {
                     errorMessage = 'Stream source connection timed out';
                 } else if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
                     errorMessage = 'Stream source connection was refused';
                 }
-                
+
                 logger.error(`Stream availability check failed: ${error.message}`, {
                     channelId,
-                    url: channel.url,
+                    url: streamUrl,
                     errorCode: error.code || error.cause?.code
                 });
                 
@@ -207,9 +230,9 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             res.setHeader('Transfer-Encoding', 'chunked');
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
             res.setHeader('Access-Control-Allow-Origin', '*');
-            
+
             // Fetch and pipe the stream
-            const streamResponse = await fetch(channel.url, {
+            const streamResponse = await fetch(streamUrl, {
                 method: 'GET',
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { addAuthToStreamUrl } from './utils/streamAuth';
 
 /**
  * SimplePlayer - Enhanced with VideoJS for better IPTV stream compatibility
@@ -16,6 +17,7 @@ const SimplePlayer = ({ sessionId, selectedChannel }) => {
   const [loading, setLoading] = useState(false);
   const [streamMode, setStreamMode] = useState('proxy'); // 'proxy', 'direct', or 'hls'
   const [isVideoJSReady, setIsVideoJSReady] = useState(false);
+  const [showChannelInfo, setShowChannelInfo] = useState(false);
 
   // Logger function
   const log = (level, message, data = null) => {
@@ -184,11 +186,13 @@ const SimplePlayer = ({ sessionId, selectedChannel }) => {
         log('INFO', 'Using direct channel URL', { url: streamUrl });
       } else if (streamMode === 'hls') {
         // Use HLS format from proxy
-        streamUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+        const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+        streamUrl = addAuthToStreamUrl(baseUrl);
         log('INFO', 'Using HLS proxy URL', { url: streamUrl });
       } else {
         // Use TS format from proxy (default)
-        streamUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+        const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+        streamUrl = addAuthToStreamUrl(baseUrl);
         log('INFO', 'Using TS proxy URL', { url: streamUrl });
       }
       
@@ -371,15 +375,38 @@ const SimplePlayer = ({ sessionId, selectedChannel }) => {
         ></video>
       </div>
 
-      {/* Channel info bar */}
+      {/* Toggle button for channel info */}
       {selectedChannel && (
-        <div style={{ 
-          position: 'absolute', 
-          bottom: '60px', 
-          left: '10px', 
+        <button
+          onClick={() => setShowChannelInfo(prev => !prev)}
+          title={showChannelInfo ? "Hide channel info" : "Show channel info"}
+          style={{
+            position: 'absolute',
+            top: '10px',
+            right: '10px',
+            zIndex: 10,
+            padding: '8px',
+            background: 'rgba(0, 0, 0, 0.7)',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '16px'
+          }}
+        >
+          ℹ️
+        </button>
+      )}
+
+      {/* Channel info bar */}
+      {selectedChannel && showChannelInfo && (
+        <div style={{
+          position: 'absolute',
+          bottom: '60px',
+          left: '10px',
           right: '10px',
-          padding: '5px 10px', 
-          background: 'rgba(0, 0, 0, 0.7)', 
+          padding: '5px 10px',
+          background: 'rgba(0, 0, 0, 0.7)',
           color: 'white',
           borderRadius: '4px',
           fontSize: '14px',

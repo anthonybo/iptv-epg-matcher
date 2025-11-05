@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { addAuthToStreamUrl } from './utils/streamAuth';
 
 /**
  * ProxyStreamPlayer - Uses the backend's proxy endpoint for IPTV streams
@@ -39,9 +40,10 @@ const ProxyStreamPlayer = ({ sessionId, selectedChannel }) => {
       });
 
       // Create URL for the backend proxy endpoint
-      const proxyUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channelId)}`;
+      const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channelId)}`;
+      const proxyUrl = addAuthToStreamUrl(baseUrl);
       console.log('[INFO] Using proxy stream URL:', proxyUrl);
-      
+
       // Set the video source
       const videoEl = videoRef.current;
       videoEl.src = proxyUrl;

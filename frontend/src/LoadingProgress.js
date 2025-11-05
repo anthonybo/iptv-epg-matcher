@@ -16,7 +16,8 @@ const LoadingProgress = ({
     sessionId,
     onComplete = () => {},
     onChannelsAvailable = () => {},
-    onEpgSourceAvailable = () => {}
+    onEpgSourceAvailable = () => {},
+    onCancel = null
 }) => {
     const [progress, setProgress] = useState(0);
     const [status, setStatus] = useState('Connecting to server...');
@@ -192,8 +193,11 @@ const LoadingProgress = ({
                 
             case 'error':
                 // Processing error
-                setError(data.message || 'An error occurred during processing');
+                console.log('[LoadingProgress] Error event received:', data);
+                const errorMsg = data.message || 'An error occurred during processing';
+                setError(errorMsg);
                 setHasFailed(true);
+                setStatus(errorMsg); // Also update status to show error
                 addLog(`Error: ${data.message}`);
 
                 // Close the event source
@@ -226,7 +230,34 @@ const LoadingProgress = ({
                 
             case 'message':
                 // Default (unnamed) SSE events come through as "message"
-                if (data.progress !== undefined || data.percentage !== undefined || data.percent !== undefined) {
+                // Check if this is actually an error message
+                if (data.stage && data.stage.includes('error')) {
+                    // This is an error message
+                    console.log('[LoadingProgress] Error detected in message event:', data);
+                    const errorMsg = data.message || 'An error occurred during processing';
+                    setError(errorMsg);
+                    setHasFailed(true);
+                    setStatus(errorMsg);
+                    addLog(`Error: ${data.message}`);
+
+                    // Close the event source
+                    if (eventSourceRef.current) {
+                        eventSourceRef.current.close();
+                    }
+                } else if (data.message && (data.message.toLowerCase().includes('error:') || data.message.toLowerCase().startsWith('error '))) {
+                    // Message contains "Error:" or starts with "Error "
+                    console.log('[LoadingProgress] Error detected in message text:', data);
+                    const errorMsg = data.message;
+                    setError(errorMsg);
+                    setHasFailed(true);
+                    setStatus(errorMsg);
+                    addLog(`Error: ${data.message}`);
+
+                    // Close the event source
+                    if (eventSourceRef.current) {
+                        eventSourceRef.current.close();
+                    }
+                } else if (data.progress !== undefined || data.percentage !== undefined || data.percent !== undefined) {
                     updateProgress(data);
                 } else if (data.stage) {
                     if (data.stage === 'complete') {
@@ -330,16 +361,47 @@ const LoadingProgress = ({
                 </div>
             </div>
 
-            {error && (
-                <div style={{
-                    background: 'rgba(254, 226, 226, 0.15)',
-                    border: '1px solid rgba(248, 113, 113, 0.45)',
-                    color: '#fecaca',
-                    padding: '12px 16px',
-                    borderRadius: '10px',
-                    marginBottom: '18px'
-                }}>
-                    Error: {error}
+            {(error || hasFailed) && (
+                <div>
+                    <div style={{
+                        background: 'rgba(254, 226, 226, 0.15)',
+                        border: '1px solid rgba(248, 113, 113, 0.45)',
+                        color: '#fecaca',
+                        padding: '12px 16px',
+                        borderRadius: '10px',
+                        marginBottom: '12px'
+                    }}>
+                        {error ? `Error: ${error}` : 'An error occurred during processing'}
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '18px' }}>
+                        <button
+                            onClick={() => {
+                                if (eventSourceRef.current) {
+                                    eventSourceRef.current.close();
+                                }
+                                if (onCancel && typeof onCancel === 'function') {
+                                    onCancel();
+                                }
+                            }}
+                            disabled={!onCancel}
+                            style={{
+                                background: onCancel ? 'linear-gradient(90deg, #ef4444, #dc2626)' : '#6b7280',
+                                color: 'white',
+                                padding: '10px 24px',
+                                borderRadius: '10px',
+                                border: 'none',
+                                fontWeight: '600',
+                                fontSize: '14px',
+                                cursor: onCancel ? 'pointer' : 'not-allowed',
+                                opacity: onCancel ? 1 : 0.6,
+                                transition: 'all 0.2s ease'
+                            }}
+                            onMouseEnter={(e) => onCancel && (e.target.style.transform = 'scale(1.05)')}
+                            onMouseLeave={(e) => onCancel && (e.target.style.transform = 'scale(1)')}
+                        >
+                            Close and Try Again
+                        </button>
+                    </div>
                 </div>
             )}
 

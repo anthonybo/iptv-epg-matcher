@@ -72,13 +72,15 @@ const connect = () => {
 const initializeTables = () => {
     return new Promise((resolve, reject) => {
         const queries = [
-            // IPTV Sources table
+            // IPTV Sources table - each source belongs to ONE user
             `CREATE TABLE IF NOT EXISTS iptv_sources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
                 name TEXT,
-                url TEXT UNIQUE,
+                url TEXT,
                 username TEXT,
                 password TEXT,
+                mac_address TEXT,
                 type TEXT,
                 exp_date TEXT,
                 max_connections INTEGER,
@@ -87,7 +89,9 @@ const initializeTables = () => {
                 is_trial BOOLEAN DEFAULT 0,
                 account_created_at TEXT,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(url, username, password)
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(user_id, url, username, password),
+                UNIQUE(user_id, url, mac_address)
             )`,
             
             // IPTV Categories table
@@ -158,7 +162,11 @@ const initializeTables = () => {
             `ALTER TABLE iptv_sources ADD COLUMN active_connections INTEGER`,
             `ALTER TABLE iptv_sources ADD COLUMN account_status TEXT`,
             `ALTER TABLE iptv_sources ADD COLUMN is_trial BOOLEAN DEFAULT 0`,
-            `ALTER TABLE iptv_sources ADD COLUMN account_created_at TEXT`
+            `ALTER TABLE iptv_sources ADD COLUMN account_created_at TEXT`,
+            // Add mac_address column for MAG/Stalker middleware support
+            `ALTER TABLE iptv_sources ADD COLUMN mac_address TEXT`,
+            // Add user_id column to make sources per-user instead of shared
+            `ALTER TABLE iptv_sources ADD COLUMN user_id INTEGER`
         ];
         
         db.serialize(() => {
@@ -205,7 +213,109 @@ const initializeTables = () => {
                             });
                         });
 
-                        resolve();
+                        // Populate user_id for existing sources from user_iptv_preferences
+                        db.run(`UPDATE iptv_sources
+                                SET user_id = (
+                                    SELECT user_id FROM user_iptv_preferences
+                                    WHERE user_iptv_preferences.source_id = iptv_sources.id
+                                    LIMIT 1
+                                )
+                                WHERE user_id IS NULL`, (updateErr) => {
+                            if (updateErr) {
+                                logger.warn(`Error migrating user_id: ${updateErr.message}`);
+                            } else {
+                                logger.info('Migrated user_id for existing sources');
+                            }
+
+                            // Clean up orphaned sources (sources with no user_id)
+                            db.run(`DELETE FROM iptv_sources WHERE user_id IS NULL`, (cleanupErr, result) => {
+                                if (cleanupErr) {
+                                    logger.warn(`Error cleaning up orphaned sources: ${cleanupErr.message}`);
+                                } else {
+                                    logger.info(`Cleaned up orphaned sources`);
+                                }
+
+                                // Check if table needs schema migration (has old UNIQUE(url) constraint)
+                                db.get(`SELECT sql FROM sqlite_master WHERE type='table' AND name='iptv_sources'`, (schemaErr, schemaRow) => {
+                                    if (schemaErr) {
+                                        logger.error(`Error checking schema: ${schemaErr.message}`);
+                                        resolve();
+                                        return;
+                                    }
+
+                                    // If schema contains "url TEXT UNIQUE", we need to recreate the table
+                                    if (schemaRow && schemaRow.sql && schemaRow.sql.includes('url TEXT UNIQUE')) {
+                                        logger.info('Detected old schema with url TEXT UNIQUE - migrating to per-user constraints...');
+
+                                        db.serialize(() => {
+                                            // 1. Create new table with correct schema
+                                        db.run(`CREATE TABLE iptv_sources_new (
+                                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                            user_id INTEGER NOT NULL,
+                                            name TEXT,
+                                            url TEXT,
+                                            username TEXT,
+                                            password TEXT,
+                                            mac_address TEXT,
+                                            type TEXT,
+                                            exp_date TEXT,
+                                            max_connections INTEGER,
+                                            active_connections INTEGER,
+                                            account_status TEXT,
+                                            is_trial BOOLEAN DEFAULT 0,
+                                            account_created_at TEXT,
+                                            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                                            UNIQUE(user_id, url, username, password),
+                                            UNIQUE(user_id, url, mac_address)
+                                        )`, (createErr) => {
+                                            if (createErr) {
+                                                logger.error(`Error creating new table: ${createErr.message}`);
+                                                resolve();
+                                                return;
+                                            }
+
+                                            // 2. Copy data from old table
+                                            db.run(`INSERT INTO iptv_sources_new
+                                                    SELECT id, user_id, name, url, username, password, mac_address, type,
+                                                           exp_date, max_connections, active_connections, account_status,
+                                                           is_trial, account_created_at, last_updated
+                                                    FROM iptv_sources`, (copyErr) => {
+                                                if (copyErr) {
+                                                    logger.error(`Error copying data: ${copyErr.message}`);
+                                                    db.run(`DROP TABLE IF EXISTS iptv_sources_new`);
+                                                    resolve();
+                                                    return;
+                                                }
+
+                                                // 3. Drop old table
+                                                db.run(`DROP TABLE iptv_sources`, (dropErr) => {
+                                                    if (dropErr) {
+                                                        logger.error(`Error dropping old table: ${dropErr.message}`);
+                                                        resolve();
+                                                        return;
+                                                    }
+
+                                                    // 4. Rename new table
+                                                    db.run(`ALTER TABLE iptv_sources_new RENAME TO iptv_sources`, (renameErr) => {
+                                                        if (renameErr) {
+                                                            logger.error(`Error renaming table: ${renameErr.message}`);
+                                                        } else {
+                                                            logger.info('Successfully migrated iptv_sources table to per-user schema');
+                                                        }
+                                                        resolve();
+                                                    });
+                                                });
+                                            });
+                                        });
+                                    });
+                                    } else {
+                                        logger.info('Schema already up to date');
+                                        resolve();
+                                    }
+                                });
+                            });
+                        });
                     });
                 }
             });
@@ -221,15 +331,31 @@ const initializeTables = () => {
 const saveSource = (source) => {
     return new Promise((resolve, reject) => {
         const {
-            name, url, username, password, type,
+            user_id, name, url, username, password, mac_address, type,
             exp_date, max_connections, active_connections,
             account_status, is_trial, account_created_at
         } = source;
 
-        // First check if source already exists
+        if (!user_id) {
+            reject(new Error('user_id is required'));
+            return;
+        }
+
+        // First check if source already exists FOR THIS USER
+        // For Stalker sources, check by user_id, URL, and MAC address
+        // For Xtream sources, check by user_id, URL, username, and password
+        let checkQuery, checkParams;
+        if (type === 'stalker') {
+            checkQuery = `SELECT id FROM iptv_sources WHERE user_id = ? AND type = 'stalker' AND url = ? AND (mac_address = ? OR mac_address IS NULL)`;
+            checkParams = [user_id, url, mac_address];
+        } else {
+            checkQuery = `SELECT id FROM iptv_sources WHERE user_id = ? AND url = ? AND username = ? AND password = ?`;
+            checkParams = [user_id, url, username, password];
+        }
+
         db.get(
-            `SELECT id FROM iptv_sources WHERE url = ? AND username = ? AND password = ?`,
-            [url, username, password],
+            checkQuery,
+            checkParams,
             (checkErr, existingSource) => {
                 if (checkErr) {
                     logger.error(`Error checking existing source: ${checkErr.message}`);
@@ -249,11 +375,13 @@ const saveSource = (source) => {
                         // Update the source metadata
                         db.run(
                             `UPDATE iptv_sources
-                             SET last_updated = CURRENT_TIMESTAMP, name = ?, type = ?,
+                             SET last_updated = CURRENT_TIMESTAMP, name = ?, type = ?, user_id = ?,
+                                 username = ?, password = ?, mac_address = ?,
                                  exp_date = ?, max_connections = ?, active_connections = ?,
                                  account_status = ?, is_trial = ?, account_created_at = ?
                              WHERE id = ?`,
-                            [name, type, exp_date, max_connections, active_connections,
+                            [name, type, user_id, username, password, mac_address,
+                             exp_date, max_connections, active_connections,
                              account_status, is_trial, account_created_at, existingSource.id],
                             (updateErr) => {
                                 if (updateErr) {
@@ -269,12 +397,12 @@ const saveSource = (source) => {
                 } else {
                     // Source doesn't exist, create it
                     db.run(
-                        `INSERT INTO iptv_sources (name, url, username, password, type,
+                        `INSERT INTO iptv_sources (user_id, name, url, username, password, mac_address, type,
                                                    exp_date, max_connections, active_connections,
                                                    account_status, is_trial, account_created_at,
                                                    last_updated)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-                        [name, url, username, password, type,
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+                        [user_id, name, url, username, password, mac_address, type,
                          exp_date, max_connections, active_connections,
                          account_status, is_trial, account_created_at],
                         function(insertErr) {
@@ -500,37 +628,6 @@ const getChannelsForSession = (sessionId, options = {}) => {
 
         const offset = (page - 1) * limit;
 
-        // Build WHERE clause for session/user filtering
-        let sessionWhereClause;
-        let params;
-
-        if (userId) {
-            // If user is authenticated, query by user_id OR session_id
-            sessionWhereClause = '(m.user_id = ? OR m.session_id = ?)';
-            params = [userId, sessionId];
-        } else {
-            // If not authenticated, query by session_id only
-            sessionWhereClause = 'm.session_id = ?';
-            params = [sessionId];
-        }
-
-        let whereClause = '';
-
-        if (categoryId) {
-            whereClause += ' AND c.group_title = ?';
-            params.push(categoryId);
-        }
-
-        if (search) {
-            whereClause += ' AND c.name LIKE ?';
-            params.push(`%${search}%`);
-        }
-
-        if (sourceId) {
-            whereClause += ' AND c.source_id = ?';
-            params.push(sourceId);
-        }
-
         // Validate sort parameters for security
         const validSortColumns = ['name', 'group_title', 'last_updated'];
         const validSortOrders = ['asc', 'desc'];
@@ -539,98 +636,195 @@ const getChannelsForSession = (sessionId, options = {}) => {
         const sanitizedSortOrder = validSortOrders.includes(sortOrder.toLowerCase()) ?
             sortOrder.toLowerCase() : 'asc';
 
-        // Build query with user preferences to get custom nicknames
-        // For sources with auto-generated "Legacy IPTV Source" names, prefer showing the URL
-        const query = userId
-            ? `SELECT c.*,
-                      COALESCE(
-                          p.nickname,
-                          CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END,
-                          s.url
-                      ) as source_name,
-                      s.url as source_url,
-                      s.type as source_type
-               FROM iptv_channels c
-               JOIN session_iptv_mappings m ON c.source_id = m.source_id
-               LEFT JOIN iptv_sources s ON c.source_id = s.id
-               LEFT JOIN user_iptv_preferences p ON s.id = p.source_id AND p.user_id = ${userId}
-               WHERE ${sessionWhereClause} ${whereClause}
-               ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
-               LIMIT ? OFFSET ?`
-            : `SELECT c.*,
-                      CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
-                      s.url as source_url,
-                      s.type as source_type
-               FROM iptv_channels c
-               JOIN session_iptv_mappings m ON c.source_id = m.source_id
-               LEFT JOIN iptv_sources s ON c.source_id = s.id
-               WHERE ${sessionWhereClause} ${whereClause}
-               ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
-               LIMIT ? OFFSET ?`;
+        let query, countQuery, params;
 
-        console.log('[getChannelsForSession] SQL Query:', query);
-        console.log('[getChannelsForSession] Params:', [...params, limit, offset]);
+        if (userId) {
+            // For authenticated users, query directly from iptv_sources using user_id
+            // No need for session mappings - sources are owned by the user
+            let whereClause = 's.user_id = ?';
+            params = [userId];
 
-        db.all(
-            query,
-            [...params, limit, offset],
-            (err, rows) => {
+            if (categoryId) {
+                whereClause += ' AND c.group_title = ?';
+                params.push(categoryId);
+            }
+
+            if (search) {
+                whereClause += ' AND c.name LIKE ?';
+                params.push(`%${search}%`);
+            }
+
+            if (sourceId) {
+                whereClause += ' AND c.source_id = ?';
+                params.push(sourceId);
+            }
+
+            query = `SELECT c.*,
+                          COALESCE(
+                              p.nickname,
+                              CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END,
+                              s.url
+                          ) as source_name,
+                          s.url as source_url,
+                          s.type as source_type
+                   FROM iptv_channels c
+                   JOIN iptv_sources s ON c.source_id = s.id
+                   LEFT JOIN user_iptv_preferences p ON s.id = p.source_id AND p.user_id = ?
+                   WHERE ${whereClause}
+                   ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
+                   LIMIT ? OFFSET ?`;
+
+            countQuery = `SELECT COUNT(DISTINCT c.channel_id) as total FROM iptv_channels c
+                         JOIN iptv_sources s ON c.source_id = s.id
+                         WHERE ${whereClause}`;
+
+            // Add userId for the LEFT JOIN in query
+            const queryParams = [userId, ...params, limit, offset];
+
+            console.log('[getChannelsForSession] Authenticated user query:', query);
+            console.log('[getChannelsForSession] Params:', queryParams);
+
+            db.all(query, queryParams, (err, rows) => {
+                if (err) {
+                    logger.error(`Error getting channels for authenticated user: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                // Get total count for pagination
+                db.get(countQuery, params, (countErr, countRow) => {
+                    if (countErr) {
+                        logger.error(`Error getting channel count: ${countErr.message}`);
+                        reject(countErr);
+                        return;
+                    }
+
+                    logger.info(`Found ${rows.length} channels from IPTV database for user ${userId}`);
+
+                    resolve({
+                        channels: rows.map(row => {
+                            // Extract base URL from channel URL if source name is invalid
+                            let displayName = row.source_name;
+                            if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+                                try {
+                                    const urlObj = new URL(row.url);
+                                    displayName = `${urlObj.protocol}//${urlObj.host}`;
+                                } catch {
+                                    displayName = row.source_url || `Source ${row.source_id}`;
+                                }
+                            }
+
+                            return {
+                                id: row.channel_id,
+                                sourceId: row.source_id,
+                                sourceName: displayName,
+                                sourceType: row.source_type,
+                                name: row.name,
+                                logo: row.logo,
+                                url: row.url,
+                                group: { title: row.group_title },
+                                tvg: { id: row.epg_channel_id },
+                                categories: row.categories ? JSON.parse(row.categories) : []
+                            };
+                        }),
+                        pagination: {
+                            total: countRow.total,
+                            page,
+                            limit,
+                            pages: Math.ceil(countRow.total / limit)
+                        }
+                    });
+                });
+            });
+        } else {
+            // For guest users, use session mappings
+            let whereClause = 'm.session_id = ?';
+            params = [sessionId];
+
+            if (categoryId) {
+                whereClause += ' AND c.group_title = ?';
+                params.push(categoryId);
+            }
+
+            if (search) {
+                whereClause += ' AND c.name LIKE ?';
+                params.push(`%${search}%`);
+            }
+
+            if (sourceId) {
+                whereClause += ' AND c.source_id = ?';
+                params.push(sourceId);
+            }
+
+            query = `SELECT c.*,
+                          CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
+                          s.url as source_url,
+                          s.type as source_type
+                   FROM iptv_channels c
+                   JOIN session_iptv_mappings m ON c.source_id = m.source_id
+                   LEFT JOIN iptv_sources s ON c.source_id = s.id
+                   WHERE ${whereClause}
+                   ORDER BY c.${sanitizedSortBy} ${sanitizedSortOrder}
+                   LIMIT ? OFFSET ?`;
+
+            countQuery = `SELECT COUNT(DISTINCT c.channel_id) as total FROM iptv_channels c
+                         JOIN session_iptv_mappings m ON c.source_id = m.source_id
+                         WHERE ${whereClause}`;
+
+            console.log('[getChannelsForSession] Guest user query:', query);
+            console.log('[getChannelsForSession] Params:', [...params, limit, offset]);
+
+            db.all(query, [...params, limit, offset], (err, rows) => {
                 if (err) {
                     logger.error(`Error getting channels for session: ${err.message}`);
                     reject(err);
                     return;
                 }
 
-                // Get total count for pagination - deduplicated by channel_id
-                db.get(
-                    `SELECT COUNT(DISTINCT c.channel_id) as total FROM iptv_channels c
-                     JOIN session_iptv_mappings m ON c.source_id = m.source_id
-                     WHERE ${sessionWhereClause} ${whereClause}`,
-                    params,
-                    (countErr, countRow) => {
-                        if (countErr) {
-                            logger.error(`Error getting channel count: ${countErr.message}`);
-                            reject(countErr);
-                            return;
-                        }
-
-                        resolve({
-                            channels: rows.map(row => {
-                                // Extract base URL from channel URL if source name is invalid
-                                let displayName = row.source_name;
-                                if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
-                                    try {
-                                        const urlObj = new URL(row.url);
-                                        displayName = `${urlObj.protocol}//${urlObj.host}`;
-                                    } catch {
-                                        displayName = row.source_url || `Source ${row.source_id}`;
-                                    }
-                                }
-
-                                return {
-                                    id: row.channel_id,
-                                    sourceId: row.source_id,
-                                    sourceName: displayName,
-                                    sourceType: row.source_type,
-                                    name: row.name,
-                                    logo: row.logo,
-                                    url: row.url,
-                                    group: { title: row.group_title },
-                                    tvg: { id: row.epg_channel_id },
-                                    categories: row.categories ? JSON.parse(row.categories) : []
-                                };
-                            }),
-                            pagination: {
-                                total: countRow.total,
-                                page,
-                                limit,
-                                pages: Math.ceil(countRow.total / limit)
-                            }
-                        });
+                // Get total count for pagination
+                db.get(countQuery, params, (countErr, countRow) => {
+                    if (countErr) {
+                        logger.error(`Error getting channel count: ${countErr.message}`);
+                        reject(countErr);
+                        return;
                     }
-                );
-            }
-        );
+
+                    resolve({
+                        channels: rows.map(row => {
+                            // Extract base URL from channel URL if source name is invalid
+                            let displayName = row.source_name;
+                            if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+                                try {
+                                    const urlObj = new URL(row.url);
+                                    displayName = `${urlObj.protocol}//${urlObj.host}`;
+                                } catch {
+                                    displayName = row.source_url || `Source ${row.source_id}`;
+                                }
+                            }
+
+                            return {
+                                id: row.channel_id,
+                                sourceId: row.source_id,
+                                sourceName: displayName,
+                                sourceType: row.source_type,
+                                name: row.name,
+                                logo: row.logo,
+                                url: row.url,
+                                group: { title: row.group_title },
+                                tvg: { id: row.epg_channel_id },
+                                categories: row.categories ? JSON.parse(row.categories) : []
+                            };
+                        }),
+                        pagination: {
+                            total: countRow.total,
+                            page,
+                            limit,
+                            pages: Math.ceil(countRow.total / limit)
+                        }
+                    });
+                });
+            });
+        }
     });
 };
 
@@ -638,40 +832,60 @@ const getChannelsForSession = (sessionId, options = {}) => {
  * Get categories for a session
  * @param {string} sessionId - Session ID
  * @param {number} sourceId - Optional source ID to filter categories
+ * @param {number} userId - Optional user ID for authenticated users
  * @returns {Promise<Array<Object>>} Categories
  */
-const getCategoriesForSession = (sessionId, sourceId = null) => {
+const getCategoriesForSession = (sessionId, sourceId = null, userId = null) => {
     return new Promise((resolve, reject) => {
-        let whereClause = 'm.session_id = ? AND c.group_title != \'\'';
-        let params = [sessionId];
+        let query, params;
 
-        if (sourceId) {
-            whereClause += ' AND c.source_id = ?';
-            params.push(sourceId);
+        if (userId) {
+            // For authenticated users, query directly from iptv_sources using user_id
+            let whereClause = 's.user_id = ? AND c.group_title != \'\'';
+            params = [userId];
+
+            if (sourceId) {
+                whereClause += ' AND c.source_id = ?';
+                params.push(sourceId);
+            }
+
+            query = `SELECT DISTINCT c.group_title as name, COUNT(DISTINCT c.channel_id) as channel_count
+                     FROM iptv_channels c
+                     JOIN iptv_sources s ON c.source_id = s.id
+                     WHERE ${whereClause}
+                     GROUP BY c.group_title
+                     ORDER BY c.group_title`;
+        } else {
+            // For guest users, use session mappings
+            let whereClause = 'm.session_id = ? AND c.group_title != \'\'';
+            params = [sessionId];
+
+            if (sourceId) {
+                whereClause += ' AND c.source_id = ?';
+                params.push(sourceId);
+            }
+
+            query = `SELECT DISTINCT c.group_title as name, COUNT(DISTINCT c.channel_id) as channel_count
+                     FROM iptv_channels c
+                     JOIN session_iptv_mappings m ON c.source_id = m.source_id
+                     WHERE ${whereClause}
+                     GROUP BY c.group_title
+                     ORDER BY c.group_title`;
         }
 
-        db.all(
-            `SELECT DISTINCT c.group_title as name, COUNT(DISTINCT c.channel_id) as channel_count
-             FROM iptv_channels c
-             JOIN session_iptv_mappings m ON c.source_id = m.source_id
-             WHERE ${whereClause}
-             GROUP BY c.group_title
-             ORDER BY c.group_title`,
-            params,
-            (err, rows) => {
-                if (err) {
-                    logger.error(`Error getting categories for session: ${err.message}`);
-                    reject(err);
-                    return;
-                }
-
-                resolve(rows.map(row => ({
-                    id: row.name,
-                    name: row.name,
-                    channelCount: row.channel_count
-                })));
+        db.all(query, params, (err, rows) => {
+            if (err) {
+                logger.error(`Error getting categories for session: ${err.message}`);
+                reject(err);
+                return;
             }
-        );
+
+            resolve(rows.map(row => ({
+                id: row.name,
+                name: row.name,
+                channelCount: row.channel_count
+            })));
+        });
     });
 };
 
@@ -847,6 +1061,7 @@ const getUserIPTVSources = (userId) => {
                 s.url,
                 s.username,
                 s.password,
+                s.mac_address,
                 s.type,
                 s.exp_date,
                 s.max_connections,
@@ -855,16 +1070,16 @@ const getUserIPTVSources = (userId) => {
                 s.is_trial,
                 s.account_created_at,
                 s.last_updated,
-                p.priority,
-                p.is_active,
+                COALESCE(p.priority, 999) as priority,
+                COALESCE(p.is_active, 1) as is_active,
                 p.nickname,
-                p.created_at as preference_created_at,
+                COALESCE(p.created_at, s.last_updated) as preference_created_at,
                 (SELECT COUNT(*) FROM iptv_channels WHERE source_id = s.id) as channel_count
              FROM iptv_sources s
-             INNER JOIN user_iptv_preferences p ON s.id = p.source_id
-             WHERE p.user_id = ?
-             ORDER BY p.priority ASC, p.created_at DESC`,
-            [userId],
+             LEFT JOIN user_iptv_preferences p ON s.id = p.source_id AND p.user_id = ?
+             WHERE s.user_id = ?
+             ORDER BY priority ASC, preference_created_at DESC`,
+            [userId, userId],
             (err, rows) => {
                 if (err) {
                     logger.error(`Error getting user IPTV sources: ${err.message}`);
@@ -879,6 +1094,7 @@ const getUserIPTVSources = (userId) => {
                     url: row.url,
                     username: row.username,
                     password: row.password,
+                    mac_address: row.mac_address,
                     type: row.type,
                     exp_date: row.exp_date,
                     max_connections: row.max_connections,
@@ -1073,6 +1289,29 @@ const toggleSourceActive = (userId, sourceId, isActive) => {
 };
 
 /**
+ * Get IPTV source by ID
+ * @param {number} sourceId - Source ID
+ * @returns {Promise<Object|null>} Source object or null if not found
+ */
+const getSourceById = (sourceId) => {
+    return new Promise((resolve, reject) => {
+        db.get(
+            `SELECT * FROM iptv_sources WHERE id = ?`,
+            [sourceId],
+            (err, row) => {
+                if (err) {
+                    logger.error(`Error getting source by ID: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                resolve(row || null);
+            }
+        );
+    });
+};
+
+/**
  * Delete user's IPTV source preference (doesn't delete actual source)
  * @param {number} userId - User ID
  * @param {number} sourceId - Source ID
@@ -1080,18 +1319,30 @@ const toggleSourceActive = (userId, sourceId, isActive) => {
  */
 const deleteUserSource = (userId, sourceId) => {
     return new Promise((resolve, reject) => {
+        // First delete the user preference (if it exists)
         db.run(
-            `DELETE FROM user_iptv_preferences
-             WHERE user_id = ? AND source_id = ?`,
+            `DELETE FROM user_iptv_preferences WHERE user_id = ? AND source_id = ?`,
             [userId, sourceId],
-            function(err) {
-                if (err) {
-                    logger.error(`Error deleting user source: ${err.message}`);
-                    reject(err);
-                    return;
+            (prefErr) => {
+                if (prefErr) {
+                    logger.warn(`Error deleting user preference: ${prefErr.message}`);
                 }
 
-                resolve();
+                // Then delete the actual source (channels and categories will cascade)
+                db.run(
+                    `DELETE FROM iptv_sources WHERE id = ? AND user_id = ?`,
+                    [sourceId, userId],
+                    function(err) {
+                        if (err) {
+                            logger.error(`Error deleting IPTV source: ${err.message}`);
+                            reject(err);
+                            return;
+                        }
+
+                        logger.info(`Deleted IPTV source ${sourceId} for user ${userId}`);
+                        resolve();
+                    }
+                );
             }
         );
     });
@@ -1201,6 +1452,7 @@ module.exports = {
     updateSourceNickname,
     updateSourceCredentials,
     toggleSourceActive,
+    getSourceById,
     deleteUserSource,
     getAlternateFeeds
 }; 

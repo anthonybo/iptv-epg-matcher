@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { API_BASE_URL } from '../../../config';
+import apiClient from '../../../utils/apiClient';
 
 /**
  * Custom hook for managing channel data, categories, and filtering
@@ -31,17 +32,13 @@ export const useChannels = (sessionId, sourceId = null) => {
 
     const fetchCategories = async () => {
       try {
-        let url = `${API_BASE_URL}/api/channels/${sessionId}/categories`;
+        let url = `/channels/${sessionId}/categories`;
         if (sourceId) {
           url += `?source_id=${sourceId}`;
         }
-        const response = await fetch(url);
+        const response = await apiClient.get(url);
 
-        if (!response.ok) {
-          throw new Error(`Failed to fetch categories: ${response.status}`);
-        }
-
-        const data = await response.json();
+        const data = response.data;
 
         if (Array.isArray(data)) {
           // Normalize category format
@@ -97,7 +94,7 @@ export const useChannels = (sessionId, sourceId = null) => {
 
       try {
         // Build URL with category filter if selected
-        let url = `${API_BASE_URL}/api/channels/${sessionId}?page=${page}&limit=${limit}`;
+        let url = `/channels/${sessionId}?page=${page}&limit=${limit}`;
 
         // If exactly one category is selected, use backend filtering
         if (selectedCategories.size === 1) {
@@ -117,13 +114,9 @@ export const useChannels = (sessionId, sourceId = null) => {
           console.log('[useChannels] Fetching with search term:', searchTerm);
         }
 
-        const response = await fetch(url, { signal: abortController.signal });
+        const response = await apiClient.get(url, { signal: abortController.signal });
 
-        if (!response.ok) {
-          throw new Error(`Failed to fetch channels: ${response.status}`);
-        }
-
-        const data = await response.json();
+        const data = response.data;
 
         // Only update state if this request wasn't cancelled
         if (isSubscribed && data.channels) {

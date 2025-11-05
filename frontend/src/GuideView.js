@@ -342,7 +342,14 @@ const GuideView = ({ sessionId, onChannelSelect }) => {
       }
 
       if (onChannelSelect) {
-        onChannelSelect(channel);
+        // Transform the channel object to include sourceId and sourceName from iptvSource
+        const transformedChannel = {
+          ...channel,
+          sourceId: channel.iptvSource?.id,
+          sourceName: channel.iptvSource?.name,
+          sourceType: channel.iptvSource?.type
+        };
+        onChannelSelect(transformedChannel);
       }
     },
     [onChannelSelect]
