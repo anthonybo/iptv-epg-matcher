@@ -295,18 +295,49 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
     return () => clearInterval(timer);
   }, []);
 
-  // Scroll to current time once data is available
+  // Scroll to show current playing program without blank space
   useLayoutEffect(() => {
-    if (!gridRef.current || autoScrolledRef.current || matchedChannels.length === 0) {
+    if (!gridRef.current || matchedChannels.length === 0) {
       return;
     }
 
+    // Only auto-scroll once when data first loads
+    if (autoScrolledRef.current) {
+      return;
+    }
+
+    // Find the earliest program start time across all channels
+    let earliestProgramTime = null;
+    matchedChannels.forEach(channel => {
+      if (Array.isArray(channel.programs)) {
+        channel.programs.forEach(program => {
+          if (program.start) {
+            const startTime = new Date(program.start);
+            if (!earliestProgramTime || startTime < earliestProgramTime) {
+              earliestProgramTime = startTime;
+            }
+          }
+        });
+      }
+    });
+
     const startOfDay = new Date(currentTime);
     startOfDay.setHours(0, 0, 0, 0);
-    const minutesSinceMidnight = (currentTime - startOfDay) / 60000;
-    const desiredScroll = minutesSinceMidnight * PIXELS_PER_MINUTE - (gridRef.current.clientWidth / 2);
 
-    gridRef.current.scrollLeft = Math.max(0, desiredScroll);
+    // Use the earliest program time or current time, whichever is earlier
+    const scrollReferenceTime = earliestProgramTime && earliestProgramTime < currentTime
+      ? earliestProgramTime
+      : currentTime;
+
+    const minutesSinceMidnight = (scrollReferenceTime - startOfDay) / 60000;
+    const scrollPosition = minutesSinceMidnight * PIXELS_PER_MINUTE;
+
+    // Scroll to the reference time (earliest program or current time)
+    gridRef.current.scrollTo({
+      left: Math.max(0, scrollPosition),
+      behavior: 'smooth'
+    });
+
     setGridScrollLeft(gridRef.current.scrollLeft);
     autoScrolledRef.current = true;
   }, [matchedChannels, currentTime]);

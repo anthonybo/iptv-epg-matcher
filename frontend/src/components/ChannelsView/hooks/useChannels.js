@@ -140,13 +140,15 @@ export const useChannels = (sessionId, sourceId = null) => {
           setHasMore(data.channels.length === limit);
         }
       } catch (err) {
-        if (err.name === 'AbortError') {
-          console.log('[useChannels] Request aborted');
-        } else {
-          console.error('Error fetching channels:', err);
-          if (isSubscribed) {
-            setError(err.message);
-          }
+        // Don't log errors for canceled/aborted requests (expected during search)
+        if (err.name === 'AbortError' || err.name === 'CanceledError' || err.code === 'ERR_CANCELED') {
+          // Silently ignore - this is expected when requests are canceled
+          return;
+        }
+
+        console.error('Error fetching channels:', err);
+        if (isSubscribed) {
+          setError(err.message);
         }
       } finally {
         if (isSubscribed) {

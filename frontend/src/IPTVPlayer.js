@@ -468,7 +468,7 @@ const IPTVPlayer = ({
         });
 
         player.play().catch(e => {
-          log('warn', 'Autoplay prevented', { error: e.message });
+          // Autoplay prevented is normal browser behavior - don't log it
         });
 
         playerInstanceRef.current = player;
@@ -591,7 +591,7 @@ const IPTVPlayer = ({
     });
     
     videoEl.play().catch(e => {
-      log('warn', 'Autoplay prevented', { error: e.message });
+      // Autoplay prevented is normal browser behavior - don't log it
     });
   };
 
