@@ -7,6 +7,10 @@ const sessionStorage = require('../utils/sessionStorage');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
 const { PassThrough } = require('stream');
 const { authMiddleware } = require('../middleware/authMiddleware');
+const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 /**
  * GET /:sessionId/:channelId
@@ -512,6 +516,236 @@ router.get('/:sessionId', sseHeaders, (req, res) => {
       error: error.message 
     });
     res.status(500).end();
+  }
+});
+
+/**
+ * HLS Transcoding for Chromecast Support
+ * Converts MPEG-TS streams to HLS format that Chromecast can play
+ */
+
+// Store active HLS transcoding sessions
+const hlsSessions = new Map();
+
+// Clean up HLS session
+function cleanupHLSSession(sessionKey) {
+  const session = hlsSessions.get(sessionKey);
+  if (session) {
+    logger.info(`Cleaning up HLS session: ${sessionKey}`);
+
+    // Kill ffmpeg process
+    if (session.ffmpegProcess && !session.ffmpegProcess.killed) {
+      session.ffmpegProcess.kill('SIGKILL');
+    }
+
+    // Clean up temporary files
+    if (session.hlsDir && fs.existsSync(session.hlsDir)) {
+      try {
+        const files = fs.readdirSync(session.hlsDir);
+        files.forEach(file => {
+          fs.unlinkSync(path.join(session.hlsDir, file));
+        });
+        fs.rmdirSync(session.hlsDir);
+        logger.info(`Cleaned up HLS directory: ${session.hlsDir}`);
+      } catch (err) {
+        logger.error(`Error cleaning up HLS directory: ${err.message}`);
+      }
+    }
+
+    hlsSessions.delete(sessionKey);
+  }
+}
+
+// Cleanup old HLS sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, session] of hlsSessions.entries()) {
+    // Clean up sessions older than 5 minutes with no activity
+    if (now - session.lastAccess > 5 * 60 * 1000) {
+      logger.info(`Cleaning up inactive HLS session: ${key}`);
+      cleanupHLSSession(key);
+    }
+  }
+}, 60 * 1000); // Check every minute
+
+/**
+ * GET /:sessionId/:channelId/hls.m3u8
+ * Serve HLS playlist for Chromecast
+ */
+router.get('/:sessionId/:channelId/hls.m3u8', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, channelId } = req.params;
+    const sessionKey = `${sessionId}_${channelId}`;
+
+    logger.info(`HLS playlist request for ${sessionKey}`);
+
+    // Get or create HLS session
+    let hlsSession = hlsSessions.get(sessionKey);
+
+    if (!hlsSession) {
+      logger.info(`Creating new HLS transcoding session for ${sessionKey}`);
+
+      // Create temporary directory for HLS segments
+      const hlsDir = path.join(os.tmpdir(), 'hls', sessionKey);
+      if (!fs.existsSync(hlsDir)) {
+        fs.mkdirSync(hlsDir, { recursive: true });
+      }
+
+      // Get the stream URL (reuse logic from main stream endpoint)
+      const streamReq = { params: { sessionId, channelId }, query: {}, user: req.user };
+
+      // Import the channel lookup logic - we'll need to refactor this
+      // For now, make a request to our own stream endpoint to get the URL
+      const baseUrl = `http://localhost:${process.env.PORT || 5001}`;
+      const streamInfoUrl = `${baseUrl}/api/stream/${sessionId}/${channelId}?redirect=true`;
+
+      logger.info(`Fetching stream URL from: ${streamInfoUrl}`);
+
+      const streamInfoResp = await fetch(streamInfoUrl, {
+        redirect: 'manual',
+        headers: req.headers
+      });
+
+      const streamUrl = streamInfoResp.headers.get('location') || streamInfoResp.url;
+      logger.info(`Got stream URL for HLS transcoding: ${streamUrl}`);
+
+      // Start ffmpeg transcoding to HLS
+      const playlistPath = path.join(hlsDir, 'playlist.m3u8');
+      const segmentPattern = path.join(hlsDir, 'segment%03d.ts');
+
+      const ffmpegArgs = [
+        '-i', streamUrl,
+        '-c:v', 'copy',           // Copy video codec (no re-encoding for speed)
+        '-c:a', 'aac',             // Convert audio to AAC for compatibility
+        '-b:a', '128k',
+        '-f', 'hls',
+        '-hls_time', '4',          // 4 second segments
+        '-hls_list_size', '10',     // Keep last 10 segments in playlist
+        '-hls_flags', 'delete_segments+append_list',
+        '-start_number', '0',
+        playlistPath
+      ];
+
+      logger.info(`Starting ffmpeg with args: ${ffmpegArgs.join(' ')}`);
+
+      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+
+      ffmpegProcess.stderr.on('data', (data) => {
+        const output = data.toString();
+        // Only log important messages (errors, not warnings about bitstream issues)
+        if (output.includes('error') || output.includes('failed') || output.includes('Invalid')) {
+          logger.error(`[ffmpeg ${sessionKey}] ${output}`);
+        } else if (output.includes('frame=')) {
+          // Log progress occasionally (every frame info line)
+          logger.debug(`[ffmpeg ${sessionKey}] ${output.trim()}`);
+        }
+        // Skip logging bitstream warnings and timestamp discontinuities - they're normal for live streams
+      });
+
+      ffmpegProcess.stdout.on('data', (data) => {
+        logger.debug(`[ffmpeg stdout ${sessionKey}] ${data.toString()}`);
+      });
+
+      ffmpegProcess.on('error', (error) => {
+        logger.error(`ffmpeg error for ${sessionKey}: ${error.message}`);
+        cleanupHLSSession(sessionKey);
+      });
+
+      ffmpegProcess.on('exit', (code) => {
+        logger.info(`ffmpeg exited for ${sessionKey} with code ${code}`);
+        if (code !== 0) {
+          logger.error(`ffmpeg failed for ${sessionKey}, cleaning up`);
+          cleanupHLSSession(sessionKey);
+        }
+      });
+
+      hlsSession = {
+        ffmpegProcess,
+        hlsDir,
+        playlistPath,
+        lastAccess: Date.now(),
+        startTime: Date.now()
+      };
+
+      hlsSessions.set(sessionKey, hlsSession);
+
+      // Wait for first segments to be generated (up to 10 seconds)
+      let waitTime = 0;
+      const maxWait = 10000;
+      const checkInterval = 500;
+
+      while (waitTime < maxWait && !fs.existsSync(playlistPath)) {
+        await new Promise(resolve => setTimeout(resolve, checkInterval));
+        waitTime += checkInterval;
+      }
+
+      if (!fs.existsSync(playlistPath)) {
+        logger.error(`Playlist not created after ${maxWait}ms for ${sessionKey}`);
+        // Check if ffmpeg process is still running
+        if (ffmpegProcess.killed) {
+          logger.error(`ffmpeg process was killed for ${sessionKey}`);
+        }
+        // List files in the directory
+        if (fs.existsSync(hlsDir)) {
+          const files = fs.readdirSync(hlsDir);
+          logger.info(`Files in HLS dir: ${files.join(', ')}`);
+        }
+      } else {
+        logger.info(`Playlist created after ${waitTime}ms for ${sessionKey}`);
+      }
+    }
+
+    // Update last access time
+    hlsSession.lastAccess = Date.now();
+
+    // Serve the playlist
+    if (fs.existsSync(hlsSession.playlistPath)) {
+      logger.info(`Serving playlist for ${sessionKey}`);
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.sendFile(hlsSession.playlistPath);
+    } else {
+      logger.warn(`Playlist not ready yet for ${sessionKey}, files in dir: ${fs.existsSync(hlsSession.hlsDir) ? fs.readdirSync(hlsSession.hlsDir).join(', ') : 'dir does not exist'}`);
+      res.status(503).send('Playlist not ready, please retry');
+    }
+
+  } catch (error) {
+    logger.error(`Error serving HLS playlist: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /:sessionId/:channelId/segment*.ts
+ * Serve HLS segments
+ */
+router.get('/:sessionId/:channelId/:segment', authMiddleware, (req, res) => {
+  try {
+    const { sessionId, channelId, segment } = req.params;
+    const sessionKey = `${sessionId}_${channelId}`;
+
+    const hlsSession = hlsSessions.get(sessionKey);
+    if (!hlsSession) {
+      return res.status(404).send('HLS session not found');
+    }
+
+    // Update last access time
+    hlsSession.lastAccess = Date.now();
+
+    const segmentPath = path.join(hlsSession.hlsDir, segment);
+
+    if (fs.existsSync(segmentPath)) {
+      res.setHeader('Content-Type', 'video/mp2t');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.sendFile(segmentPath);
+    } else {
+      logger.warn(`Segment not found: ${segmentPath}`);
+      res.status(404).send('Segment not found');
+    }
+
+  } catch (error) {
+    logger.error(`Error serving HLS segment: ${error.message}`);
+    res.status(500).json({ error: error.message });
   }
 });
 

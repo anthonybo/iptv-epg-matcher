@@ -355,12 +355,46 @@ app.use('/stream', require('./routes/stream'));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     uptime: process.uptime(),
     memoryUsage: process.memoryUsage(),
     timestamp: new Date().toISOString()
   });
+});
+
+// Get server network IP address (for Chromecast support)
+app.get('/api/network-info', (req, res) => {
+  try {
+    const os = require('os');
+    const networkInterfaces = os.networkInterfaces();
+    const addresses = [];
+
+    // Find all non-internal IPv4 addresses
+    Object.keys(networkInterfaces).forEach(interfaceName => {
+      networkInterfaces[interfaceName].forEach(iface => {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          addresses.push({
+            interface: interfaceName,
+            address: iface.address,
+            netmask: iface.netmask
+          });
+        }
+      });
+    });
+
+    // Return the first valid address, or localhost if none found
+    const primaryAddress = addresses.length > 0 ? addresses[0].address : 'localhost';
+
+    res.json({
+      primaryAddress,
+      allAddresses: addresses,
+      hostname: os.hostname()
+    });
+  } catch (error) {
+    logger.error('Error getting network info:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Cache stats endpoint

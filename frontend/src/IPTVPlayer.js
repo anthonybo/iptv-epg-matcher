@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { addAuthToStreamUrl } from './utils/streamAuth';
+import { useCast } from './hooks/useCast';
+import CastButton from './components/CastButton';
 
 /**
  * Enhanced IPTVPlayer - Browser-compatible player for IPTV streams
@@ -41,7 +43,10 @@ const IPTVPlayer = ({
   const showDebug = theatreMode && externalShowDebug !== undefined ? externalShowDebug : internalShowDebug;
   const showChannelInfo = theatreMode && externalShowChannelInfo !== undefined ? externalShowChannelInfo : internalShowChannelInfo;
   const showEpgInfo = theatreMode && externalShowEpgInfo !== undefined ? externalShowEpgInfo : internalShowEpgInfo;
-  
+
+  // Google Cast
+  const { isCastAvailable, isCasting, castMedia, stopCasting } = useCast();
+
   // Refs
   const containerRef = useRef(null);
   const playerInstanceRef = useRef(null);
@@ -610,6 +615,41 @@ const IPTVPlayer = ({
     setInternalShowEpgInfo(prev => !prev);
   };
 
+  // Handle Cast button click
+  const handleCast = async () => {
+    if (isCasting) {
+      stopCasting();
+    } else {
+      try {
+        // Fetch the server's network IP address
+        const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
+        const networkInfoUrl = `${apiUrl}/network-info`;
+
+        log('info', 'Fetching network info for casting', { networkInfoUrl });
+
+        const response = await fetch(networkInfoUrl);
+        const networkInfo = await response.json();
+
+        log('info', 'Network info received', networkInfo);
+
+        // Use HLS transcoded stream for Chromecast compatibility
+        const serverIP = networkInfo.primaryAddress;
+        const port = apiUrl.match(/:(\d+)/)?.[1] || '5001';
+        const castApiUrl = `http://${serverIP}:${port}/api`;
+        const streamUrl = `${castApiUrl}/stream/${sessionId}/${getChannelId()}/hls.m3u8`;
+        const channelName = selectedChannel?.name || 'IPTV Stream';
+        const logoUrl = selectedChannel?.logo || selectedChannel?.tvgLogo;
+
+        log('info', 'Starting cast with HLS transcoded stream', { streamUrl, channelName, serverIP });
+        castMedia(streamUrl, channelName, logoUrl);
+      } catch (error) {
+        const errorMsg = `Failed to get network info for casting: ${error.message}`;
+        log('error', errorMsg);
+        alert(errorMsg);
+      }
+    }
+  };
+
   // Format time for display
 // Specific part to update: the formatTime function
 
@@ -807,6 +847,13 @@ const formatTime = (date) => {
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
           </svg>
         </button>
+
+        {/* Google Cast button */}
+        <CastButton
+          isCastAvailable={isCastAvailable}
+          isCasting={isCasting}
+          onClick={handleCast}
+        />
       </div>
     );
   };
