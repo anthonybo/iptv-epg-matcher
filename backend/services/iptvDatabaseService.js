@@ -145,13 +145,31 @@ const initializeTables = () => {
                 UNIQUE(user_id, source_id)
             )`,
 
+            // Generated XTREAM credentials
+            `CREATE TABLE IF NOT EXISTS generated_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL,
+                credential_id TEXT NOT NULL UNIQUE,
+                m3u_file TEXT,
+                epg_file TEXT,
+                channel_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(username, password)
+            )`,
+
             // Create indexes for performance
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_source_id ON iptv_channels(source_id)`,
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_name ON iptv_channels(name)`,
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_epg_id ON iptv_channels(epg_channel_id)`,
             `CREATE INDEX IF NOT EXISTS idx_session_mappings ON session_iptv_mappings(session_id)`,
             `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_user ON user_iptv_preferences(user_id)`,
-            `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_priority ON user_iptv_preferences(user_id, priority)`
+            `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_priority ON user_iptv_preferences(user_id, priority)`,
+            `CREATE INDEX IF NOT EXISTS idx_generated_creds_user ON generated_credentials(user_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_generated_creds_username ON generated_credentials(username)`
         ];
 
         // Migration queries to add new columns to existing tables

@@ -11,10 +11,10 @@ import FeedSelector from './components/FeedSelector/FeedSelector';
  * @param {Object} props.selectedChannel Currently selected channel
  * @param {Function} props.onEpgMatch Callback when EPG is matched
  * @param {Object} props.matchedChannels Object mapping channel IDs to matched EPG IDs
- * @param {Function} props.onGenerate Callback to generate credentials
- * @param {boolean} props.isGenerating Flag indicating if generation is in progress
  * @param {Array} props.availableSources Array of available IPTV sources
  * @param {Function} props.onBackToChannels Callback to return to channels view
+ * @param {Function} props.onToggleTheatre Callback to toggle theatre mode
+ * @param {boolean} props.isTheatreMode Flag indicating if theatre mode is active
  * @returns {JSX.Element} Player view UI
  */
 const PlayerView = ({
@@ -22,8 +22,6 @@ const PlayerView = ({
   selectedChannel,
   onEpgMatch,
   matchedChannels = {},
-  onGenerate,
-  isGenerating = false,
   availableSources = [],
   onBackToChannels,
   onToggleTheatre,
@@ -118,8 +116,6 @@ const PlayerView = ({
       sourceId: feed.source.id
     }));
   };
-
-  const hasMatches = Object.keys(matchedChannels).length > 0;
 
   console.log('[PlayerView] Rendering with sourceName:', sourceName);
 
@@ -277,37 +273,6 @@ const PlayerView = ({
               onEpgMatch={onEpgMatch}
               matchedChannels={matchedChannels}
             />
-          </div>
-
-          <div className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-6 text-center shadow-2xl shadow-slate-950/40">
-            <button
-              type="button"
-              onClick={onGenerate}
-              disabled={isGenerating || !hasMatches}
-              className={`inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold shadow-lg shadow-emerald-900/40 transition focus:outline-none focus:ring-2 focus:ring-emerald-500/60 focus:ring-offset-2 focus:ring-offset-slate-950 ${
-                isGenerating || !hasMatches
-                  ? 'cursor-not-allowed border border-slate-700 bg-slate-800 text-slate-500'
-                  : 'border border-emerald-500/40 bg-emerald-500/20 text-emerald-100 hover:bg-emerald-500/30'
-              }`}
-            >
-              {isGenerating ? (
-                <span className="h-4 w-4 animate-spin rounded-full border-2 border-emerald-300 border-t-white"></span>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                  <circle cx="9" cy="7" r="4"></circle>
-                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-                </svg>
-              )}
-              {isGenerating ? 'Generating…' : 'Generate New XTREAM Credentials'}
-            </button>
-
-            {!hasMatches && (
-              <p className="mt-3 text-xs font-medium text-rose-300">
-                Match at least one channel with EPG data before generating credentials.
-              </p>
-            )}
           </div>
         </div>
       </div>

@@ -57,7 +57,7 @@ function App() {
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingError, setLoadingError] = useState(null);
-  const [activeTab, setActiveTab] = useState('myiptvs'); // 'myiptvs', 'channels', 'player', 'guide', or 'result'
+  const [activeTab, setActiveTab] = useState('myiptvs'); // 'myiptvs', 'channels', 'player', 'guide', or 'publish'
   const [showSidebar, setShowSidebar] = useState(true);
   const [sessionDebuggerOpen, setSessionDebuggerOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -267,13 +267,14 @@ function App() {
 
   // Update active tab based on app state, but only in specific conditions
   useEffect(() => {
-    // Only change to configure tab if we're loading for the first time
-    if (channels.length === 0 && categories.length === 0 && !isLoading) {
-      setActiveTab('configure');
-    } else if (result) {
-      setActiveTab('result');
+    // Only redirect to myiptvs if we have NO session and NO data at all
+    // Don't redirect if we have categories (which means we have a valid session with data)
+    // Don't redirect if we're on the publish tab
+    // Don't redirect if we're currently loading
+    if (!sessionId && channels.length === 0 && categories.length === 0 && !isLoading && activeTab !== 'publish' && activeTab !== 'myiptvs') {
+      setActiveTab('myiptvs');
     }
-  }, [channels.length, categories.length, result, isLoading]);
+  }, [sessionId, channels.length, categories.length, isLoading, activeTab]);
   
   // Listen for new EPG sources and update status
   useEffect(() => {
@@ -824,16 +825,15 @@ function App() {
     setStatusType('info');
 
     try {
-      const response = await apiClient.post('/generate', {
+      await apiClient.post('/generate', {
         sessionId,
         matchedChannels
       });
-      setResult(response.data);
       setStatus('Generated new XTREAM credentials!');
       setStatusType('success');
 
-      // Switch to result tab
-      setActiveTab('result');
+      // Switch to publish tab (PublishView will load credentials from DB)
+      setActiveTab('publish');
     } catch (error) {
       // The apiClient interceptor will handle session errors
       setStatus(`Error: ${error.response?.data?.error || error.message}`);
@@ -957,20 +957,20 @@ function App() {
             selectedChannel={selectedChannel}
             onEpgMatch={handleEpgMatch}
             matchedChannels={matchedChannels}
-            onGenerate={handleGenerate}
-            isGenerating={isGenerating}
             availableSources={userSources}
             onBackToChannels={() => setActiveTab('channels')}
             onToggleTheatre={() => setIsTheatreMode(!isTheatreMode)}
             isTheatreMode={isTheatreMode}
           />
         );
-      case 'result':
+      case 'publish':
         return (
           <ResultView
-            result={result}
             onCopyToClipboard={copyToClipboard}
             onBackToPlayer={() => setActiveTab('player')}
+            onGenerate={handleGenerate}
+            isGenerating={isGenerating}
+            matchedChannelsCount={Object.keys(matchedChannels).length}
           />
         );
       case 'myiptvs':
