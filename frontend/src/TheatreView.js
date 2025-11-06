@@ -24,6 +24,7 @@ const TheatreView = ({
   const [showChannelInfo, setShowChannelInfo] = useState(false);
   const [showEpgInfo, setShowEpgInfo] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [showGuide, setShowGuide] = useState(true);
 
   const playerButtonClasses = (type) => [
     'inline-flex items-center gap-2 rounded-lg border px-2 py-1 text-xs font-semibold transition',
@@ -41,8 +42,8 @@ const TheatreView = ({
 
   return (
     <div className="fixed inset-0 z-50 flex h-screen bg-black">
-      {/* Large Video Player - Left Side (80%) */}
-      <div className="flex h-full w-4/5 flex-col">
+      {/* Large Video Player - Left Side */}
+      <div className={`flex h-full flex-col transition-all duration-300 ${showGuide ? 'w-4/5' : 'w-full'}`}>
         {/* Player Controls Bar */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-slate-800 bg-slate-950 px-4 py-2">
           <div className="flex items-center gap-3">
@@ -131,6 +132,20 @@ const TheatreView = ({
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                 </svg>
               </button>
+
+              {/* Divider */}
+              <div className="h-6 w-px bg-slate-700"></div>
+
+              {/* Guide Toggle */}
+              <button
+                onClick={() => setShowGuide(!showGuide)}
+                className={iconButtonClasses(showGuide)}
+                title={showGuide ? "Hide guide" : "Show guide"}
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                </svg>
+              </button>
             </div>
           </div>
         </div>
@@ -172,15 +187,17 @@ const TheatreView = ({
       </div>
 
       {/* EPG Matcher - Right Side (20%) */}
-      <div className="h-full w-1/5 overflow-y-auto border-l border-slate-800 bg-slate-950">
-        <EPGMatcher
-          sessionId={sessionId}
-          selectedChannel={selectedChannel}
-          onEpgMatch={onEpgMatch}
-          matchedChannels={matchedChannels}
-          compactMode={true}
-        />
-      </div>
+      {showGuide && (
+        <div className="h-full w-1/5 overflow-y-auto border-l border-slate-800 bg-slate-950 transition-all duration-300">
+          <EPGMatcher
+            sessionId={sessionId}
+            selectedChannel={selectedChannel}
+            onEpgMatch={onEpgMatch}
+            matchedChannels={matchedChannels}
+            compactMode={true}
+          />
+        </div>
+      )}
     </div>
   );
 };

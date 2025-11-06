@@ -36,7 +36,7 @@ const PlayerView = ({
   const [sourceName, setSourceName] = useState(null);
 
   const playerButtonClasses = (type) => [
-    'inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition',
+    'inline-flex items-center justify-center rounded-xl border p-2.5 transition',
     playerType === type
       ? 'border-blue-500 bg-blue-600 text-white shadow-lg shadow-blue-900/40'
       : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-slate-100'
@@ -145,22 +145,32 @@ const PlayerView = ({
             <p className="text-sm text-slate-400">Preview live streams and match them with accurate EPG entries.</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 rounded-full border border-slate-800/70 bg-slate-900/70 px-4 py-2 text-xs">
-          <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
-          {currentChannel ? (
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-slate-400">Now playing:</span>
-              <span className="font-medium text-slate-100">{currentChannel.name}</span>
-              <span className="text-slate-600">•</span>
-              <span className="inline-flex items-center gap-1.5 rounded-md bg-blue-500/20 px-2.5 py-1 text-blue-200 border-2 border-blue-500/40 font-semibold text-sm">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                </svg>
-                <span>{sourceName || 'Unknown Source'}</span>
-              </span>
-            </div>
-          ) : (
-            <span className="text-slate-400">No channel selected</span>
+        <div className="flex items-center gap-3 rounded-full border border-slate-800/70 bg-slate-900/70 px-4 py-2 text-xs flex-wrap">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
+            {currentChannel ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-slate-400">Now playing:</span>
+                <span className="font-medium text-slate-100">{currentChannel.name}</span>
+                <span className="text-slate-600">•</span>
+                <span className="inline-flex items-center gap-1.5 rounded-md bg-blue-500/20 px-2.5 py-1 text-blue-200 border-2 border-blue-500/40 font-semibold text-sm">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  <span>{sourceName || 'Unknown Source'}</span>
+                </span>
+              </div>
+            ) : (
+              <span className="text-slate-400">No channel selected</span>
+            )}
+          </div>
+          {currentChannel && (
+            <FeedSelector
+              channel={currentChannel}
+              onFeedSelect={handleFeedSelect}
+              currentFeedUrl={currentFeedUrl}
+              autoFallbackEnabled={true}
+            />
           )}
         </div>
       </header>
@@ -168,25 +178,38 @@ const PlayerView = ({
       <div className="flex flex-col gap-6 lg:flex-row">
         <div className="flex w-full flex-col gap-4 lg:basis-7/12">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-slate-800/70 bg-slate-900/60 p-4 shadow-inner shadow-slate-950/20">
-            <div className="flex flex-wrap items-center gap-3">
-              <button type="button" onClick={() => setPlayerType('mpegts-player')} className={playerButtonClasses('mpegts-player')}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPlayerType('mpegts-player')}
+                className={playerButtonClasses('mpegts-player')}
+                title="TS Player"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polygon points="23 7 16 12 23 17 23 7"></polygon>
                   <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
                 </svg>
-                TS Player
               </button>
-              <button type="button" onClick={() => setPlayerType('hls-player')} className={playerButtonClasses('hls-player')}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <button
+                type="button"
+                onClick={() => setPlayerType('hls-player')}
+                className={playerButtonClasses('hls-player')}
+                title="HLS Player"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M4 22h14a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"></path>
                   <polyline points="14 2 14 8 20 8"></polyline>
                   <path d="M2 15s2-2 4-2 4 2 6 2 4-2 6-2 4 2 4 2"></path>
                   <path d="M2 19s2-2 4-2 4 2 6 2 4-2 6-2 4 2 4 2"></path>
                 </svg>
-                HLS Player
               </button>
-              <button type="button" onClick={() => setPlayerType('test-video')} className={playerButtonClasses('test-video')}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <button
+                type="button"
+                onClick={() => setPlayerType('test-video')}
+                className={playerButtonClasses('test-video')}
+                title="Test Video"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
                   <line x1="7" y1="2" x2="7" y2="22"></line>
                   <line x1="17" y1="2" x2="17" y2="22"></line>
@@ -196,40 +219,34 @@ const PlayerView = ({
                   <line x1="17" y1="17" x2="22" y2="17"></line>
                   <line x1="17" y1="7" x2="22" y2="7"></line>
                 </svg>
-                Test Video
               </button>
-              <button type="button" onClick={() => setPlayerType('vlc-link')} className={playerButtonClasses('vlc-link')}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <button
+                type="button"
+                onClick={() => setPlayerType('vlc-link')}
+                className={playerButtonClasses('vlc-link')}
+                title="VLC Link"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                   <polyline points="15 3 21 3 21 9"></polyline>
                   <line x1="10" y1="14" x2="21" y2="3"></line>
                 </svg>
-                VLC Link
               </button>
 
               {onToggleTheatre && (
                 <button
                   type="button"
                   onClick={onToggleTheatre}
-                  className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/20 px-3 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/30"
-                  title="Open theatre mode"
+                  className="inline-flex items-center justify-center rounded-xl border border-emerald-500/40 bg-emerald-500/20 p-2.5 text-emerald-100 transition hover:bg-emerald-500/30"
+                  title="Theatre Mode"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="2" y="7" width="20" height="15" rx="2" ry="2"></rect>
                     <polyline points="17 2 12 7 7 2"></polyline>
                   </svg>
-                  Theatre Mode
                 </button>
               )}
             </div>
-            {currentChannel && (
-              <FeedSelector
-                channel={currentChannel}
-                onFeedSelect={handleFeedSelect}
-                currentFeedUrl={currentFeedUrl}
-                autoFallbackEnabled={true}
-              />
-            )}
           </div>
 
           <div className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-4 shadow-2xl shadow-slate-950/40">
