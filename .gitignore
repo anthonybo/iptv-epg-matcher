@@ -76,3 +76,4 @@ backend/uploads/*.xml
 
 # Specific large files
 backend/data/epg.db
+CLAUDE.md
