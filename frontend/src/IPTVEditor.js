@@ -17,6 +17,7 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
   const [publishing, setPublishing] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [publishResult, setPublishResult] = useState(null);
+  const [channelToRemove, setChannelToRemove] = useState(null);
 
   // Load matched channels from database
   useEffect(() => {
@@ -85,15 +86,32 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
     }
   };
 
-  const handleRemoveChannel = async (matchId) => {
-    if (!window.confirm('Remove this channel match from your IPTV?')) return;
+  const handleRemoveChannel = async () => {
+    if (!channelToRemove) return;
 
     try {
-      await apiClient.delete(`/epg/matched-channels/${matchId}`);
-      setChannels(prev => prev.filter(ch => ch.match_id !== matchId));
+      await apiClient.delete(`/epg/matched-channels/${channelToRemove.match_id}`);
+      setChannels(prev => prev.filter(ch => ch.match_id !== channelToRemove.match_id));
+      setChannelToRemove(null);
       loadMatchedChannels(); // Refresh categories
     } catch (error) {
       console.error('Failed to remove channel:', error);
+      setChannelToRemove(null);
+    }
+  };
+
+  const handleToggleDummyEpg = async (matchId, useDummyEpg) => {
+    try {
+      await apiClient.put(`/epg/matched-channels/${matchId}/dummy-epg`, {
+        useDummyEpg
+      });
+
+      // Update local state
+      setChannels(prev => prev.map(ch =>
+        ch.match_id === matchId ? { ...ch, use_dummy_epg: useDummyEpg ? 1 : 0 } : ch
+      ));
+    } catch (error) {
+      console.error('Failed to toggle dummy EPG:', error);
     }
   };
 
@@ -326,8 +344,9 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
                       onEdit={() => setEditingChannel(channel)}
                       onSave={handleSaveChannel}
                       onCancel={() => setEditingChannel(null)}
-                      onRemove={() => handleRemoveChannel(channel.match_id)}
+                      onRemove={() => setChannelToRemove(channel)}
                       onClick={() => handleChannelClick(channel)}
+                      onToggleDummyEpg={handleToggleDummyEpg}
                     />
                   ))
                 )}
@@ -435,11 +454,52 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
           </div>
         </Modal>
       )}
+
+      {/* Remove Channel Confirmation Modal */}
+      {channelToRemove && (
+        <Modal
+          title="Remove Channel"
+          onClose={() => setChannelToRemove(null)}
+        >
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 rounded-lg border border-rose-700 bg-rose-900/20 p-4">
+              <svg className="h-6 w-6 flex-shrink-0 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <div className="flex-1">
+                <p className="font-medium text-rose-100">
+                  Are you sure you want to remove this channel?
+                </p>
+                <p className="mt-2 text-sm text-rose-200">
+                  <span className="font-semibold">{channelToRemove.name || channelToRemove.iptv_channel_name}</span>
+                </p>
+                <p className="mt-1 text-xs text-rose-300">
+                  This will remove it from your IPTV Editor. You can always add it back later.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleRemoveChannel}
+                className="flex-1 rounded-lg border border-rose-700 bg-rose-600 px-4 py-2.5 font-semibold text-white transition hover:bg-rose-500"
+              >
+                Remove Channel
+              </button>
+              <button
+                onClick={() => setChannelToRemove(null)}
+                className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 font-semibold text-slate-300 transition hover:bg-slate-700"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 };
 
-const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, onClick }) => {
+const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, onClick, onToggleDummyEpg }) => {
   const [editedChannel, setEditedChannel] = useState(channel);
 
   useEffect(() => {
@@ -553,19 +613,35 @@ const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, o
       </div>
 
       {/* Actions */}
-      <div className="flex gap-2">
-        <button
-          onClick={onEdit}
-          className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-slate-700"
-        >
-          Edit
-        </button>
-        <button
-          onClick={onRemove}
-          className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-900"
-        >
-          Remove
-        </button>
+      <div className="flex flex-col gap-2">
+        <div className="flex gap-2">
+          <button
+            onClick={onEdit}
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-slate-700"
+          >
+            Edit
+          </button>
+          <button
+            onClick={onRemove}
+            className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-900"
+          >
+            Remove
+          </button>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition">
+          <input
+            type="checkbox"
+            checked={channel.use_dummy_epg === 1}
+            onChange={(e) => {
+              e.stopPropagation();
+              if (onToggleDummyEpg) {
+                onToggleDummyEpg(channel.match_id, e.target.checked);
+              }
+            }}
+            className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-2 focus:ring-blue-500 focus:ring-offset-slate-900"
+          />
+          <span title="Generate dummy EPG for channels with dynamic names">Dummy EPG</span>
+        </label>
       </div>
     </div>
   );

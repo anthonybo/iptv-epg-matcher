@@ -244,13 +244,62 @@ const Configuration = ({
       return;
     }
 
-    await submitLoadRequest({
-      startMessage: 'Fetching EPG data...',
-      successMessage: 'EPG sources are loading.',
-      prepareFormData: (formData) => {
-        formData.append('epgUrl', epgUrl.trim());
-      },
-    });
+    try {
+      setStatusMessage('Adding EPG source...', 'info');
+      setIsLoading(true);
+
+      // Extract name from URL or use a default
+      let name = 'Custom EPG Source';
+      try {
+        const urlObj = new URL(epgUrl.trim());
+        const pathParts = urlObj.pathname.split('/');
+        const filename = pathParts[pathParts.length - 1];
+        if (filename) {
+          name = filename.replace(/\.(xml|gz)$/gi, '');
+        }
+      } catch (urlError) {
+        console.warn('Could not parse URL for name:', urlError);
+      }
+
+      const response = await apiClient.post('/user-epg-sources', {
+        url: epgUrl.trim(),
+        name,
+        enabled: true,
+        verified: false,
+        notes: 'Added via web interface'
+      });
+
+      if (response.data.success) {
+        setStatusMessage('EPG source added successfully!', 'success');
+        setEpgUrl(''); // Clear the input
+
+        // Force refresh by dispatching event with timestamp to bust cache
+        window.dispatchEvent(new CustomEvent('epgSourcesUpdated', {
+          detail: { timestamp: Date.now() }
+        }));
+
+        // Also call the parent's onLoadingChange callback to force a re-render
+        if (onLoadingChange) {
+          onLoadingChange(false, null, 'EPG source added', 'success');
+        }
+      } else {
+        setStatusMessage(response.data.error || 'Failed to add EPG source', 'error');
+      }
+    } catch (error) {
+      console.error('Error adding EPG source:', error);
+      const errorMessage = error.response?.data?.error || error.message || 'Failed to add EPG source';
+
+      // If it already exists, show a friendlier message and refresh the list
+      if (error.response?.status === 409) {
+        setStatusMessage('This EPG source already exists in your list.', 'info');
+        // Trigger EPG sources update event to show it
+        window.dispatchEvent(new CustomEvent('epgSourcesUpdated'));
+      } else {
+        setStatusMessage(errorMessage, 'error');
+      }
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleProcessComplete = (data) => {

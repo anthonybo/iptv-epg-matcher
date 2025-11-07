@@ -159,17 +159,17 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
         // Process an entire batch of pending programs
         const processProgramBatch = () => {
             if (pendingPrograms.length === 0) return;
-            
+
             // Add programs to channel mapping
             pendingPrograms.forEach(program => {
-                const channelId = program.channel;
+                const channelId = program.channel || program.$?.channel;
                 if (!results.programMap.has(channelId)) {
                     results.programMap.set(channelId, []);
                 }
-                
+
                 // Add to the program array for this channel
                 results.programMap.get(channelId).push(program);
-                
+
                 // Add to full programs array too
                 results.programs.push(program);
             });
@@ -207,18 +207,18 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
             currentTag = node.name.toLowerCase();
             currentCData = '';
             textBuffer = '';
-            
+
             if (currentTag === 'channel') {
                 currentChannel = {
-                    id: node.attributes.id || '',
+                    id: node.attributes?.id || node.attributes?.ID || 'unknown',
                     names: [],
                     icons: []
                 };
             } else if (currentTag === 'programme') {
                 currentProgram = {
-                    channel: node.attributes.channel || '',
-                    start: node.attributes.start || '',
-                    stop: node.attributes.stop || '',
+                    channel: node.attributes?.channel || node.attributes?.CHANNEL || '',
+                    start: node.attributes?.start || node.attributes?.START || '',
+                    stop: node.attributes?.stop || node.attributes?.STOP || '',
                     titles: [],
                     descriptions: [],
                     categories: []
@@ -245,16 +245,18 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
             const safeText = processLargeText(textBuffer);
             
             if (tagName === 'channel') {
-                if (currentChannel && currentChannel.id) {
+                const channelId = currentChannel?.id || currentChannel?.$?.id;
+                if (currentChannel && channelId) {
                     results.channels.push(currentChannel);
-                    results.channelMap.set(currentChannel.id, currentChannel);
+                    results.channelMap.set(channelId, currentChannel);
                     channelCount++;
                 }
                 currentChannel = null;
             } else if (tagName === 'programme') {
-                if (currentProgram && currentProgram.channel) {
+                const programChannel = currentProgram?.channel || currentProgram?.$?.channel;
+                if (currentProgram && programChannel) {
                     pendingPrograms.push(currentProgram);
-                    
+
                     // Process in batches to manage memory
                     if (pendingPrograms.length >= batchSize) {
                         processProgramBatch();
@@ -299,8 +301,9 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
             
             // Post-process channels to simplify structure
             results.channels = results.channels.map(channel => {
+                const channelId = channel.id || channel.$?.id;
                 return {
-                    id: channel.id,
+                    id: channelId,
                     name: channel.names[0] || '',
                     altNames: channel.names.slice(1),
                     icon: channel.icons[0] || '',
@@ -312,20 +315,24 @@ async function parseEpgStream(filePath, isGzipped = false, progressCallback = nu
             const maxProgramsPerChannel = constants.MAX_PROGRAMS_PER_CHANNEL || 500;
             results.programMap.forEach((programs, channelId) => {
                 // Sort by start time
-                programs.sort((a, b) => a.start.localeCompare(b.start));
-                
+                programs.sort((a, b) => {
+                    const aStart = a.start || a.$?.start || '';
+                    const bStart = b.start || b.$?.start || '';
+                    return aStart.localeCompare(bStart);
+                });
+
                 // Limit the number of programs per channel
                 if (programs.length > maxProgramsPerChannel) {
                     logger.debug(`Limiting channel ${channelId} from ${programs.length} to ${maxProgramsPerChannel} programs`);
                     results.programMap.set(channelId, programs.slice(0, maxProgramsPerChannel));
                 }
-                
+
                 // Simplify structure for each program
                 results.programMap.set(channelId, programs.map(program => {
                     return {
-                        channel: program.channel,
-                        start: program.start,
-                        stop: program.stop,
+                        channel: program.channel || program.$?.channel,
+                        start: program.start || program.$?.start,
+                        stop: program.stop || program.$?.stop,
                         title: program.titles[0] || '',
                         description: program.descriptions[0] || '',
                         category: program.categories[0] || ''

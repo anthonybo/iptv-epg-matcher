@@ -165,6 +165,7 @@ router.post('/', async (req, res) => {
           m.epg_channel_name,
           m.epg_source_name,
           m.epg_source_id,
+          m.use_dummy_epg,
           c.name,
           c.logo,
           c.url,
@@ -233,7 +234,7 @@ router.post('/', async (req, res) => {
     const sqlite3 = require('sqlite3').verbose();
     const epgDb = new sqlite3.Database(epgDbPath);
 
-    const epgPrograms = await new Promise((resolve, reject) => {
+    let epgPrograms = await new Promise((resolve, reject) => {
       if (epgChannelIds.length === 0) {
         return resolve([]);
       }
@@ -258,6 +259,49 @@ router.post('/', async (req, res) => {
     });
 
     epgDb.close();
+
+    // Generate dummy EPG programs for channels with use_dummy_epg=1
+    const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg === 1);
+    if (dummyEpgChannels.length > 0) {
+      logger.info(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
+
+      const now = new Date();
+      dummyEpgChannels.forEach(channel => {
+        // Generate 7 days of dummy programs (3-hour blocks)
+        for (let day = 0; day < 7; day++) {
+          for (let hour = 0; hour < 24; hour += 3) {
+            const startDate = new Date(now);
+            startDate.setDate(startDate.getDate() + day);
+            startDate.setHours(hour, 0, 0, 0);
+
+            const stopDate = new Date(startDate);
+            stopDate.setHours(stopDate.getHours() + 3);
+
+            // Format as XMLTV timestamp: YYYYMMDDHHMMSS +TZTZ
+            const formatXmltvTime = (date) => {
+              const pad = (n) => String(n).padStart(2, '0');
+              const year = date.getFullYear();
+              const month = pad(date.getMonth() + 1);
+              const dayNum = pad(date.getDate());
+              const hours = pad(date.getHours());
+              const minutes = pad(date.getMinutes());
+              const seconds = pad(date.getSeconds());
+              return `${year}${month}${dayNum}${hours}${minutes}${seconds} +0000`;
+            };
+
+            epgPrograms.push({
+              channel_id: channel.epg_channel_id || `dummy_${channel.iptv_channel_id}`,
+              title: channel.name || channel.iptv_channel_name,
+              start: formatXmltvTime(startDate),
+              stop: formatXmltvTime(stopDate),
+              description: `Streaming on ${channel.name || channel.iptv_channel_name}`,
+              category: channel.group_title || 'Live TV'
+            });
+          }
+        }
+      });
+      logger.info(`Added ${epgPrograms.length} total programs (real + dummy)`);
+    }
 
     // Build XMLTV format EPG
     const xmlLines = [
@@ -391,6 +435,7 @@ router.post('/update-all', async (req, res) => {
           m.epg_channel_name,
           m.epg_source_name,
           m.epg_source_id,
+          m.use_dummy_epg,
           c.name,
           c.logo,
           c.url,
@@ -457,7 +502,7 @@ router.post('/update-all', async (req, res) => {
         const sqlite3 = require('sqlite3').verbose();
         const epgDb = new sqlite3.Database(epgDbPath);
 
-        const epgPrograms = await new Promise((resolve, reject) => {
+        let epgPrograms = await new Promise((resolve, reject) => {
           if (epgChannelIds.length === 0) {
             return resolve([]);
           }
@@ -481,6 +526,49 @@ router.post('/update-all', async (req, res) => {
         });
 
         epgDb.close();
+
+        // Generate dummy EPG programs for channels with use_dummy_epg=1
+        const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg === 1);
+        if (dummyEpgChannels.length > 0) {
+          logger.info(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
+
+          const now = new Date();
+          dummyEpgChannels.forEach(channel => {
+            // Generate 7 days of dummy programs (3-hour blocks)
+            for (let day = 0; day < 7; day++) {
+              for (let hour = 0; hour < 24; hour += 3) {
+                const startDate = new Date(now);
+                startDate.setDate(startDate.getDate() + day);
+                startDate.setHours(hour, 0, 0, 0);
+
+                const stopDate = new Date(startDate);
+                stopDate.setHours(stopDate.getHours() + 3);
+
+                // Format as XMLTV timestamp: YYYYMMDDHHMMSS +TZTZ
+                const formatXmltvTime = (date) => {
+                  const pad = (n) => String(n).padStart(2, '0');
+                  const year = date.getFullYear();
+                  const month = pad(date.getMonth() + 1);
+                  const dayNum = pad(date.getDate());
+                  const hours = pad(date.getHours());
+                  const minutes = pad(date.getMinutes());
+                  const seconds = pad(date.getSeconds());
+                  return `${year}${month}${dayNum}${hours}${minutes}${seconds} +0000`;
+                };
+
+                epgPrograms.push({
+                  channel_id: channel.epg_channel_id || `dummy_${channel.iptv_channel_id}`,
+                  title: channel.name || channel.iptv_channel_name,
+                  start: formatXmltvTime(startDate),
+                  stop: formatXmltvTime(stopDate),
+                  description: `Streaming on ${channel.name || channel.iptv_channel_name}`,
+                  category: channel.group_title || 'Live TV'
+                });
+              }
+            }
+          });
+          logger.info(`Added ${epgPrograms.length} total programs (real + dummy)`);
+        }
 
         // Build XMLTV
         const xmlLines = [

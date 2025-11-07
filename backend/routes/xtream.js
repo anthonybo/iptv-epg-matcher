@@ -536,11 +536,20 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     const fetch = require('node-fetch');
     const { PassThrough } = require('stream');
 
+    // For Stalker streams, include proper authentication headers
+    const streamHeaders = {
+      'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+      'X-User-Agent': 'Model: MAG250; Link: WiFi'
+    };
+
+    // Add MAC address cookie for Stalker portals
+    if (channel.source_type === 'stalker' && channel.source_mac) {
+      streamHeaders['Cookie'] = `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`;
+    }
+
     const streamResponse = await fetch(streamUrl, {
       method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
-      },
+      headers: streamHeaders,
       timeout: 60000
     });
 
@@ -738,11 +747,20 @@ router.get('/stream/:channelId', async (req, res) => {
     const fetch = require('node-fetch');
     const { PassThrough } = require('stream');
 
+    // For Stalker streams, include proper authentication headers
+    const streamHeaders = {
+      'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+      'X-User-Agent': 'Model: MAG250; Link: WiFi'
+    };
+
+    // Add MAC address cookie for Stalker portals
+    if (channel.source_type === 'stalker' && channel.source_mac) {
+      streamHeaders['Cookie'] = `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`;
+    }
+
     const streamResponse = await fetch(streamUrl, {
       method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
-      },
+      headers: streamHeaders,
       timeout: 60000
     });
 

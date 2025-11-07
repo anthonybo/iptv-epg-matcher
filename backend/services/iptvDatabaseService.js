@@ -161,6 +161,21 @@ const initializeTables = () => {
                 UNIQUE(username, password)
             )`,
 
+            // User EPG Sources - custom EPG sources added by users
+            `CREATE TABLE IF NOT EXISTS user_epg_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                name TEXT NOT NULL,
+                enabled BOOLEAN DEFAULT 1,
+                verified BOOLEAN DEFAULT 0,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(user_id, url)
+            )`,
+
             // Create indexes for performance
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_source_id ON iptv_channels(source_id)`,
             `CREATE INDEX IF NOT EXISTS idx_iptv_channels_name ON iptv_channels(name)`,
@@ -169,7 +184,9 @@ const initializeTables = () => {
             `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_user ON user_iptv_preferences(user_id)`,
             `CREATE INDEX IF NOT EXISTS idx_user_iptv_prefs_priority ON user_iptv_preferences(user_id, priority)`,
             `CREATE INDEX IF NOT EXISTS idx_generated_creds_user ON generated_credentials(user_id)`,
-            `CREATE INDEX IF NOT EXISTS idx_generated_creds_username ON generated_credentials(username)`
+            `CREATE INDEX IF NOT EXISTS idx_generated_creds_username ON generated_credentials(username)`,
+            `CREATE INDEX IF NOT EXISTS idx_user_epg_sources_user ON user_epg_sources(user_id)`,
+            `CREATE INDEX IF NOT EXISTS idx_user_epg_sources_enabled ON user_epg_sources(user_id, enabled)`
         ];
 
         // Migration queries to add new columns to existing tables

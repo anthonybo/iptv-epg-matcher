@@ -1364,16 +1364,16 @@ async function loadAllExternalEPGs(session = null, options = {}) {
         forceRefresh: false,
         maxChannelsPerSource: 0 // 0 means no limit
     };
-    
+
     const mergedOptions = { ...defaultOptions, ...options };
     logger.info(`Loading all external EPGs with options: ${JSON.stringify(mergedOptions)}`);
-    
+
     // Get list of EPG sources from config
     let epgSources = [];
     try {
         const config = await configService.getConfig();
         epgSources = config.epgSources || [];
-        
+
         // If no sources in config, use constants
         if (!epgSources || epgSources.length === 0) {
             const constants = require('../config/constants');
@@ -1384,7 +1384,7 @@ async function loadAllExternalEPGs(session = null, options = {}) {
         }
     } catch (error) {
         logger.error(`Error loading EPG sources from config: ${error.message}`);
-        
+
         // Fallback to constants
         try {
             const constants = require('../config/constants');
@@ -1396,14 +1396,34 @@ async function loadAllExternalEPGs(session = null, options = {}) {
             logger.error(`Failed to load fallback EPG sources: ${fallbackError.message}`);
         }
     }
-    
+
+    // Also load user-added EPG sources from database
+    try {
+        const iptvDatabaseService = require('./iptvDatabaseService');
+        const iptvDb = await iptvDatabaseService.connect();
+        const userSources = await new Promise((resolve, reject) => {
+            iptvDb.all('SELECT url FROM user_epg_sources WHERE enabled = 1', [], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows || []);
+            });
+        });
+
+        if (userSources && userSources.length > 0) {
+            const userUrls = userSources.map(s => s.url);
+            logger.info(`Adding ${userUrls.length} user EPG sources to bulk refresh`);
+            epgSources = [...epgSources, ...userUrls];
+        }
+    } catch (userSourceError) {
+        logger.warn(`Could not load user EPG sources: ${userSourceError.message}`);
+    }
+
     if (!epgSources || epgSources.length === 0) {
         logger.warn('No EPG sources configured');
         return [];
     }
-    
-    logger.info(`Found ${epgSources.length} EPG sources to load`);
-    
+
+    logger.info(`Found ${epgSources.length} total EPG sources to load (config + user sources)`);
+
     // Load each source in parallel
     const results = await Promise.all(
         epgSources.map(async (sourceUrl) => {
@@ -1420,7 +1440,7 @@ async function loadAllExternalEPGs(session = null, options = {}) {
             }
         })
     );
-    
+
     logger.info(`Completed loading all external EPGs, got ${results.length} results`);
     return results;
 }
@@ -1447,10 +1467,36 @@ async function loadAllExternalEPGsEnhanced(session = null, options = {}) {
         ...mergedOptions,
         onProgress: mergedOptions.onProgress ? 'Function defined' : 'No function'
     })}`);
-    
+
     // Get list of EPG sources from config
-    const { epgSources = [] } = await configService.getConfig();
-    
+    let epgSources = [];
+    try {
+        const config = await configService.getConfig();
+        epgSources = config.epgSources || [];
+    } catch (configError) {
+        logger.warn(`Could not load EPG sources from config: ${configError.message}`);
+    }
+
+    // Also load user-added EPG sources from database
+    try {
+        const iptvDatabaseService = require('./iptvDatabaseService');
+        const iptvDb = await iptvDatabaseService.connect();
+        const userSources = await new Promise((resolve, reject) => {
+            iptvDb.all('SELECT url FROM user_epg_sources WHERE enabled = 1', [], (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows || []);
+            });
+        });
+
+        if (userSources && userSources.length > 0) {
+            const userUrls = userSources.map(s => s.url);
+            logger.info(`Adding ${userUrls.length} user EPG sources to enhanced bulk refresh`);
+            epgSources = [...epgSources, ...userUrls];
+        }
+    } catch (userSourceError) {
+        logger.warn(`Could not load user EPG sources: ${userSourceError.message}`);
+    }
+
     if (!epgSources || epgSources.length === 0) {
         logger.warn('No EPG sources configured');
         mergedOptions.onProgress({
@@ -1461,8 +1507,8 @@ async function loadAllExternalEPGsEnhanced(session = null, options = {}) {
         });
         return [];
     }
-    
-    logger.info(`Found ${epgSources.length} EPG sources to load`);
+
+    logger.info(`Found ${epgSources.length} total EPG sources to load (config + user sources)`);
     
     // Report initial progress
     mergedOptions.onProgress({
@@ -2811,13 +2857,26 @@ async function loadSingleEpgSource(url, options = {}) {
             if (!fs.existsSync(chunkPath)) {
                 fs.mkdirSync(chunkPath, { recursive: true });
             }
-            
+
+            // Calculate total program count from the result
+            let totalPrograms = 0;
+            if (result.programs && Array.isArray(result.programs)) {
+                totalPrograms = result.programs.length;
+            } else if (result.programMap) {
+                // If programMap exists, count all programs across all channels
+                if (result.programMap instanceof Map) {
+                    totalPrograms = Array.from(result.programMap.values()).reduce((sum, programs) => sum + (Array.isArray(programs) ? programs.length : 0), 0);
+                } else {
+                    totalPrograms = Object.values(result.programMap).reduce((sum, programs) => sum + (Array.isArray(programs) ? programs.length : 0), 0);
+                }
+            }
+
             // Create metadata
             const metadata = {
                 url,
                 lastUpdated: new Date().toISOString(),
                 channelCount: filteredChannels.length,
-                programCount: result.programCount || 0
+                programCount: totalPrograms
             };
             
             // Write metadata file
@@ -2832,25 +2891,40 @@ async function loadSingleEpgSource(url, options = {}) {
                 JSON.stringify(filteredChannels, null, 2)
             );
             
-            logger.info(`Cached EPG data for ${url} with ${filteredChannels.length} channels`);
+            logger.info(`Cached EPG data for ${url} with ${filteredChannels.length} channels and ${totalPrograms} programs`);
         } catch (cacheError) {
             logger.warn(`Error caching EPG data: ${cacheError.message}`);
         }
-        
+
+        // Calculate total programs for return value (may be different from cache if already calculated above)
+        let returnTotalPrograms = 0;
+        if (result.programs && Array.isArray(result.programs)) {
+            returnTotalPrograms = result.programs.length;
+        } else if (result.programMap) {
+            if (result.programMap instanceof Map) {
+                returnTotalPrograms = Array.from(result.programMap.values()).reduce((sum, programs) => sum + (Array.isArray(programs) ? programs.length : 0), 0);
+            } else {
+                returnTotalPrograms = Object.values(result.programMap).reduce((sum, programs) => sum + (Array.isArray(programs) ? programs.length : 0), 0);
+            }
+        }
+
         mergedOptions.onProgress({
             stage: 'complete',
             percent: 100,
-            message: `Successfully loaded ${filteredChannels.length} channels from ${url}`,
+            message: `Successfully loaded ${filteredChannels.length} channels and ${returnTotalPrograms} programs from ${url}`,
             details: {
                 channelCount: filteredChannels.length,
+                programCount: returnTotalPrograms,
                 url,
                 fromCache: false
             }
         });
-        
+
         return {
             url,
             channels: filteredChannels,
+            programMap: result.programMap || {},
+            totalPrograms: returnTotalPrograms,
             lastUpdated: new Date().toISOString(),
             fromCache: false,
             success: true
@@ -3367,10 +3441,12 @@ async function streamingParseEPG(sourceUrl, sourceId, options = {}) {
                         
                         try {
                             // Process channel data
-                            if (channel && channel.id) {
+                            // Handle both { id: "..." } and { $: { id: "..." } } formats
+                            const channelId = channel.id || channel.$?.id;
+                            if (channel && channelId) {
                                 const newChannel = {
-                                    id: channel.id,
-                                    name: channel.display_name || channel.id,
+                                    id: channelId,
+                                    name: channel.display_name || channel['display-name'] || channelId,
                                     icon: channel.icon?.src || '',
                                     programs: [] // Initialize an empty programs array for the channel
                                 };
@@ -3406,22 +3482,27 @@ async function streamingParseEPG(sourceUrl, sourceId, options = {}) {
                     
                     // Process programs
                     programsArray.forEach(program => {
-                        if (program && program.start && program.channel) {
-                            const channelId = program.channel;
+                        // Handle both { start: "...", channel: "..." } and { $: { start: "...", channel: "..." } } formats
+                        const programStart = program.start || program.$?.start;
+                        const programChannel = program.channel || program.$?.channel;
+                        const programStop = program.stop || program.$?.stop;
+
+                        if (program && programStart && programChannel) {
+                            const channelId = programChannel;
                             const channel = channelMap[channelId];
-                            
+
                             // Skip if channel not found or beyond limit
-                            if (!channel || (mergedOptions.maxChannelsPerSource > 0 && 
+                            if (!channel || (mergedOptions.maxChannelsPerSource > 0 &&
                                 channels.length > mergedOptions.maxChannelsPerSource)) {
                                 return;
                             }
-                            
+
                             try {
                                 // Format the program object
                                 const formattedProgram = {
                                     title: program.title || 'Untitled',
-                                    start: program.start,
-                                    stop: program.stop,
+                                    start: programStart,
+                                    stop: programStop,
                                     description: program.desc || '',
                                     category: program.category || [],
                                     channelId: channelId

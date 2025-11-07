@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import axios from 'axios';
+import apiClient from './utils/apiClient';
 import StatusDisplay from './StatusDisplay';
 
 /**
@@ -35,21 +36,27 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     const [suggestedIds, setSuggestedIds] = useState([]);
     const [loadingEpgSources, setLoadingEpgSources] = useState(false);
     const [currentSource, setCurrentSource] = useState(null);
+    const [dummyEpgAdded, setDummyEpgAdded] = useState(false);
+
+    // Reset dummy EPG state when channel changes
+    useEffect(() => {
+        setDummyEpgAdded(false);
+    }, [selectedChannel?.id]);
 
     // Function to find the current program from a list of programs
     const findCurrentProgram = (programs) => {
         if (!programs || !Array.isArray(programs) || programs.length === 0) {
             return null;
         }
-        
+
         const now = new Date();
-        
+
         // Find a program that is currently airing
         return programs.find(program => {
             try {
                 const startTime = new Date(program.start);
                 const endTime = new Date(program.stop);
-                
+
                 // Check if current time is between start and end
                 return startTime <= now && endTime >= now;
             } catch (error) {
@@ -656,10 +663,72 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         }
     };
 
+    // Handle creating a dummy EPG match
+    const handleDummyEpgMatch = async () => {
+        if (!selectedChannel) return;
+
+        console.log('Creating dummy EPG match for channel:', selectedChannel);
+
+        // Set loading state
+        setLoading(true);
+        setStatus('Adding channel with dummy EPG...');
+        setStatusType('info');
+
+        // Create a dummy EPG channel with the channel's name as the ID
+        const dummyEpgChannel = {
+            id: `dummy_${selectedChannel.id || selectedChannel.tvgId || Date.now()}`,
+            name: selectedChannel.name,
+            icon: selectedChannel.logo || selectedChannel.tvgLogo || null,
+            source_name: 'Dummy EPG',
+            source_id: 'dummy'
+        };
+
+        // Format the M3U channel
+        const m3uChannel = {
+            id: selectedChannel.tvgId || selectedChannel.id || '',
+            name: selectedChannel.name || '',
+            logo: selectedChannel.logo || selectedChannel.tvgLogo || null,
+            url: selectedChannel.url || '',
+            group: selectedChannel.groupTitle || selectedChannel.group || ''
+        };
+
+        console.log('Creating dummy match:', { dummyEpgChannel, m3uChannel });
+
+        try {
+            // Call the match endpoint with useDummyEpg=true (using apiClient for auth token)
+            const response = await apiClient.post(`/epg/${session}/match`, {
+                epgChannel: dummyEpgChannel,
+                m3uChannel: m3uChannel,
+                useDummyEpg: true
+            });
+
+            console.log('Dummy match saved:', response.data);
+
+            // Update status with success message
+            setStatus(`✓ Successfully added "${m3uChannel.name}" with dummy EPG! Go to IPTV Editor to see it.`);
+            setStatusType('success');
+            setDummyEpgAdded(true);
+
+            // Clear search
+            setSearchResults([]);
+            setSearchStatus('');
+            setEpgSearch('');
+
+            // DON'T call onEpgMatch callback - it would trigger a duplicate match
+            // The channel is already saved to the database, just update UI state if needed
+        } catch (error) {
+            console.error('Error creating dummy match:', error.response || error);
+            setStatus(`Failed to add dummy EPG: ${error.response?.data?.error || error.message}`);
+            setStatusType('error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     // Handle EPG match selection
     const handleMatch = (result) => {
         if (!result) return;
-        
+
         console.log('Handling match with result:', result);
         
         // Format the EPG channel info with all required properties
@@ -697,8 +766,8 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     selectedChannel: selectedChannel
                 });
                 
-                // Call the match endpoint on the backend
-                axios.post(`http://localhost:5001/api/epg/${session}/match`, {
+                // Call the match endpoint on the backend (using apiClient for auth token)
+                apiClient.post(`/epg/${session}/match`, {
                     epgChannel,
                     m3uChannel
                 })
@@ -717,19 +786,13 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     console.error('Error saving match:', error.response || error);
                     const errorDetails = error.response?.data?.error || error.message;
                     console.error('Match error details:', errorDetails);
-                    
+
                     setStatus(`Failed to match: ${errorDetails}`);
                     setStatusType('error');
                 });
-                
-                // Call the callback to update the parent component with all properties
-                onEpgMatch(m3uChannel.id, {
-                    epgId: epgChannel.id,
-                    epgName: epgChannel.name,
-                    epgIcon: epgChannel.icon,
-                    sourceName: epgChannel.source_name,
-                    sourceId: epgChannel.source_id
-                });
+
+                // DON'T call onEpgMatch callback - it would trigger a duplicate match
+                // The match is already saved to the database by the API call above
             } catch (error) {
                 console.error('Error updating matched channels in session', error);
                 setStatus(`Failed to match: ${error.message}`);
@@ -1124,6 +1187,13 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 </div>
             )}
 
+            {/* Status message (success/info/warning) */}
+            {status && statusType !== 'error' && (
+                <div className={compactMode ? "mb-3" : "mb-6"}>
+                    <StatusDisplay message={status} type={statusType} />
+                </div>
+            )}
+
             {/* Search Form - Hidden in compact mode (already watching a channel) */}
             {!compactMode && (
             <div className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner">
@@ -1155,6 +1225,48 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                                 <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                             </svg>
                             {loading ? 'Searching...' : 'Search'}
+                        </button>
+                    </div>
+
+                    {/* Use Dummy EPG Button */}
+                    <div className="flex items-center gap-3 pt-3 border-t border-slate-800">
+                        <div className="flex-1 text-xs text-slate-400">
+                            Can't find a match? Add this channel with dummy EPG data instead.
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleDummyEpgMatch}
+                            disabled={!selectedChannel || loading || dummyEpgAdded}
+                            className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition focus:outline-none focus:ring-2 ${
+                                dummyEpgAdded
+                                    ? 'border-green-500/60 bg-green-500/20 text-green-100 cursor-default'
+                                    : 'border-purple-500/60 bg-purple-500/20 text-purple-100 hover:border-purple-400 hover:bg-purple-500/30 focus:ring-purple-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-800/60 disabled:text-slate-500'
+                            }`}
+                            title={dummyEpgAdded ? "Channel added! Check IPTV Editor" : "Add channel with dummy EPG (shows channel name as program info)"}
+                        >
+                            {loading ? (
+                                <>
+                                    <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Adding...
+                                </>
+                            ) : dummyEpgAdded ? (
+                                <>
+                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    Added!
+                                </>
+                            ) : (
+                                <>
+                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                    </svg>
+                                    Use Dummy EPG
+                                </>
+                            )}
                         </button>
                     </div>
 

@@ -305,35 +305,15 @@ function App() {
         // Ensure we're using the same session ID for both channels and EPG
         const effectiveSessionId = sessionId;
         console.log('[App] Updating EPG sources using session ID:', effectiveSessionId);
-        
-        // Use the correct API endpoint format with /api prefix
-        const resolveApiBase = () => {
-          if (API_BASE_URL) {
-            return API_BASE_URL;
-          }
 
-          if (typeof window !== 'undefined') {
-            return `${window.location.protocol}//${window.location.hostname}:5001`;
-          }
-
-          return 'http://localhost:5001';
-        };
-
-        const baseUrl = resolveApiBase();
-
-        fetch(`${baseUrl}/api/epg/${effectiveSessionId}/sources?_t=${Date.now()}`)
+        // Use apiClient which automatically adds auth token
+        apiClient.get(`/epg/${effectiveSessionId}/sources?_t=${Date.now()}`)
           .then(response => {
-            if (!response.ok) {
-              console.error('Error fetching EPG sources:', response.status, response.statusText);
-              return null;
-            }
-            return response.json();
-          })
-          .then(data => {
+            const data = response.data;
             if (data && data.sources) {
               console.log('[App] Updating EPG sources:', data.sources);
               setEpgSources(data.sources);
-              
+
               // Update status with EPG source info
               if (data.sources.length > 0) {
                 const reportedCount = Number(
@@ -360,12 +340,8 @@ function App() {
     // Listen for EPG source updates
     const handleEpgSourcesUpdated = (event) => {
       console.log('[App] EPG sources updated event received:', event.detail);
-      // Update the app's state with the new EPG sources
-      if (event.detail) {
-        setEpgSources(event.detail);
-      } else {
-        updateEpgSourcesStatus();
-      }
+      // Always refetch EPG sources from the API instead of using event data
+      updateEpgSourcesStatus();
     };
     
     window.addEventListener('epgSourcesUpdated', handleEpgSourcesUpdated);
@@ -906,11 +882,13 @@ function App() {
   };
 
   // Handle EPG sources update after refresh
-  const handleEpgSourcesUpdated = (updatedSources) => {
-    console.log('[App] EPG sources updated:', updatedSources);
-    setEpgSources(updatedSources);
-    setStatus(`${updatedSources.length} EPG sources refreshed successfully`);
-    setStatusType('success');
+  const handleEpgSourcesUpdated = () => {
+    console.log('[App] EPG sources updated, refetching from API');
+    // Trigger a refetch by dispatching the event
+    // The event listener will handle calling updateEpgSourcesStatus
+    window.dispatchEvent(new CustomEvent('epgSourcesUpdated', {
+      detail: { timestamp: Date.now() }
+    }));
   };
 
   // Toggle sidebar visibility

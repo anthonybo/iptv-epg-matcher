@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import EpgRefreshModal from '../EpgRefreshModal';
 import SessionManager from '../../utils/sessionManager';
+import apiClient from '../../utils/apiClient';
 
 const formatNumber = (value) => {
   const numeric = Number(value);
@@ -62,6 +63,10 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
     error: null
   });
   const [eventSourceRef, setEventSourceRef] = useState(null);
+  const [refreshingSource, setRefreshingSource] = useState(null); // Track which individual source is refreshing
+  const [statusModal, setStatusModal] = useState({ show: false, type: 'success', message: '', details: null });
+  const [deletingSource, setDeletingSource] = useState(null); // Track which source is being deleted
+  const [confirmDelete, setConfirmDelete] = useState(null); // Show confirmation modal for delete
 
   // Check if EPG refresh is already running on component mount
   useEffect(() => {
@@ -459,6 +464,105 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
     return latest;
   }, null);
 
+  // Refresh individual source
+  const refreshSingleSource = async (sourceUrl) => {
+    try {
+      setRefreshingSource(sourceUrl);
+
+      const response = await apiClient.post('/epg-refresh/source', {
+        url: sourceUrl
+      });
+
+      if (response.data.success) {
+        console.log(`[EPG] Successfully refreshed source: ${sourceUrl}`);
+
+        // Show success modal
+        setStatusModal({
+          show: true,
+          type: 'success',
+          message: 'EPG Source Refreshed Successfully',
+          details: {
+            channels: response.data.channelCount || 0,
+            programs: response.data.programCount || 0
+          }
+        });
+
+        // Trigger sources list refresh
+        window.dispatchEvent(new CustomEvent('epgSourcesUpdated', {
+          detail: { timestamp: Date.now() }
+        }));
+
+        if (onSourcesUpdated) {
+          onSourcesUpdated();
+        }
+      }
+    } catch (error) {
+      console.error(`[EPG] Error refreshing source:`, error);
+
+      // Show error modal
+      setStatusModal({
+        show: true,
+        type: 'error',
+        message: 'Failed to Refresh EPG Source',
+        details: {
+          error: error.response?.data?.error || error.message
+        }
+      });
+    } finally {
+      setRefreshingSource(null);
+    }
+  };
+
+  // Delete user EPG source
+  const deleteUserSource = async (source) => {
+    try {
+      setDeletingSource(source.id);
+
+      // Extract the numeric ID from the source ID (e.g., "user_1" -> "1")
+      const sourceId = source.id.replace('user_', '');
+
+      const response = await apiClient.delete(`/user-epg-sources/${sourceId}`);
+
+      if (response.data.success) {
+        console.log(`[EPG] Successfully deleted source: ${source.name}`);
+
+        // Show success modal
+        setStatusModal({
+          show: true,
+          type: 'success',
+          message: 'EPG Source Deleted Successfully',
+          details: {
+            name: source.name
+          }
+        });
+
+        // Trigger sources list refresh
+        window.dispatchEvent(new CustomEvent('epgSourcesUpdated', {
+          detail: { timestamp: Date.now() }
+        }));
+
+        if (onSourcesUpdated) {
+          onSourcesUpdated();
+        }
+      }
+    } catch (error) {
+      console.error(`[EPG] Error deleting source:`, error);
+
+      // Show error modal
+      setStatusModal({
+        show: true,
+        type: 'error',
+        message: 'Failed to Delete EPG Source',
+        details: {
+          error: error.response?.data?.error || error.message
+        }
+      });
+    } finally {
+      setDeletingSource(null);
+      setConfirmDelete(null);
+    }
+  };
+
   return (
     <>
       <EpgRefreshModal
@@ -466,6 +570,141 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
         onClose={closeRefreshModal}
         progress={refreshProgress}
       />
+
+      {/* Status Modal for single source operations */}
+      {statusModal.show && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-slate-900 rounded-lg shadow-xl max-w-md w-full border border-slate-700">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+              <h3 className="text-lg font-semibold text-slate-100">
+                {statusModal.message}
+              </h3>
+              <button
+                onClick={() => setStatusModal({ show: false, type: 'success', message: '', details: null })}
+                className="text-slate-400 hover:text-slate-200 transition-colors"
+                title="Close"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6">
+              {statusModal.type === 'success' && (
+                <div className="flex items-start gap-3 p-4 bg-emerald-500/10 rounded-lg border border-emerald-500/20">
+                  <svg className="w-6 h-6 text-emerald-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                  <div className="flex-1">
+                    <p className="text-emerald-200 font-medium">
+                      {statusModal.details?.name ? 'EPG source deleted' : 'Successfully loaded EPG data'}
+                    </p>
+                    {statusModal.details?.channels !== undefined && (
+                      <div className="mt-2 text-sm text-emerald-300">
+                        <p>Channels: {statusModal.details.channels.toLocaleString()}</p>
+                        <p>Programs: {statusModal.details.programs.toLocaleString()}</p>
+                      </div>
+                    )}
+                    {statusModal.details?.name && (
+                      <p className="mt-2 text-sm text-emerald-300">
+                        {statusModal.details.name}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {statusModal.type === 'error' && (
+                <div className="flex items-start gap-3 p-4 bg-rose-500/10 rounded-lg border border-rose-500/20">
+                  <svg className="w-6 h-6 text-rose-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  <div className="flex-1">
+                    <p className="text-rose-200 font-medium">An error occurred</p>
+                    {statusModal.details && statusModal.details.error && (
+                      <p className="mt-2 text-sm text-rose-300 break-words">
+                        {statusModal.details.error}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end px-6 py-4 border-t border-slate-700">
+              <button
+                onClick={() => setStatusModal({ show: false, type: 'success', message: '', details: null })}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Delete */}
+      {confirmDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-slate-900 rounded-lg shadow-xl max-w-md w-full border border-slate-700">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700">
+              <h3 className="text-lg font-semibold text-slate-100">
+                Confirm Delete
+              </h3>
+              <button
+                onClick={() => setConfirmDelete(null)}
+                className="text-slate-400 hover:text-slate-200 transition-colors"
+                title="Close"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6">
+              <div className="flex items-start gap-3 p-4 bg-amber-500/10 rounded-lg border border-amber-500/20">
+                <svg className="w-6 h-6 text-amber-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <div className="flex-1">
+                  <p className="text-amber-200 font-medium">Are you sure you want to delete this EPG source?</p>
+                  <p className="mt-2 text-sm text-slate-300">
+                    <strong>{confirmDelete.name}</strong>
+                  </p>
+                  <p className="mt-2 text-sm text-slate-400">
+                    This action cannot be undone.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-700">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                className="px-6 py-2 bg-slate-700 text-slate-200 rounded-lg hover:bg-slate-600 transition-colors font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => deleteUserSource(confirmDelete)}
+                disabled={deletingSource === confirmDelete.id}
+                className="px-6 py-2 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-wait"
+              >
+                {deletingSource === confirmDelete.id ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <section className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40">
         <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
@@ -601,7 +840,7 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
                 }`}
               >
                 <header className="mb-3 flex items-start justify-between gap-3">
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-slate-100">
                       {source.name || source.title || 'Unnamed Source'}
                     </p>
@@ -611,13 +850,77 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
                       </p>
                     )}
                   </div>
-                  <span
-                    className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[0.65rem] font-semibold uppercase tracking-wide ${
-                      statusStyles[statusKey] || statusStyles.active
-                    }`}
-                  >
-                    {statusLabel}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => refreshSingleSource(source.url)}
+                      disabled={refreshing || refreshingSource === source.url}
+                      className={`rounded-lg p-1.5 transition-colors ${
+                        refreshingSource === source.url
+                          ? 'cursor-wait text-blue-400'
+                          : refreshing
+                          ? 'cursor-not-allowed text-slate-600'
+                          : 'text-slate-400 hover:bg-slate-800 hover:text-blue-400'
+                      }`}
+                      title="Refresh this source"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className={refreshingSource === source.url ? 'animate-spin' : ''}
+                      >
+                        <path d="M23 4v6h-6"></path>
+                        <path d="M1 20v-6h6"></path>
+                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"></path>
+                        <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                      </svg>
+                    </button>
+                    {source.isUserSource && (
+                      <button
+                        onClick={() => setConfirmDelete(source)}
+                        disabled={refreshing || deletingSource === source.id}
+                        className={`rounded-lg p-1.5 transition-colors ${
+                          deletingSource === source.id
+                            ? 'cursor-wait text-rose-400'
+                            : refreshing
+                            ? 'cursor-not-allowed text-slate-600'
+                            : 'text-slate-400 hover:bg-slate-800 hover:text-rose-400'
+                        }`}
+                        title="Delete this source"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M3 6h18"></path>
+                          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+                          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+                          <line x1="10" y1="11" x2="10" y2="17"></line>
+                          <line x1="14" y1="11" x2="14" y2="17"></line>
+                        </svg>
+                      </button>
+                    )}
+                    <span
+                      className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[0.65rem] font-semibold uppercase tracking-wide ${
+                        statusStyles[statusKey] || statusStyles.active
+                      }`}
+                    >
+                      {statusLabel}
+                    </span>
+                  </div>
                 </header>
                 {source.notes && statusKey !== 'active' && (
                   <p className="mb-3 text-xs italic text-slate-500">{source.notes}</p>

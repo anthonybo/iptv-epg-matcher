@@ -17,11 +17,34 @@ router.use(authMiddleware);
 // Load EPG sources from config file (single source of truth)
 const EPG_SOURCES_CONFIG = require('../config/epg_sources.json');
 
-// Get only enabled sources
-function getEnabledEpgSources() {
-  return EPG_SOURCES_CONFIG.sources
+// Get only enabled sources (including user-added sources)
+async function getEnabledEpgSources() {
+  // Get config-based sources
+  const configSources = EPG_SOURCES_CONFIG.sources
     .filter(source => source.enabled)
     .map(source => source.url);
+
+  // Get user-added sources from database
+  try {
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+    const userSources = await new Promise((resolve, reject) => {
+      iptvDb.all('SELECT url FROM user_epg_sources WHERE enabled = 1', [], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+
+    if (userSources && userSources.length > 0) {
+      const userUrls = userSources.map(s => s.url);
+      logger.info(`[EPG Sources] Adding ${userUrls.length} user EPG sources to bulk refresh`);
+      return [...configSources, ...userUrls];
+    }
+  } catch (err) {
+    logger.warn(`[EPG Sources] Could not load user EPG sources: ${err.message}`);
+  }
+
+  return configSources;
 }
 
 // Get all sources (including disabled ones) with metadata
@@ -551,7 +574,7 @@ const getProgramsByChannelId = async (channelId, startTime, endTime) => {
 
 // Run the Python parser with live progress streaming
 const runEpgParser = async (options = {}) => {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     // Check if already running
     if (epgRefreshStatus.isRunning) {
       logger.warn('EPG refresh already in progress, ignoring duplicate request');
@@ -561,6 +584,10 @@ const runEpgParser = async (options = {}) => {
     const pythonPath = 'python3';
     const scriptPath = path.join(__dirname, '../epg_parser.py');
 
+    // Get all enabled sources (config + user sources)
+    const allSources = await getEnabledEpgSources();
+    logger.info(`[EPG Refresh] Found ${allSources.length} total EPG sources (config + user sources)`);
+
     let args = ['--no-menu']; // Always use non-interactive mode
 
     if (options.force) {
@@ -569,6 +596,16 @@ const runEpgParser = async (options = {}) => {
 
     if (options.source) {
       args.push(`--source=${options.source}`);
+    } else {
+      // Create a temporary sources file to pass all sources to Python script
+      const tempSourcesPath = path.join(__dirname, '../cache', 'temp_sources.json');
+      try {
+        fs.writeFileSync(tempSourcesPath, JSON.stringify(allSources, null, 2));
+        args.push(`--sources=${tempSourcesPath}`);
+        logger.info(`[EPG Refresh] Created temporary sources file with ${allSources.length} sources`);
+      } catch (err) {
+        logger.error(`[EPG Refresh] Failed to create temporary sources file: ${err.message}`);
+      }
     }
 
     logger.info(`Running EPG parser: ${pythonPath} ${scriptPath} ${args.join(' ')}`);
@@ -578,7 +615,7 @@ const runEpgParser = async (options = {}) => {
       isRunning: true,
       startedAt: new Date().toISOString(),
       currentSource: 0,
-      totalSources: getEnabledEpgSources().length, // Set to number of enabled sources
+      totalSources: allSources.length, // Set to number of enabled sources (including user sources)
       lastMessage: 'Starting EPG refresh...'
     };
 
@@ -926,6 +963,7 @@ router.get('/matched-channels', async (req, res) => {
           m.epg_channel_name,
           m.epg_source_name,
           m.epg_source_id,
+          m.use_dummy_epg,
           c.name,
           c.logo,
           c.url,
@@ -1037,6 +1075,57 @@ router.delete('/matched-channels/:matchId', async (req, res) => {
     });
   } catch (error) {
     logger.error('Error deleting matched channel:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PUT /matched-channels/:matchId/dummy-epg
+ * Toggle dummy EPG for a specific match
+ */
+router.put('/matched-channels/:matchId/dummy-epg', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { matchId } = req.params;
+    const { useDummyEpg } = req.body;
+
+    if (!userId) {
+      logger.error('Toggle dummy EPG: No user ID in request');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (typeof useDummyEpg !== 'boolean') {
+      return res.status(400).json({ error: 'useDummyEpg must be a boolean' });
+    }
+
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    // Update the dummy EPG flag for this match
+    const result = await new Promise((resolve, reject) => {
+      iptvDb.run(`
+        UPDATE epg_matches
+        SET use_dummy_epg = ?
+        WHERE id = ? AND user_id = ?
+      `, [useDummyEpg ? 1 : 0, matchId, userId], function(err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      });
+    });
+
+    if (result === 0) {
+      return res.status(404).json({ error: 'Match not found' });
+    }
+
+    logger.info(`${useDummyEpg ? 'Enabled' : 'Disabled'} dummy EPG for match ID ${matchId} (user ${userId})`);
+
+    res.json({
+      success: true,
+      message: `Dummy EPG ${useDummyEpg ? 'enabled' : 'disabled'}`,
+      useDummyEpg
+    });
+  } catch (error) {
+    logger.error('Error toggling dummy EPG:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1371,8 +1460,9 @@ router.get('/:sessionId', async (req, res) => {
 router.get('/:sessionId/sources', async (req, res) => {
   try {
     const { sessionId } = req.params;
+    const userId = req.user?.id;
 
-    logger.info(`Getting EPG sources for session ${sessionId}`);
+    logger.info(`Getting EPG sources for session ${sessionId}, user ${userId || 'none'}`);
 
     if (!sessionId) {
       return res.status(400).json({ error: 'Session ID is required' });
@@ -1412,9 +1502,69 @@ router.get('/:sessionId/sources', async (req, res) => {
         channel_count: dbSource?.channel_count || 0,
         program_count: dbSource?.program_count || 0,
         channelCount: dbSource?.channel_count || 0,
-        programCount: dbSource?.program_count || 0
+        programCount: dbSource?.program_count || 0,
+        isUserSource: false
       };
     });
+
+    // Add user EPG sources if authenticated
+    if (userId) {
+      const iptvDatabaseService = require('../services/iptvDatabaseService');
+      const iptvDb = await iptvDatabaseService.connect();
+      const cacheService = require('../services/cacheService');
+
+      const userSources = await new Promise((resolve, reject) => {
+        iptvDb.all(`
+          SELECT id, url, name, enabled, verified, notes, created_at, updated_at
+          FROM user_epg_sources
+          WHERE user_id = ?
+          ORDER BY created_at DESC
+        `, [userId], (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows || []);
+        });
+      });
+
+      // Add user sources to the list
+      userSources.forEach(userSource => {
+        const dbSource = dbSourceMap[userSource.url];
+
+        // Try to get from cache if not in database
+        let channelCount = dbSource?.channel_count || 0;
+        let programCount = dbSource?.program_count || 0;
+        let lastUpdated = dbSource?.last_updated || null;
+
+        logger.debug(`[EPG Sources] Processing user source: ${userSource.url}, dbSource exists: ${!!dbSource}, dbChannels: ${channelCount}, dbPrograms: ${programCount}`);
+
+        if (!dbSource || channelCount === 0) {
+          const cachedData = cacheService.readEpgSourceCache(userSource.url);
+          logger.debug(`[EPG Sources] Cache lookup for ${userSource.url}: ${cachedData ? 'FOUND' : 'NOT FOUND'}`, cachedData || {});
+          if (cachedData) {
+            channelCount = cachedData.channelCount || 0;
+            programCount = cachedData.programCount || 0;
+            lastUpdated = cachedData.lastUpdated || lastUpdated;
+            logger.info(`[EPG Sources] Using cached data for ${userSource.url}: ${channelCount} channels, ${programCount} programs`);
+          }
+        }
+
+        sources.push({
+          id: `user_${userSource.id}`,
+          name: userSource.name,
+          url: userSource.url,
+          enabled: Boolean(userSource.enabled),
+          verified: Boolean(userSource.verified),
+          notes: userSource.notes || 'User-added source',
+          last_updated: lastUpdated,
+          channel_count: channelCount,
+          program_count: programCount,
+          channelCount: channelCount,
+          programCount: programCount,
+          isUserSource: true,
+          created_at: userSource.created_at,
+          updated_at: userSource.updated_at
+        });
+      });
+    }
 
     // Filter to only enabled sources if requested
     const enabledOnly = req.query.enabled === 'true';
@@ -1445,9 +1595,9 @@ router.get('/:sessionId/sources', async (req, res) => {
 router.post('/:sessionId/match', async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const { epgChannel, m3uChannel } = req.body;
+    const { epgChannel, m3uChannel, useDummyEpg } = req.body;
 
-    logger.info(`Matching EPG channel to M3U channel in session ${sessionId}`);
+    logger.info(`Matching EPG channel to M3U channel in session ${sessionId}${useDummyEpg ? ' (with dummy EPG)' : ''}`);
 
     if (!sessionId) {
       return res.status(400).json({ error: 'Session ID is required' });
@@ -1534,8 +1684,8 @@ router.post('/:sessionId/match', async (req, res) => {
       await new Promise((resolve, reject) => {
         iptvDb.run(`
           INSERT OR REPLACE INTO epg_matches
-          (session_id, user_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, iptv_source_id, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          (session_id, user_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, iptv_source_id, use_dummy_epg, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         `, [
           sessionId,
           userId || null,
@@ -1545,7 +1695,8 @@ router.post('/:sessionId/match', async (req, res) => {
           epgChannel.name,
           epgChannel.source_name || 'Unknown',
           epgChannel.source_id || '',
-          iptvSourceId
+          iptvSourceId,
+          useDummyEpg ? 1 : 0
         ], (err) => {
           if (err) reject(err);
           else resolve();
@@ -1651,7 +1802,8 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           epg_channel_name,
           epg_source_name,
           epg_source_id,
-          iptv_source_id
+          iptv_source_id,
+          use_dummy_epg
         FROM epg_matches
         WHERE user_id = ? OR session_id = ?
         ORDER BY iptv_channel_name
@@ -1666,7 +1818,8 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
           epg_channel_name,
           epg_source_name,
           epg_source_id,
-          iptv_source_id
+          iptv_source_id,
+          use_dummy_epg
         FROM epg_matches
         WHERE session_id = ?
         ORDER BY iptv_channel_name
@@ -1896,38 +2049,67 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
         // Get channel info from EPG database
         const channelInfo = await getChannelById(epgChannelId);
 
-        if (!channelInfo) {
-          logger.warn(`No EPG data found for channel ${epgChannelId}`);
-          continue;
+        let formattedPrograms = [];
+
+        // Handle dummy EPG channels
+        if (match.use_dummy_epg === 1) {
+          logger.info(`Generating dummy EPG programs for channel ${iptvChannelId}`);
+
+          // Generate 7 days of dummy programs (3-hour blocks)
+          const now = new Date();
+          for (let day = 0; day < 7; day++) {
+            for (let hour = 0; hour < 24; hour += 3) {
+              const startDate = new Date(now);
+              startDate.setDate(startDate.getDate() + day);
+              startDate.setHours(hour, 0, 0, 0);
+
+              const stopDate = new Date(startDate);
+              stopDate.setHours(stopDate.getHours() + 3);
+
+              formattedPrograms.push({
+                id: `dummy_${iptvChannelId}_${day}_${hour}`,
+                title: iptvChannelName,
+                description: `Streaming on ${iptvChannelName}`,
+                start: startDate.toISOString(),
+                stop: stopDate.toISOString()
+              });
+            }
+          }
+        } else {
+          // Regular EPG channel
+          if (!channelInfo) {
+            logger.warn(`No EPG data found for channel ${epgChannelId}`);
+            continue;
+          }
+
+          // Get programs for this channel (next 24 hours)
+          const programsSql = `
+            SELECT id, title, description, start, stop, channel_id
+            FROM programs
+            WHERE channel_id = ?
+              AND start IS NOT NULL
+              AND stop IS NOT NULL
+              AND stop > strftime('%Y%m%d%H%M%S +0000', 'now')
+            ORDER BY start
+            LIMIT 50
+          `;
+
+          const programs = await runQuery(programsSql, [epgChannelId]);
+
+          // Convert program timestamps to ISO format
+          formattedPrograms = programs.map(p => ({
+            id: p.id,
+            title: p.title,
+            description: p.description,
+            start: convertEPGTimestampToISO(p.start),
+            stop: convertEPGTimestampToISO(p.stop)
+          }));
         }
-
-        // Get programs for this channel (next 24 hours)
-        const programsSql = `
-          SELECT id, title, description, start, stop, channel_id
-          FROM programs
-          WHERE channel_id = ?
-            AND start IS NOT NULL
-            AND stop IS NOT NULL
-            AND stop > strftime('%Y%m%d%H%M%S +0000', 'now')
-          ORDER BY start
-          LIMIT 50
-        `;
-
-        const programs = await runQuery(programsSql, [epgChannelId]);
-
-        // Convert program timestamps to ISO format
-        const formattedPrograms = programs.map(p => ({
-          id: p.id,
-          title: p.title,
-          description: p.description,
-          start: convertEPGTimestampToISO(p.start),
-          stop: convertEPGTimestampToISO(p.stop)
-        }));
 
         channelsWithEpg.push({
           id: iptvChannelId,
-          name: iptvChannelData?.name || channelInfo.name,
-          logo: iptvChannelData?.logo || channelInfo.icon,
+          name: iptvChannelData?.name || channelInfo?.name || iptvChannelName,
+          logo: iptvChannelData?.logo || channelInfo?.icon || null,
           url: (iptvChannelData?.url || '').trim(),
           group: {
             title: iptvChannelData?.group_title || ''
@@ -1936,7 +2118,7 @@ router.get('/:sessionId/matched-channels', async (req, res) => {
             id: iptvChannelData?.epg_channel_id || epgChannelId
           },
           epgId: epgChannelId,
-          epgSource: epgSourceName || channelInfo.source_name,
+          epgSource: epgSourceName || channelInfo?.source_name || (match.use_dummy_epg === 1 ? 'Dummy EPG' : 'Unknown'),
           iptvSource: iptvSourceInfo,
           programs: formattedPrograms
         });
