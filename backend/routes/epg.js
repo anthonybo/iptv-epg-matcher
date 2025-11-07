@@ -896,6 +896,247 @@ router.post('/parse', async (req, res) => {
 });
 
 /**
+ * IPTV Editor Endpoints - User-authenticated endpoints for editing matched channels
+ * These routes MUST come before /:sessionId routes to avoid parameter matching conflicts
+ */
+
+/**
+ * GET /matched-channels
+ * Get all matched channels for the authenticated user (for IPTV Editor)
+ */
+router.get('/matched-channels', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      logger.error('Get matched channels: No user ID in request');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    const channels = await new Promise((resolve, reject) => {
+      iptvDb.all(`
+        SELECT
+          m.id as match_id,
+          m.iptv_channel_id,
+          m.iptv_channel_name,
+          m.epg_channel_id,
+          m.epg_channel_name,
+          m.epg_source_name,
+          m.epg_source_id,
+          c.name,
+          c.logo,
+          c.url,
+          c.group_title,
+          s.name as source_name
+        FROM epg_matches m
+        JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+        JOIN iptv_sources s ON c.source_id = s.id
+        WHERE m.user_id = ?
+        ORDER BY c.name
+      `, [userId], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+
+    res.json({
+      channels,
+      count: channels.length
+    });
+  } catch (error) {
+    logger.error('Error fetching matched channels for editor:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PUT /matched-channels/:channelId
+ * Update channel metadata
+ */
+router.put('/matched-channels/:channelId', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { channelId } = req.params;
+    const { name, logo, group_title } = req.body;
+
+    if (!userId) {
+      logger.error('Update channel: No user ID in request');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    // Update the channel in iptv_channels table
+    await new Promise((resolve, reject) => {
+      iptvDb.run(`
+        UPDATE iptv_channels
+        SET name = ?, logo = ?, group_title = ?
+        WHERE channel_id = ?
+        AND source_id IN (
+          SELECT s.id FROM iptv_sources s WHERE s.user_id = ?
+        )
+      `, [name, logo, group_title, channelId, userId], function(err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      });
+    });
+
+    logger.info(`Updated channel ${channelId} for user ${userId}`);
+
+    res.json({
+      success: true,
+      message: 'Channel updated successfully'
+    });
+  } catch (error) {
+    logger.error('Error updating channel:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /matched-channels/:matchId
+ * Remove a specific match by match ID
+ */
+router.delete('/matched-channels/:matchId', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { matchId } = req.params;
+
+    if (!userId) {
+      logger.error('Delete matched channel: No user ID in request');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    // Delete the specific match by ID (ensure it belongs to this user)
+    const result = await new Promise((resolve, reject) => {
+      iptvDb.run(`
+        DELETE FROM epg_matches
+        WHERE id = ? AND user_id = ?
+      `, [matchId, userId], function(err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      });
+    });
+
+    if (result === 0) {
+      return res.status(404).json({ error: 'Match not found' });
+    }
+
+    logger.info(`Removed match ID ${matchId} for user ${userId}`);
+
+    res.json({
+      success: true,
+      message: 'Channel match removed'
+    });
+  } catch (error) {
+    logger.error('Error deleting matched channel:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /channel-programs/:channelId
+ * Get EPG programs for a specific channel
+ */
+router.get('/channel-programs/:channelId', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+
+    if (!channelId) {
+      return res.status(400).json({ error: 'Channel ID is required' });
+    }
+
+    const path = require('path');
+    const sqlite3 = require('sqlite3').verbose();
+    const epgDbPath = path.join(__dirname, '../data/epg.db');
+    const epgDb = new sqlite3.Database(epgDbPath);
+
+    const programs = await new Promise((resolve, reject) => {
+      epgDb.all(`
+        SELECT channel_id, title, start, stop, description, category
+        FROM programs
+        WHERE channel_id = ?
+        AND substr(stop, 1, 14) >= strftime('%Y%m%d%H%M%S', 'now', '-2 hours')
+        ORDER BY start
+        LIMIT 50
+      `, [channelId], (err, rows) => {
+        if (err) {
+          logger.warn(`Error fetching EPG programs: ${err.message}`);
+          resolve([]);
+        } else {
+          resolve(rows || []);
+        }
+      });
+    });
+
+    epgDb.close();
+
+    res.json({
+      programs,
+      count: programs.length
+    });
+  } catch (error) {
+    logger.error('Error fetching channel programs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /matched-channels/batch-update-category
+ * Rename a category for all channels
+ */
+router.post('/matched-channels/batch-update-category', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { oldCategory, newCategory } = req.body;
+
+    if (!userId) {
+      logger.error('Batch update category: No user ID in request');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (!oldCategory || !newCategory) {
+      return res.status(400).json({ error: 'Old and new category names required' });
+    }
+
+    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDb = await iptvDatabaseService.connect();
+
+    // Update all channels in the category for this user
+    const result = await new Promise((resolve, reject) => {
+      iptvDb.run(`
+        UPDATE iptv_channels
+        SET group_title = ?
+        WHERE group_title = ?
+        AND source_id IN (
+          SELECT s.id FROM iptv_sources s WHERE s.user_id = ?
+        )
+      `, [newCategory, oldCategory, userId], function(err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      });
+    });
+
+    logger.info(`Renamed category "${oldCategory}" to "${newCategory}" for user ${userId}, ${result} channels updated`);
+
+    res.json({
+      success: true,
+      message: `Category renamed, ${result} channels updated`
+    });
+  } catch (error) {
+    logger.error('Error batch updating category:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /:sessionId/categories
  * Get categories for session (with proper 200 response)
  */

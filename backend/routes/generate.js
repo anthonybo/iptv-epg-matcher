@@ -308,8 +308,8 @@ router.post('/', async (req, res) => {
     await new Promise((resolve, reject) => {
       db.run(`
         INSERT OR REPLACE INTO generated_credentials
-        (user_id, username, password, credential_id, m3u_file, epg_file, channel_count, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        (user_id, username, password, credential_id, m3u_file, epg_file, channel_count, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `, [userId, username, password, credentialId, m3uFilePath, epgFilePath, matchedChannels.length], (err) => {
         if (err) reject(err);
         else resolve();
@@ -338,6 +338,238 @@ router.post('/', async (req, res) => {
     });
   } catch (error) {
     logger.error('Generate failed', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /api/generate/update-all
+ * Updates all existing XTREAM credentials for the user with current matched channels
+ */
+router.post('/update-all', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      logger.error('Update all: No user ID in request');
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    logger.info(`Updating all XTREAM credentials for user ${userId}`);
+
+    const db = await iptvDatabaseService.connect();
+
+    // Get all existing credentials for this user
+    const existingCredentials = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT id, username, password, credential_id, m3u_file, epg_file
+        FROM generated_credentials
+        WHERE user_id = ?
+      `, [userId], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+
+    if (existingCredentials.length === 0) {
+      logger.warn(`No existing credentials found for user ${userId}`);
+      return res.status(400).json({
+        error: 'No existing credentials to update. Create new credentials from the Credentials tab first.',
+        updatedCount: 0
+      });
+    }
+
+    logger.info(`Found ${existingCredentials.length} credentials to update for user ${userId}`);
+
+    // Get all matched channels for this user
+    const matchedChannels = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT
+          m.iptv_channel_id,
+          m.iptv_channel_name,
+          m.epg_channel_id,
+          m.epg_channel_name,
+          m.epg_source_name,
+          m.epg_source_id,
+          c.name,
+          c.logo,
+          c.url,
+          c.group_title,
+          s.id as source_id,
+          s.name as source_name,
+          s.url as source_url,
+          s.username as source_username,
+          s.password as source_password,
+          s.type as source_type
+        FROM epg_matches m
+        JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+        JOIN iptv_sources s ON c.source_id = s.id
+        WHERE m.user_id = ?
+        ORDER BY c.name
+      `, [userId], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+
+    if (!matchedChannels || matchedChannels.length === 0) {
+      logger.warn(`No matched channels found for user ${userId}`);
+      return res.status(400).json({
+        error: 'No matched channels found. Please match channels in the Guide first.',
+        matchCount: 0
+      });
+    }
+
+    logger.info(`Found ${matchedChannels.length} matched channels for user ${userId}`);
+
+    // Get server info for stream URLs
+    const serverIp = getServerIpAddress();
+    const port = process.env.PORT || 5001;
+    const baseUrl = process.env.BASE_URL || `http://${serverIp}:${port}`;
+
+    // Update each credential
+    let updatedCount = 0;
+    const updateErrors = [];
+    for (const cred of existingCredentials) {
+      try {
+        logger.info(`Attempting to update credential ${cred.credential_id}...`);
+        // Generate M3U content
+        const m3uLines = ['#EXTM3U'];
+        matchedChannels.forEach(channel => {
+          const tvgId = channel.epg_channel_id || '';
+          const tvgName = channel.name || channel.iptv_channel_name;
+          const tvgLogo = channel.logo || '';
+          const groupTitle = channel.group_title || 'Matched Channels';
+
+          m3uLines.push(
+            `#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${tvgName}" tvg-logo="${tvgLogo}" group-title="${groupTitle}",${tvgName}`
+          );
+
+          const streamUrl = `${baseUrl}/api/xtream/stream/${encodeURIComponent(channel.iptv_channel_id)}?username=${cred.username}&password=${cred.password}`;
+          m3uLines.push(streamUrl);
+        });
+        const m3uContent = m3uLines.join('\n');
+
+        // Generate EPG XML content
+        const epgChannelIds = [...new Set(matchedChannels.map(ch => ch.epg_channel_id).filter(Boolean))];
+
+        const epgDbPath = path.join(__dirname, '../data/epg.db');
+        const sqlite3 = require('sqlite3').verbose();
+        const epgDb = new sqlite3.Database(epgDbPath);
+
+        const epgPrograms = await new Promise((resolve, reject) => {
+          if (epgChannelIds.length === 0) {
+            return resolve([]);
+          }
+
+          const placeholders = epgChannelIds.map(() => '?').join(',');
+          epgDb.all(`
+            SELECT channel_id, title, start, stop, description, category
+            FROM programs
+            WHERE channel_id IN (${placeholders})
+            AND substr(stop, 1, 14) >= strftime('%Y%m%d%H%M%S', 'now')
+            ORDER BY channel_id, start
+            LIMIT 1000
+          `, epgChannelIds, (err, rows) => {
+            if (err) {
+              logger.warn(`Error fetching EPG data: ${err.message}`);
+              resolve([]);
+            } else {
+              resolve(rows || []);
+            }
+          });
+        });
+
+        epgDb.close();
+
+        // Build XMLTV
+        const xmlLines = [
+          '<?xml version="1.0" encoding="UTF-8"?>',
+          '<!DOCTYPE tv SYSTEM "xmltv.dtd">',
+          '<tv generator-info-name="IPTV EPG Matcher">'
+        ];
+
+        const uniqueChannelIds = new Set();
+        matchedChannels.forEach(ch => {
+          if (ch.epg_channel_id && !uniqueChannelIds.has(ch.epg_channel_id)) {
+            uniqueChannelIds.add(ch.epg_channel_id);
+            xmlLines.push(`  <channel id="${escapeXml(ch.epg_channel_id)}">`);
+            xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.epg_channel_name)}</display-name>`);
+            if (ch.logo) {
+              xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
+            }
+            xmlLines.push(`  </channel>`);
+          }
+        });
+
+        epgPrograms.forEach(prog => {
+          xmlLines.push(`  <programme start="${prog.start}" stop="${prog.stop}" channel="${escapeXml(prog.channel_id)}">`);
+          xmlLines.push(`    <title>${escapeXml(prog.title || 'Unknown')}</title>`);
+          if (prog.description) {
+            xmlLines.push(`    <desc>${escapeXml(prog.description)}</desc>`);
+          }
+          if (prog.category) {
+            xmlLines.push(`    <category>${escapeXml(prog.category)}</category>`);
+          }
+          xmlLines.push(`  </programme>`);
+        });
+
+        xmlLines.push('</tv>');
+        const epgContent = xmlLines.join('\n');
+
+        // Update files
+        fs.writeFileSync(cred.m3u_file, m3uContent);
+        fs.writeFileSync(cred.epg_file, epgContent);
+
+        // Update database record
+        await new Promise((resolve, reject) => {
+          db.run(`
+            UPDATE generated_credentials
+            SET channel_count = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `, [matchedChannels.length, cred.id], (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+
+        updatedCount++;
+        logger.info(`Successfully updated credential ${cred.credential_id} for user ${userId}`);
+      } catch (error) {
+        logger.error(`Error updating credential ${cred.credential_id}:`, error);
+        updateErrors.push({
+          credential: cred.credential_id,
+          error: error.message,
+          stack: error.stack
+        });
+      }
+    }
+
+    logger.info(`Update summary: ${updatedCount} succeeded, ${updateErrors.length} failed`);
+
+    logger.info(`Successfully updated ${updatedCount} credentials for user ${userId}`);
+
+    if (updatedCount === 0) {
+      logger.warn(`No credentials were actually updated for user ${userId}`);
+      const errorDetails = updateErrors.length > 0
+        ? `Errors: ${updateErrors.map(e => e.error).join(', ')}`
+        : 'Please check your credentials in the Credentials tab.';
+      return res.status(400).json({
+        success: false,
+        error: `No credentials were updated. ${errorDetails}`,
+        updatedCount: 0,
+        errors: updateErrors
+      });
+    }
+
+    res.json({
+      success: true,
+      updatedCount,
+      channelCount: matchedChannels.length,
+      message: `Updated ${updatedCount} credential(s) with ${matchedChannels.length} channels`
+    });
+  } catch (error) {
+    logger.error('Update all failed', { error: error.message, stack: error.stack });
     res.status(500).json({ error: error.message });
   }
 });

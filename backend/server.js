@@ -131,6 +131,11 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase JSON size limit
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Add Morgan HTTP request logging - log ALL requests
+app.use(morgan(':method :url :status :res[content-length] - :response-time ms', {
+  stream: logger.stream
+}));
+
 // Add proper middleware for attaching logger to req
 app.use((req, res, next) => {
   req.logger = logger;
@@ -139,13 +144,8 @@ app.use((req, res, next) => {
 
 // Add request logging middleware
 app.use((req, res, next) => {
-  // Log all incoming requests
-  logger.debug(`REQUEST: ${req.method} ${req.originalUrl}`, {
-    headers: req.headers,
-    query: req.query,
-    params: req.params,
-    body: req.method === 'POST' ? req.body : undefined
-  });
+  // Log all incoming requests at INFO level so we always see them
+  logger.info(`[REQUEST] ${req.method} ${req.originalUrl} from ${req.ip}`);
   
   // Track response for logging
   const originalSend = res.send;

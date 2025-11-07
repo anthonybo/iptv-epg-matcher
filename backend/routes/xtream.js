@@ -301,6 +301,8 @@ router.get('/player_api.php', async (req, res) => {
     user_info: {
       username: credential.username,
       password: credential.password,
+      message: "Success",
+      auth: 1,
       status: "Active",
       exp_date: null, // Unlimited
       is_trial: "0",
@@ -441,6 +443,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
           c.url,
           s.username as source_username,
           s.password as source_password,
+          s.mac_address as source_mac,
           s.type as source_type
         FROM epg_matches m
         JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
@@ -468,22 +471,58 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
 
     logger.info(`Proxying XTREAM live stream for channel: ${channel.name} from URL: ${channel.url}`);
 
-    // Handle Stalker portal URLs - extract actual stream URL from cmd parameter
+    // Handle Stalker portal URLs - request FRESH link from portal
     let streamUrl = channel.url;
     if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
       try {
-        const url = new URL(channel.url);
-        const cmd = url.searchParams.get('cmd');
+        logger.info(`Requesting fresh Stalker link from portal...`);
 
-        if (cmd) {
-          const cmdMatch = cmd.match(/ffmpeg\s+(.+)/);
-          if (cmdMatch && cmdMatch[1]) {
-            streamUrl = cmdMatch[1];
-            logger.info(`Extracted Stalker stream URL: ${streamUrl}`);
+        // Make request to create_link to get fresh token
+        const fetch = require('node-fetch');
+        const createLinkResponse = await fetch(channel.url, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+            'X-User-Agent': 'Model: MAG250; Link: WiFi',
+            'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
+          }
+        });
+
+        if (createLinkResponse.ok) {
+          const linkData = await createLinkResponse.json();
+          logger.info(`create_link response:`, linkData);
+
+          if (linkData && linkData.js && linkData.js.cmd) {
+            const cmd = linkData.js.cmd;
+            const match = cmd.match(/ffmpeg\s+(.+)/);
+            if (match && match[1]) {
+              streamUrl = match[1];
+              logger.info(`Got FRESH Stalker stream URL: ${streamUrl}`);
+            }
+          }
+        } else {
+          logger.warn(`Failed to get fresh link: ${createLinkResponse.status}`);
+          // Fall back to parsing stored URL
+          const url = new URL(channel.url);
+          const cmd = url.searchParams.get('cmd');
+          if (cmd) {
+            const match = cmd.match(/ffmpeg\s+(.+)/);
+            if (match && match[1]) {
+              streamUrl = match[1];
+              logger.info(`Using stored Stalker stream URL: ${streamUrl}`);
+            }
           }
         }
+
+        // Replace localhost with actual server address if needed
+        if (streamUrl.includes('localhost')) {
+          const sourceUrl = new URL(channel.url);
+          const serverAddress = `${sourceUrl.protocol}//${sourceUrl.host}`;
+          streamUrl = streamUrl.replace(/http:\/\/localhost/g, serverAddress);
+          logger.info(`Replaced localhost with server address: ${streamUrl}`);
+        }
       } catch (error) {
-        logger.error(`Error parsing Stalker URL: ${error.message}`);
+        logger.error(`Error getting fresh Stalker link: ${error.message}`);
       }
     }
 
@@ -581,19 +620,21 @@ router.get('/stream/:channelId', async (req, res) => {
     const { channelId } = req.params;
     const { username, password } = req.query;
 
+    logger.info(`[STREAM] Incoming request for channel: ${channelId}, username: ${username}, has password: ${!!password}`);
+
     if (!username || !password) {
-      logger.error('Missing credentials for XTREAM stream');
+      logger.error('[STREAM] Missing credentials for XTREAM stream');
       return res.status(400).json({ error: 'Missing username or password' });
     }
 
     const credential = await validateCredentials(username, password);
 
     if (!credential) {
-      logger.error('Invalid credentials for XTREAM stream', { username });
+      logger.error(`[STREAM] Invalid credentials for XTREAM stream, username: ${username}`);
       return res.status(403).json({ error: 'Invalid credentials' });
     }
 
-    logger.info(`Stream request for channel ${channelId} with username ${username}`);
+    logger.info(`[STREAM] Valid credentials for user ${credential.user_id}, fetching channel ${channelId}`);
 
     // Get the channel from the database
     const db = await iptvDatabaseService.connect();
@@ -608,44 +649,82 @@ router.get('/stream/:channelId', async (req, res) => {
           c.group_title,
           s.username as source_username,
           s.password as source_password,
-          s.type as source_type
+          s.mac_address as source_mac,
+          s.type as source_type,
+          s.user_id
         FROM iptv_channels c
         JOIN iptv_sources s ON c.source_id = s.id
-        WHERE c.channel_id = ?
-      `, [channelId], (err, row) => {
+        WHERE c.channel_id = ? AND s.user_id = ?
+      `, [channelId, credential.user_id], (err, row) => {
         if (err) reject(err);
         else resolve(row);
       });
     });
 
     if (!channel) {
-      logger.error(`Channel not found: ${channelId}`);
+      logger.error(`[STREAM] Channel not found or not owned by user: ${channelId} (user_id: ${credential.user_id})`);
       return res.status(404).json({ error: 'Channel not found' });
     }
 
     if (!channel.url) {
-      logger.error(`No stream URL for channel ${channelId}`);
+      logger.error(`[STREAM] No stream URL for channel ${channelId}`);
       return res.status(400).json({ error: 'No stream URL for this channel' });
     }
 
-    logger.info(`Proxying stream for channel: ${channel.name} from URL: ${channel.url}`);
+    logger.info(`[STREAM] Proxying stream for channel: ${channel.name} from URL: ${channel.url}`);
 
-    // Handle Stalker portal URLs - extract actual stream URL from cmd parameter
+    // Handle Stalker portal URLs - request FRESH link from portal
     let streamUrl = channel.url;
     if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
       try {
-        const url = new URL(channel.url);
-        const cmd = url.searchParams.get('cmd');
+        logger.info(`[STREAM] Requesting fresh Stalker link from portal...`);
 
-        if (cmd) {
-          const match = cmd.match(/ffmpeg\s+(.+)/);
-          if (match && match[1]) {
-            streamUrl = match[1];
-            logger.info(`Extracted Stalker stream URL: ${streamUrl}`);
+        // Make request to create_link to get fresh token
+        const fetch = require('node-fetch');
+        const createLinkResponse = await fetch(channel.url, {
+          method: 'GET',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+            'X-User-Agent': 'Model: MAG250; Link: WiFi',
+            'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
+          }
+        });
+
+        if (createLinkResponse.ok) {
+          const linkData = await createLinkResponse.json();
+          logger.info(`[STREAM] create_link response:`, linkData);
+
+          if (linkData && linkData.js && linkData.js.cmd) {
+            const cmd = linkData.js.cmd;
+            const match = cmd.match(/ffmpeg\s+(.+)/);
+            if (match && match[1]) {
+              streamUrl = match[1];
+              logger.info(`[STREAM] Got FRESH Stalker stream URL: ${streamUrl}`);
+            }
+          }
+        } else {
+          logger.warn(`[STREAM] Failed to get fresh link: ${createLinkResponse.status}`);
+          // Fall back to parsing stored URL
+          const url = new URL(channel.url);
+          const cmd = url.searchParams.get('cmd');
+          if (cmd) {
+            const match = cmd.match(/ffmpeg\s+(.+)/);
+            if (match && match[1]) {
+              streamUrl = match[1];
+              logger.info(`[STREAM] Using stored Stalker stream URL: ${streamUrl}`);
+            }
           }
         }
+
+        // Replace localhost with actual server address if needed
+        if (streamUrl.includes('localhost')) {
+          const sourceUrl = new URL(channel.url);
+          const serverAddress = `${sourceUrl.protocol}//${sourceUrl.host}`;
+          streamUrl = streamUrl.replace(/http:\/\/localhost/g, serverAddress);
+          logger.info(`[STREAM] Replaced localhost with server address: ${streamUrl}`);
+        }
       } catch (error) {
-        logger.error(`Error parsing Stalker URL: ${error.message}`);
+        logger.error(`Error getting fresh Stalker link: ${error.message}`);
       }
     }
 

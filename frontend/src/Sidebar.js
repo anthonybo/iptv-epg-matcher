@@ -64,12 +64,23 @@ const menuItems = [
     ),
   },
   {
-    id: 'publish',
-    label: 'Publish',
+    id: 'editor',
+    label: 'IPTV Editor',
+    countKey: 'totalMatchesCount',
     icon: (
       <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 19v-7m0 0V5m0 7l-3-3m3 3l3-3" />
-        <circle cx="12" cy="12" r="10" />
+        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+      </svg>
+    ),
+  },
+  {
+    id: 'publish',
+    label: 'Credentials',
+    icon: (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="4" width="20" height="16" rx="2" />
+        <path d="M7 15h0M2 9.5h20" />
       </svg>
     ),
   },
@@ -113,14 +124,18 @@ const Sidebar = ({
   totalChannels = 0,
   categoryCount = 0,
   matchedChannelCount = 0,
+  totalMatchesCount = 0,
   epgSourceCount = 0,
+  userSourcesCount = 0,
 }) => {
   const visibilityClass = showSidebar ? 'flex' : 'hidden';
 
   const counts = {
     totalChannels,
     matchedChannelCount,
+    totalMatchesCount,
     epgSourceCount,
+    userSourcesCount,
   };
 
   return (

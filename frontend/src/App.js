@@ -14,6 +14,7 @@ import PlayerView from './PlayerView';
 import ResultView from './ResultView';
 import GuideView from './GuideView';
 import TheatreView from './TheatreView';
+import IPTVEditor from './IPTVEditor';
 import SessionDebugger from './components/SessionDebugger';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
@@ -54,10 +55,11 @@ function App() {
   const [sessionId, setSessionId] = useState(null);
   const [selectedChannel, setSelectedChannel] = useState(null);
   const [matchedChannels, setMatchedChannels] = useState({});
+  const [totalMatches, setTotalMatches] = useState(0); // Total matches including duplicates (for IPTV Editor)
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingError, setLoadingError] = useState(null);
-  const [activeTab, setActiveTab] = useState('myiptvs'); // 'myiptvs', 'channels', 'player', 'guide', or 'publish'
+  const [activeTab, setActiveTab] = useState('myiptvs'); // 'myiptvs', 'channels', 'player', 'guide', 'editor', or 'publish'
   const [showSidebar, setShowSidebar] = useState(true);
   const [sessionDebuggerOpen, setSessionDebuggerOpen] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -198,6 +200,26 @@ function App() {
     loadUserSources();
   }, [authLoading, authIsAuthenticated]);
 
+  // Load total matches count for IPTV Editor tab
+  useEffect(() => {
+    const loadTotalMatches = async () => {
+      if (authLoading || !authIsAuthenticated) {
+        return;
+      }
+
+      try {
+        const response = await apiClient.get('/epg/matched-channels');
+        if (response.data && response.data.count !== undefined) {
+          setTotalMatches(response.data.count);
+        }
+      } catch (err) {
+        console.error('Error loading total matches count:', err);
+      }
+    };
+
+    loadTotalMatches();
+  }, [authLoading, authIsAuthenticated]);
+
   useEffect(() => {
     const handleSseMessage = (event) => {
       if (!event?.detail?.data) {
@@ -269,9 +291,9 @@ function App() {
   useEffect(() => {
     // Only redirect to myiptvs if we have NO session and NO data at all
     // Don't redirect if we have categories (which means we have a valid session with data)
-    // Don't redirect if we're on the publish tab
+    // Don't redirect if we're on the publish or editor tab
     // Don't redirect if we're currently loading
-    if (!sessionId && channels.length === 0 && categories.length === 0 && !isLoading && activeTab !== 'publish' && activeTab !== 'myiptvs') {
+    if (!sessionId && channels.length === 0 && categories.length === 0 && !isLoading && activeTab !== 'publish' && activeTab !== 'editor' && activeTab !== 'myiptvs') {
       setActiveTab('myiptvs');
     }
   }, [sessionId, channels.length, categories.length, isLoading, activeTab]);
@@ -963,6 +985,24 @@ function App() {
             isTheatreMode={isTheatreMode}
           />
         );
+      case 'editor':
+        return (
+          <IPTVEditor
+            sessionId={sessionId}
+            matchedChannels={matchedChannels}
+            onUpdateMatches={setMatchedChannels}
+            onNavigateToPlayer={(channel) => {
+              // Navigate to Player tab with the channel loaded for editing EPG match
+              setSelectedChannel({
+                id: channel.iptv_channel_id,
+                name: channel.name || channel.iptv_channel_name,
+                logo: channel.logo,
+                url: channel.url
+              });
+              setActiveTab('player');
+            }}
+          />
+        );
       case 'publish':
         return (
           <ResultView
@@ -1491,6 +1531,7 @@ function App() {
           totalChannels={totalChannels}
           categoryCount={categories.length}
           matchedChannelCount={Object.keys(matchedChannels).length}
+          totalMatchesCount={totalMatches}
           epgSourceCount={epgSources.length}
           userSourcesCount={userSources.length}
         />

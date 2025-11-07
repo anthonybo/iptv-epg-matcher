@@ -149,26 +149,80 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         
         logger.info(`Streaming channel: ${channel.name} (${normalizedChannelId}) from URL: ${channel.url}`);
 
-        // Handle Stalker portal URLs - extract actual stream URL from cmd parameter
+        // Handle Stalker portal URLs - request FRESH link from portal
         let streamUrl = channel.url;
         if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
             try {
-                // Parse URL to extract cmd parameter
-                const url = new URL(channel.url);
-                const cmd = url.searchParams.get('cmd');
+                logger.info(`[STREAM] Requesting fresh Stalker link from portal for channel ${normalizedChannelId}...`);
 
-                if (cmd) {
-                    // Extract actual stream URL from cmd (format: "ffmpeg http://...")
-                    const match = cmd.match(/ffmpeg\s+(.+)/);
-                    if (match && match[1]) {
-                        streamUrl = match[1];
-                        logger.info(`Extracted Stalker stream URL: ${streamUrl}`);
+                // Query database to get source information including MAC address
+                const db = await iptvDatabaseService.connect();
+                const channelWithSource = await new Promise((resolve, reject) => {
+                    // Extract the actual channel ID from normalized ID (remove 'channel_' prefix if present)
+                    const dbChannelId = normalizedChannelId.replace(/^channel_/, '');
+
+                    db.get(`
+                        SELECT
+                            c.channel_id,
+                            c.name,
+                            c.url,
+                            s.mac_address as source_mac,
+                            s.username as source_username,
+                            s.password as source_password
+                        FROM iptv_channels c
+                        JOIN iptv_sources s ON c.source_id = s.id
+                        WHERE c.channel_id = ? ${userId ? 'AND s.user_id = ?' : ''}
+                    `, userId ? [dbChannelId, userId] : [dbChannelId], (err, row) => {
+                        if (err) reject(err);
+                        else resolve(row);
+                    });
+                });
+
+                if (!channelWithSource) {
+                    logger.warn(`[STREAM] Could not find channel ${normalizedChannelId} in database with source info`);
+                } else {
+                    // Make request to create_link to get fresh token
+                    const createLinkResponse = await fetch(channel.url, {
+                        method: 'GET',
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+                            'X-User-Agent': 'Model: MAG250; Link: WiFi',
+                            'Cookie': `mac=${channelWithSource.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
+                        },
+                        timeout: 10000
+                    });
+
+                    if (createLinkResponse.ok) {
+                        const linkData = await createLinkResponse.json();
+                        logger.info(`[STREAM] create_link response:`, linkData);
+
+                        if (linkData && linkData.js && linkData.js.cmd) {
+                            const cmd = linkData.js.cmd;
+                            const match = cmd.match(/ffmpeg\s+(.+)/);
+                            if (match && match[1]) {
+                                streamUrl = match[1];
+                                logger.info(`[STREAM] Got FRESH Stalker stream URL: ${streamUrl}`);
+
+                                // Replace localhost with actual server address if present
+                                if (streamUrl.includes('localhost')) {
+                                    const sourceUrl = new URL(channel.url);
+                                    const serverAddress = `${sourceUrl.protocol}//${sourceUrl.host}`;
+                                    streamUrl = streamUrl.replace(/http:\/\/localhost/g, serverAddress);
+                                    logger.info(`[STREAM] Replaced localhost with server address: ${streamUrl}`);
+                                }
+                            } else {
+                                logger.warn(`[STREAM] Could not extract stream URL from cmd: ${cmd.substring(0, 100)}`);
+                            }
+                        } else {
+                            logger.warn(`[STREAM] Invalid create_link response structure:`, linkData);
+                        }
                     } else {
-                        logger.warn(`Could not extract stream URL from Stalker cmd parameter: ${cmd.substring(0, 100)}`);
+                        logger.error(`[STREAM] create_link request failed: ${createLinkResponse.status} ${createLinkResponse.statusText}`);
                     }
                 }
             } catch (error) {
-                logger.error(`Error parsing Stalker URL: ${error.message}`);
+                logger.error(`[STREAM] Error fetching fresh Stalker link: ${error.message}`);
+                // Fall back to using the URL as-is
             }
         }
 
