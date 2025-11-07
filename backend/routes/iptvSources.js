@@ -534,4 +534,68 @@ router.get('/alternate-feeds', requireAuth, async (req, res) => {
     }
 });
 
+/**
+ * PATCH /api/iptv/sources/:sourceId/auto-detect-live
+ * Update auto-detect live setting for a source
+ */
+router.patch('/sources/:sourceId/auto-detect-live', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const sourceId = parseInt(req.params.sourceId);
+        const { autoDetectLive } = req.body;
+
+        if (typeof autoDetectLive !== 'boolean') {
+            return res.status(400).json({
+                success: false,
+                error: 'autoDetectLive must be a boolean'
+            });
+        }
+
+        await iptvDatabaseService.updateSourceAutoDetectLive(userId, sourceId, autoDetectLive);
+
+        res.json({
+            success: true,
+            message: `Auto-detect live ${autoDetectLive ? 'enabled' : 'disabled'} for source`
+        });
+    } catch (error) {
+        logger.error(`Error updating source auto-detect live: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to update auto-detect live setting'
+        });
+    }
+});
+
+/**
+ * PATCH /api/iptv/channels/:channelId/live-prefix
+ * Update live prefix setting for a channel
+ */
+router.patch('/channels/:channelId/live-prefix', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const channelId = req.params.channelId;
+        const { enableLivePrefix } = req.body;
+
+        if (typeof enableLivePrefix !== 'boolean') {
+            return res.status(400).json({
+                success: false,
+                error: 'enableLivePrefix must be a boolean'
+            });
+        }
+
+        await iptvDatabaseService.updateChannelLivePrefix(userId, channelId, enableLivePrefix);
+
+        res.json({
+            success: true,
+            message: `Live prefix ${enableLivePrefix ? 'enabled' : 'disabled'} for channel`
+        });
+    } catch (error) {
+        logger.error(`Error updating channel live prefix: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to update live prefix setting'
+        });
+    }
+});
+
 module.exports = router;

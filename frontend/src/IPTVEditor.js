@@ -18,11 +18,28 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [publishResult, setPublishResult] = useState(null);
   const [channelToRemove, setChannelToRemove] = useState(null);
+  const [sources, setSources] = useState([]);
+  const [globalAutoDetect, setGlobalAutoDetect] = useState(false);
+  const [refreshingLiveEvents, setRefreshingLiveEvents] = useState(false);
 
-  // Load matched channels from database
+  // Load matched channels and sources from database
   useEffect(() => {
     loadMatchedChannels();
+    loadSources();
   }, []);
+
+  const loadSources = async () => {
+    try {
+      const response = await apiClient.get('/iptv/sources');
+      if (response.data && Array.isArray(response.data.sources)) {
+        setSources(response.data.sources);
+        // Set global auto-detect if any source has it enabled
+        setGlobalAutoDetect(response.data.sources.some(s => s.auto_detect_live === 1));
+      }
+    } catch (error) {
+      console.error('Failed to load sources:', error);
+    }
+  };
 
   const loadMatchedChannels = async () => {
     try {
@@ -115,6 +132,41 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
     }
   };
 
+  const handleToggleLivePrefix = async (channelId, enableLivePrefix) => {
+    try {
+      await apiClient.patch(`/iptv/channels/${channelId}/live-prefix`, {
+        enableLivePrefix
+      });
+
+      // Update local state
+      setChannels(prev => prev.map(ch =>
+        ch.iptv_channel_id === channelId ? { ...ch, enable_live_prefix: enableLivePrefix ? 1 : 0 } : ch
+      ));
+    } catch (error) {
+      console.error('Failed to toggle live prefix:', error);
+    }
+  };
+
+  const handleToggleGlobalAutoDetect = async (enabled) => {
+    try {
+      // Update all sources
+      const updatePromises = sources.map(source =>
+        apiClient.patch(`/iptv/sources/${source.id}/auto-detect-live`, {
+          autoDetectLive: enabled
+        })
+      );
+
+      await Promise.all(updatePromises);
+
+      // Update local state
+      setGlobalAutoDetect(enabled);
+      setSources(prev => prev.map(s => ({ ...s, auto_detect_live: enabled ? 1 : 0 })));
+      setChannels(prev => prev.map(ch => ({ ...ch, sourceAutoDetectLive: enabled ? 1 : 0 })));
+    } catch (error) {
+      console.error('Failed to toggle global auto-detect:', error);
+    }
+  };
+
   const handleRenameCategory = async (oldName, newName) => {
     try {
       // Update all channels in this category
@@ -143,9 +195,58 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
     setLoadingEpg(true);
 
     try {
-      // Fetch EPG data for this channel
-      const response = await apiClient.get(`/epg/channel-programs/${channel.epg_channel_id}`);
-      setChannelEpgData(response.data.programs || []);
+      // Check if this is a dummy EPG channel (either no epg_channel_id or starts with "dummy_")
+      const isDummyChannel = channel.use_dummy_epg === 1 ||
+                            !channel.epg_channel_id ||
+                            (channel.epg_channel_id && channel.epg_channel_id.startsWith('dummy_'));
+
+      if (isDummyChannel) {
+        // Generate dummy EPG data on the frontend
+        const dummyPrograms = [];
+        const now = new Date();
+
+        // Generate 7 days of 3-hour blocks
+        for (let day = 0; day < 7; day++) {
+          for (let hour = 0; hour < 24; hour += 3) {
+            const startDate = new Date(now);
+            startDate.setDate(startDate.getDate() + day);
+            startDate.setHours(hour, 0, 0, 0);
+
+            const stopDate = new Date(startDate);
+            stopDate.setHours(stopDate.getHours() + 3);
+
+            // Format as XMLTV timestamp: YYYYMMDDHHMMSS +TZTZ
+            const formatXmltvTime = (date) => {
+              const pad = (n) => String(n).padStart(2, '0');
+              const year = date.getFullYear();
+              const month = pad(date.getMonth() + 1);
+              const dayNum = pad(date.getDate());
+              const hours = pad(date.getHours());
+              const minutes = pad(date.getMinutes());
+              const seconds = pad(date.getSeconds());
+              return `${year}${month}${dayNum}${hours}${minutes}${seconds} +0000`;
+            };
+
+            dummyPrograms.push({
+              channel_id: channel.epg_channel_id || `dummy_${channel.iptv_channel_id}`,
+              title: channel.name || channel.iptv_channel_name,
+              start: formatXmltvTime(startDate),
+              stop: formatXmltvTime(stopDate),
+              description: `Streaming on ${channel.name || channel.iptv_channel_name}`,
+              category: channel.group_title || 'Live TV'
+            });
+          }
+        }
+
+        setChannelEpgData(dummyPrograms);
+      } else if (channel.epg_channel_id) {
+        // Fetch real EPG data for channels with EPG match
+        const response = await apiClient.get(`/epg/channel-programs/${channel.epg_channel_id}`);
+        setChannelEpgData(response.data.programs || []);
+      } else {
+        // No EPG data available
+        setChannelEpgData([]);
+      }
     } catch (error) {
       console.error('Failed to load EPG data:', error);
       setChannelEpgData([]);
@@ -191,6 +292,22 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
     }
   };
 
+  const handleRefreshLiveEvents = async () => {
+    try {
+      setRefreshingLiveEvents(true);
+      const response = await apiClient.post('/live-events/refresh');
+
+      if (response.data.success) {
+        console.log(`Refreshed ${response.data.totalFetched} events, stored ${response.data.totalStored}`);
+        // Optionally show success message to user
+      }
+    } catch (error) {
+      console.error('Failed to refresh live events:', error);
+    } finally {
+      setRefreshingLiveEvents(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col bg-slate-950">
       {/* Header */}
@@ -209,6 +326,22 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
             <span className="rounded-full bg-purple-500/20 px-3 py-1 text-sm font-semibold text-purple-300">
               {categories.length} categories
             </span>
+            <button
+              onClick={handleRefreshLiveEvents}
+              disabled={refreshingLiveEvents}
+              className="flex items-center gap-2 rounded-xl bg-blue-500/20 px-4 py-2.5 text-sm font-medium text-blue-300 transition-all hover:bg-blue-500/30 disabled:opacity-50"
+            >
+              <svg
+                className={`h-4 w-4 ${refreshingLiveEvents ? 'animate-spin' : ''}`}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118.8-4.3M22 12.5a10 10 0 01-18.8 4.2" />
+              </svg>
+              {refreshingLiveEvents ? 'Refreshing...' : 'Refresh Live Events'}
+            </button>
             <button
               onClick={() => setShowPublishModal(true)}
               disabled={publishing || channels.length === 0}
@@ -316,6 +449,27 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
         <div className="flex-1 overflow-y-auto">
           {viewMode === 'channels' && (
             <div className="p-6">
+              {/* Global Auto-Detect LIVE Toggle */}
+              <div className="mb-6 rounded-lg border border-slate-700 bg-slate-900/50 p-4">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div className="flex-1">
+                    <div className="font-semibold text-slate-200">Auto-Detect LIVE for all channels</div>
+                    <p className="mt-1 text-xs text-slate-400">
+                      Automatically add "LIVE:" prefix to currently airing programs across all channels
+                    </p>
+                  </div>
+                  <div className="relative ml-4">
+                    <input
+                      type="checkbox"
+                      checked={globalAutoDetect}
+                      onChange={(e) => handleToggleGlobalAutoDetect(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                  </div>
+                </label>
+              </div>
+
               {/* Search */}
               <div className="mb-6">
                 <input
@@ -347,6 +501,7 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
                       onRemove={() => setChannelToRemove(channel)}
                       onClick={() => handleChannelClick(channel)}
                       onToggleDummyEpg={handleToggleDummyEpg}
+                      onToggleLivePrefix={handleToggleLivePrefix}
                     />
                   ))
                 )}
@@ -499,7 +654,7 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
   );
 };
 
-const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, onClick, onToggleDummyEpg }) => {
+const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, onClick, onToggleDummyEpg, onToggleLivePrefix }) => {
   const [editedChannel, setEditedChannel] = useState(channel);
 
   useEffect(() => {
@@ -628,7 +783,10 @@ const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, o
             Remove
           </button>
         </div>
-        <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition">
+        <label
+          className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition"
+          onClick={(e) => e.stopPropagation()}
+        >
           <input
             type="checkbox"
             checked={channel.use_dummy_epg === 1}
@@ -641,6 +799,23 @@ const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, o
             className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-2 focus:ring-blue-500 focus:ring-offset-slate-900"
           />
           <span title="Generate dummy EPG for channels with dynamic names">Dummy EPG</span>
+        </label>
+        <label
+          className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            checked={channel.enable_live_prefix === 1}
+            onChange={(e) => {
+              e.stopPropagation();
+              if (onToggleLivePrefix) {
+                onToggleLivePrefix(channel.iptv_channel_id, e.target.checked);
+              }
+            }}
+            className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-2 focus:ring-blue-500 focus:ring-offset-slate-900"
+          />
+          <span title="Add 'LIVE:' prefix to currently airing programs">LIVE prefix</span>
         </label>
       </div>
     </div>

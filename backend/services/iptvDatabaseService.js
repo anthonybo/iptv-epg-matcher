@@ -201,7 +201,10 @@ const initializeTables = () => {
             // Add mac_address column for MAG/Stalker middleware support
             `ALTER TABLE iptv_sources ADD COLUMN mac_address TEXT`,
             // Add user_id column to make sources per-user instead of shared
-            `ALTER TABLE iptv_sources ADD COLUMN user_id INTEGER`
+            `ALTER TABLE iptv_sources ADD COLUMN user_id INTEGER`,
+            // Add LIVE prefix feature columns
+            `ALTER TABLE iptv_sources ADD COLUMN auto_detect_live INTEGER DEFAULT 0`,
+            `ALTER TABLE iptv_channels ADD COLUMN enable_live_prefix INTEGER DEFAULT 0`
         ];
         
         db.serialize(() => {
@@ -701,7 +704,8 @@ const getChannelsForSession = (sessionId, options = {}) => {
                               s.url
                           ) as source_name,
                           s.url as source_url,
-                          s.type as source_type
+                          s.type as source_type,
+                          s.auto_detect_live as source_auto_detect_live
                    FROM iptv_channels c
                    JOIN iptv_sources s ON c.source_id = s.id
                    LEFT JOIN user_iptv_preferences p ON s.id = p.source_id AND p.user_id = ?
@@ -751,15 +755,18 @@ const getChannelsForSession = (sessionId, options = {}) => {
 
                             return {
                                 id: row.channel_id,
+                                dbId: row.id,
                                 sourceId: row.source_id,
                                 sourceName: displayName,
                                 sourceType: row.source_type,
+                                sourceAutoDetectLive: row.source_auto_detect_live || 0,
                                 name: row.name,
                                 logo: row.logo,
                                 url: row.url,
                                 group: { title: row.group_title },
                                 tvg: { id: row.epg_channel_id },
-                                categories: row.categories ? JSON.parse(row.categories) : []
+                                categories: row.categories ? JSON.parse(row.categories) : [],
+                                enableLivePrefix: row.enable_live_prefix || 0
                             };
                         }),
                         pagination: {
@@ -1105,6 +1112,7 @@ const getUserIPTVSources = (userId) => {
                 s.is_trial,
                 s.account_created_at,
                 s.last_updated,
+                s.auto_detect_live,
                 COALESCE(p.priority, 999) as priority,
                 COALESCE(p.is_active, 1) as is_active,
                 p.nickname,
@@ -1137,6 +1145,7 @@ const getUserIPTVSources = (userId) => {
                     account_status: row.account_status,
                     is_trial: row.is_trial,
                     account_created_at: row.account_created_at,
+                    auto_detect_live: row.auto_detect_live || 0,
                     priority: row.priority,
                     is_active: row.is_active,
                     channel_count: row.channel_count,
@@ -1467,6 +1476,72 @@ const getAlternateFeeds = (userId, channelName, epgChannelId = null) => {
     });
 };
 
+/**
+ * Update auto_detect_live setting for a source
+ * @param {number} userId - User ID
+ * @param {number} sourceId - Source ID
+ * @param {boolean} autoDetectLive - Auto detect live state
+ * @returns {Promise<void>}
+ */
+const updateSourceAutoDetectLive = (userId, sourceId, autoDetectLive) => {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE iptv_sources
+             SET auto_detect_live = ?
+             WHERE id = ? AND user_id = ?`,
+            [autoDetectLive ? 1 : 0, sourceId, userId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error updating source auto_detect_live: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                if (this.changes === 0) {
+                    reject(new Error('Source not found or user does not have access'));
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
+/**
+ * Update enable_live_prefix setting for a channel
+ * @param {number} userId - User ID
+ * @param {number} channelId - Channel ID (the integer ID, not channel_id)
+ * @param {boolean} enableLivePrefix - Enable live prefix state
+ * @returns {Promise<void>}
+ */
+const updateChannelLivePrefix = (userId, channelId, enableLivePrefix) => {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `UPDATE iptv_channels
+             SET enable_live_prefix = ?
+             WHERE channel_id = ? AND source_id IN (
+                SELECT id FROM iptv_sources WHERE user_id = ?
+             )`,
+            [enableLivePrefix ? 1 : 0, channelId, userId],
+            function(err) {
+                if (err) {
+                    logger.error(`Error updating channel enable_live_prefix: ${err.message}`);
+                    reject(err);
+                    return;
+                }
+
+                if (this.changes === 0) {
+                    reject(new Error('Channel not found or user does not have access'));
+                    return;
+                }
+
+                resolve();
+            }
+        );
+    });
+};
+
 module.exports = {
     connect,
     saveSource,
@@ -1489,5 +1564,8 @@ module.exports = {
     toggleSourceActive,
     getSourceById,
     deleteUserSource,
-    getAlternateFeeds
+    getAlternateFeeds,
+    // LIVE prefix feature
+    updateSourceAutoDetectLive,
+    updateChannelLivePrefix
 }; 

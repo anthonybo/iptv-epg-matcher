@@ -15,6 +15,7 @@ import ResultView from './ResultView';
 import GuideView from './GuideView';
 import TheatreView from './TheatreView';
 import IPTVEditor from './IPTVEditor';
+import LiveEventsView from './LiveEventsView';
 import SessionDebugger from './components/SessionDebugger';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
@@ -133,10 +134,10 @@ function App() {
   }, [initialized]); // Only depend on initialized state
 
   // Fetch matched channels from backend
-  const fetchMatchedChannels = async (sid) => {
+  const fetchMatchedChannels = async () => {
     try {
-      console.log(`[App] Fetching matched channels for session: ${sid}`);
-      const response = await apiClient.get(`/epg/${sid}/matched-channels`);
+      console.log('[App] Fetching matched channels');
+      const response = await apiClient.get('/epg/matched-channels-with-programs');
 
       if (response.data && Array.isArray(response.data.channels)) {
         // Transform array of matched channels into a map for easy lookup
@@ -918,6 +919,27 @@ function App() {
             onChannelSelect={handleChannelSelect}
           />
         );
+      case 'liveevents':
+        return (
+          <LiveEventsView
+            sessionId={sessionId}
+            onNavigateToPlayer={(channel) => {
+              setSelectedChannel({
+                id: channel.id,
+                name: channel.name,
+                logo: channel.logo,
+                url: channel.url,
+                sourceId: channel.source_id,
+                sourceType: channel.source_type,
+                sourceUrl: channel.source_url,
+                sourceUsername: channel.source_username,
+                sourcePassword: channel.source_password,
+                sourceMac: channel.source_mac
+              });
+              setActiveTab('player');
+            }}
+          />
+        );
       case 'epg':
         return (
           <div className="space-y-6 px-6 py-8">
@@ -1203,18 +1225,18 @@ function App() {
         // Always refresh matched channels when switching to channels view
         // This ensures we have the latest match status
         if (now - lastMatchesFetch > 5000) { // Refresh if more than 5 seconds since last fetch
-          console.log(`[App] Refreshing matched channels for session: ${sessionId}`);
+          console.log('[App] Refreshing matched channels for editor');
           window.lastMatchesFetchTime = now;
-          await fetchMatchedChannels(sessionId);
+          await fetchMatchedChannels();
         }
       }
 
       // Also refresh matched channels when switching to guide view
-      if (activeTab === 'guide' && sessionId) {
+      if (activeTab === 'guide') {
         if (now - lastMatchesFetch > 5000) { // Refresh if more than 5 seconds since last fetch
-          console.log(`[App] Refreshing matched channels for Guide view`);
+          console.log('[App] Refreshing matched channels for Guide view');
           window.lastMatchesFetchTime = now;
-          await fetchMatchedChannels(sessionId);
+          await fetchMatchedChannels();
         }
       }
     };
@@ -1429,7 +1451,7 @@ function App() {
         />
       )}
 
-      <header className="flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20">
+      <header className="sticky top-0 z-40 flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <button
             type="button"

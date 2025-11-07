@@ -54,6 +54,17 @@ const menuItems = [
     ),
   },
   {
+    id: 'liveevents',
+    label: 'Live Events',
+    icon: (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 6v6l4 2" />
+        <circle cx="12" cy="12" r="2" fill="currentColor" />
+      </svg>
+    ),
+  },
+  {
     id: 'player',
     label: 'Player',
     icon: (
@@ -139,7 +150,7 @@ const Sidebar = ({
   };
 
   return (
-    <aside className={`${visibilityClass} h-full w-72 flex-col border-r border-slate-800/80 bg-slate-950/80 text-slate-200 backdrop-blur`}> 
+    <aside className={`${visibilityClass} sticky top-0 h-screen w-72 flex-col border-r border-slate-800/80 bg-slate-950/80 text-slate-200 backdrop-blur`}> 
       <div className="border-b border-slate-800/70 px-5 py-4">
         <div className="flex items-center gap-3">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-500/20 text-blue-300">

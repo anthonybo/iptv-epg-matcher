@@ -12,6 +12,7 @@ const { generateCredentials } = require('../utils/storageUtils');
 const { UPLOADS_DIR } = require('../config/constants');
 const { authMiddleware } = require('../middleware/authMiddleware');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
+const liveEventsService = require('../services/liveEventsService');
 
 /**
  * Get the local network IP address of the server
@@ -32,6 +33,70 @@ function getServerIpAddress() {
 
   // Return the first valid address, or localhost if none found
   return addresses.length > 0 ? addresses[0] : 'localhost';
+}
+
+/**
+ * Detect if program content is actually LIVE (sports, live events)
+ * Uses category and title pattern matching
+ */
+function detectLiveContent(title, category) {
+  if (!title) return false;
+
+  const titleLower = title.toLowerCase();
+  const categoryLower = (category || '').toLowerCase();
+
+  // Skip if title already has LIVE prefix (avoid double prefix)
+  // Check for both regular "Live:" and small caps "ʟɪᴠᴇ"
+  if (/^live:?\s/i.test(title) || title.startsWith('ʟɪᴠᴇ ')) {
+    return false;
+  }
+
+  // Check title for live sports patterns - STRONGEST INDICATOR
+  const livePatterns = [
+    / vs\.?\s/i,          // "Team A vs Team B" or "Team A vs. Team B"
+    / @ /i,               // "Team A @ Team B"
+  ];
+
+  const hasVsPattern = livePatterns.some(pattern => pattern.test(title));
+
+  // Strong indicator - if has vs/@ pattern, it's very likely live sports
+  if (hasVsPattern) {
+    // But exclude if it says "next game" or similar
+    const excludeNext = ['next game', 'upcoming', 'scheduled'];
+    const hasExcludeNext = excludeNext.some(pattern => titleLower.includes(pattern));
+    return !hasExcludeNext;
+  }
+
+  // For titles without vs/@ pattern, be more strict
+  // Only match if it has sports category AND specific live event keywords
+  const sportsCategories = [
+    'sport', 'sports', 'live sport'
+  ];
+
+  const hasSportsCategory = sportsCategories.some(sport => categoryLower.includes(sport));
+
+  if (hasSportsCategory) {
+    // Keywords that indicate it's a live broadcast (not just sports content)
+    const liveBroadcastKeywords = [
+      'qualifying', 'practice session', 'free practice',
+      'championship', 'playoff', 'semifinal', 'quarterfinal', 'final round'
+    ];
+
+    const hasLiveBroadcastKeyword = liveBroadcastKeywords.some(keyword => titleLower.includes(keyword));
+
+    // Exclude obvious non-live content
+    const excludePatterns = [
+      'replay', 'repeat', 'highlights', 'classic', 'rewind',
+      'encore', 'recorded', 'best of', 'top 10', 'greatest',
+      'next game', 'upcoming', 'documentary', 'news', 'talk show'
+    ];
+
+    const isExcluded = excludePatterns.some(pattern => titleLower.includes(pattern));
+
+    return !isExcluded && hasLiveBroadcastKeyword;
+  }
+
+  return false;
 }
 
 // Apply auth middleware to all routes
@@ -170,12 +235,14 @@ router.post('/', async (req, res) => {
           c.logo,
           c.url,
           c.group_title,
+          c.enable_live_prefix,
           s.id as source_id,
           s.name as source_name,
           s.url as source_url,
           s.username as source_username,
           s.password as source_password,
-          s.type as source_type
+          s.type as source_type,
+          s.auto_detect_live
         FROM epg_matches m
         JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
         JOIN iptv_sources s ON c.source_id = s.id
@@ -196,6 +263,31 @@ router.post('/', async (req, res) => {
     }
 
     logger.info(`Found ${matchedChannels.length} matched channels for user ${userId}`);
+
+    // Fetch currently live events from database for LIVE prefix detection
+    const liveEvents = await liveEventsService.getCurrentlyLiveEvents();
+    logger.info(`Loaded ${liveEvents.length} currently live events for LIVE prefix detection`);
+
+    // Helper function to check if program title matches any live event
+    const matchesLiveEvent = (programTitle) => {
+      if (!programTitle || liveEvents.length === 0) return false;
+
+      const titleLower = programTitle.toLowerCase();
+
+      // Check if program title contains both team names from any live event
+      for (const event of liveEvents) {
+        const homeTeamLower = (event.home_team || '').toLowerCase();
+        const awayTeamLower = (event.away_team || '').toLowerCase();
+
+        if (homeTeamLower && awayTeamLower &&
+            titleLower.includes(homeTeamLower) &&
+            titleLower.includes(awayTeamLower)) {
+          return true;
+        }
+      }
+
+      return false;
+    };
 
     // Generate new credentials
     const { username, password } = generateCredentials();
@@ -313,6 +405,7 @@ router.post('/', async (req, res) => {
     // Add channel definitions
     const uniqueChannelIds = new Set();
     matchedChannels.forEach(ch => {
+      // Add regular EPG channel definitions
       if (ch.epg_channel_id && !uniqueChannelIds.has(ch.epg_channel_id)) {
         uniqueChannelIds.add(ch.epg_channel_id);
         xmlLines.push(`  <channel id="${escapeXml(ch.epg_channel_id)}">`);
@@ -322,12 +415,69 @@ router.post('/', async (req, res) => {
         }
         xmlLines.push(`  </channel>`);
       }
+
+      // Add dummy EPG channel definitions for channels without EPG match
+      if (ch.use_dummy_epg === 1 && !ch.epg_channel_id) {
+        const dummyChannelId = `dummy_${ch.iptv_channel_id}`;
+        if (!uniqueChannelIds.has(dummyChannelId)) {
+          uniqueChannelIds.add(dummyChannelId);
+          xmlLines.push(`  <channel id="${escapeXml(dummyChannelId)}">`);
+          xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.iptv_channel_name)}</display-name>`);
+          if (ch.logo) {
+            xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
+          }
+          xmlLines.push(`  </channel>`);
+        }
+      }
+    });
+
+    // Create a map of epg_channel_id to channel settings for LIVE prefix feature
+    const channelSettings = {};
+    matchedChannels.forEach(ch => {
+      const channelId = ch.epg_channel_id || (ch.use_dummy_epg === 1 ? `dummy_${ch.iptv_channel_id}` : null);
+      if (channelId) {
+        channelSettings[channelId] = {
+          enableLivePrefix: ch.enable_live_prefix === 1,
+          autoDetectLive: ch.auto_detect_live === 1
+        };
+      }
     });
 
     // Add program data
+    const nowTimestamp = Date.now();
     epgPrograms.forEach(prog => {
+      // Parse XMLTV timestamp to check if program is currently airing
+      const parseXmltvTime = (xmltvTime) => {
+        // Format: YYYYMMDDHHMMSS +TZTZ
+        const dateStr = xmltvTime.substring(0, 14);
+        const year = parseInt(dateStr.substring(0, 4));
+        const month = parseInt(dateStr.substring(4, 6)) - 1;
+        const day = parseInt(dateStr.substring(6, 8));
+        const hour = parseInt(dateStr.substring(8, 10));
+        const minute = parseInt(dateStr.substring(10, 12));
+        const second = parseInt(dateStr.substring(12, 14));
+        return new Date(Date.UTC(year, month, day, hour, minute, second)).getTime();
+      };
+
+      const startTime = parseXmltvTime(prog.start);
+      const stopTime = parseXmltvTime(prog.stop);
+      const isCurrentlyAiring = nowTimestamp >= startTime && nowTimestamp < stopTime;
+
+      // Check if program matches a currently live event in database
+      const isLiveEvent = isCurrentlyAiring && matchesLiveEvent(prog.title);
+
+      // Check if LIVE prefix should be added
+      const settings = channelSettings[prog.channel_id];
+      const shouldAddLivePrefix = settings && isCurrentlyAiring &&
+        (settings.enableLivePrefix || (settings.autoDetectLive && isLiveEvent));
+
+      // Prepend small caps "LIVE" to title if applicable
+      const title = shouldAddLivePrefix
+        ? `ʟɪᴠᴇ ${prog.title || 'Unknown'}`
+        : prog.title || 'Unknown';
+
       xmlLines.push(`  <programme start="${prog.start}" stop="${prog.stop}" channel="${escapeXml(prog.channel_id)}">`);
-      xmlLines.push(`    <title>${escapeXml(prog.title || 'Unknown')}</title>`);
+      xmlLines.push(`    <title>${escapeXml(title)}</title>`);
       if (prog.description) {
         xmlLines.push(`    <desc>${escapeXml(prog.description)}</desc>`);
       }
@@ -440,12 +590,14 @@ router.post('/update-all', async (req, res) => {
           c.logo,
           c.url,
           c.group_title,
+          c.enable_live_prefix,
           s.id as source_id,
           s.name as source_name,
           s.url as source_url,
           s.username as source_username,
           s.password as source_password,
-          s.type as source_type
+          s.type as source_type,
+          s.auto_detect_live
         FROM epg_matches m
         JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
         JOIN iptv_sources s ON c.source_id = s.id
@@ -464,6 +616,31 @@ router.post('/update-all', async (req, res) => {
         matchCount: 0
       });
     }
+
+    // Fetch currently live events from database for LIVE prefix detection
+    const liveEvents = await liveEventsService.getCurrentlyLiveEvents();
+    logger.info(`Loaded ${liveEvents.length} currently live events for LIVE prefix detection`);
+
+    // Helper function to check if program title matches any live event
+    const matchesLiveEvent = (programTitle) => {
+      if (!programTitle || liveEvents.length === 0) return false;
+
+      const titleLower = programTitle.toLowerCase();
+
+      // Check if program title contains both team names from any live event
+      for (const event of liveEvents) {
+        const homeTeamLower = (event.home_team || '').toLowerCase();
+        const awayTeamLower = (event.away_team || '').toLowerCase();
+
+        if (homeTeamLower && awayTeamLower &&
+            titleLower.includes(homeTeamLower) &&
+            titleLower.includes(awayTeamLower)) {
+          return true;
+        }
+      }
+
+      return false;
+    };
 
     logger.info(`Found ${matchedChannels.length} matched channels for user ${userId}`);
 
@@ -579,6 +756,7 @@ router.post('/update-all', async (req, res) => {
 
         const uniqueChannelIds = new Set();
         matchedChannels.forEach(ch => {
+          // Add regular EPG channel definitions
           if (ch.epg_channel_id && !uniqueChannelIds.has(ch.epg_channel_id)) {
             uniqueChannelIds.add(ch.epg_channel_id);
             xmlLines.push(`  <channel id="${escapeXml(ch.epg_channel_id)}">`);
@@ -588,11 +766,69 @@ router.post('/update-all', async (req, res) => {
             }
             xmlLines.push(`  </channel>`);
           }
+
+          // Add dummy EPG channel definitions for channels without EPG match
+          if (ch.use_dummy_epg === 1 && !ch.epg_channel_id) {
+            const dummyChannelId = `dummy_${ch.iptv_channel_id}`;
+            if (!uniqueChannelIds.has(dummyChannelId)) {
+              uniqueChannelIds.add(dummyChannelId);
+              xmlLines.push(`  <channel id="${escapeXml(dummyChannelId)}">`);
+              xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.iptv_channel_name)}</display-name>`);
+              if (ch.logo) {
+                xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
+              }
+              xmlLines.push(`  </channel>`);
+            }
+          }
         });
 
+        // Create a map of epg_channel_id to channel settings for LIVE prefix feature
+        const channelSettings = {};
+        matchedChannels.forEach(ch => {
+          const channelId = ch.epg_channel_id || (ch.use_dummy_epg === 1 ? `dummy_${ch.iptv_channel_id}` : null);
+          if (channelId) {
+            channelSettings[channelId] = {
+              enableLivePrefix: ch.enable_live_prefix === 1,
+              autoDetectLive: ch.auto_detect_live === 1
+            };
+          }
+        });
+
+        // Add program data with LIVE prefix support
+        const nowTimestamp = Date.now();
         epgPrograms.forEach(prog => {
+          // Parse XMLTV timestamp to check if program is currently airing
+          const parseXmltvTime = (xmltvTime) => {
+            // Format: YYYYMMDDHHMMSS +TZTZ
+            const dateStr = xmltvTime.substring(0, 14);
+            const year = parseInt(dateStr.substring(0, 4));
+            const month = parseInt(dateStr.substring(4, 6)) - 1;
+            const day = parseInt(dateStr.substring(6, 8));
+            const hour = parseInt(dateStr.substring(8, 10));
+            const minute = parseInt(dateStr.substring(10, 12));
+            const second = parseInt(dateStr.substring(12, 14));
+            return new Date(Date.UTC(year, month, day, hour, minute, second)).getTime();
+          };
+
+          const startTime = parseXmltvTime(prog.start);
+          const stopTime = parseXmltvTime(prog.stop);
+          const isCurrentlyAiring = nowTimestamp >= startTime && nowTimestamp < stopTime;
+
+          // Check if program matches a currently live event in database
+          const isLiveEvent = isCurrentlyAiring && matchesLiveEvent(prog.title);
+
+          // Check if LIVE prefix should be added
+          const settings = channelSettings[prog.channel_id];
+          const shouldAddLivePrefix = settings && isCurrentlyAiring &&
+            (settings.enableLivePrefix || (settings.autoDetectLive && isLiveEvent));
+
+          // Prepend small caps "LIVE" to title if applicable
+          const title = shouldAddLivePrefix
+            ? `ʟɪᴠᴇ ${prog.title || 'Unknown'}`
+            : prog.title || 'Unknown';
+
           xmlLines.push(`  <programme start="${prog.start}" stop="${prog.stop}" channel="${escapeXml(prog.channel_id)}">`);
-          xmlLines.push(`    <title>${escapeXml(prog.title || 'Unknown')}</title>`);
+          xmlLines.push(`    <title>${escapeXml(title)}</title>`);
           if (prog.description) {
             xmlLines.push(`    <desc>${escapeXml(prog.description)}</desc>`);
           }

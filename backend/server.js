@@ -304,6 +304,7 @@ const iptvRoutes = require('./routes/iptv');
 const iptvSourcesRoutes = require('./routes/iptvSources');
 const userEpgSourcesRoutes = require('./routes/userEpgSources');
 const epgRefreshRoutes = require('./routes/epgRefresh');
+const liveEventsRoutes = require('./routes/liveEvents');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -350,6 +351,7 @@ app.use('/api/iptv', iptvRoutes);
 app.use('/api/iptv', iptvSourcesRoutes); // Multi-IPTV source management
 app.use('/api/user-epg-sources', userEpgSourcesRoutes); // User EPG sources management
 app.use('/api/epg-refresh', epgRefreshRoutes); // EPG refresh management
+app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));
@@ -987,6 +989,29 @@ if (EPG_AUTO_REFRESH_ENABLED) {
 } else {
   logger.info('Automatic EPG refresh is disabled in configuration');
 }
+
+// Set up automatic live events refresh schedule
+// Run daily at 6 AM to fetch upcoming sports events
+const liveEventsService = require('./services/liveEventsService');
+logger.info('Setting up automatic live events refresh schedule: Daily at 6:00 AM');
+
+cron.schedule('0 6 * * *', async () => {
+  logger.info('Starting scheduled live events refresh');
+
+  try {
+    const result = await liveEventsService.refreshLiveEvents();
+
+    if (result.success) {
+      logger.info(`Scheduled live events refresh completed: fetched=${result.totalFetched}, stored=${result.totalStored}, errors=${result.errors}`);
+    } else {
+      logger.error(`Scheduled live events refresh failed: ${result.error}`);
+    }
+  } catch (error) {
+    logger.error(`Scheduled live events refresh error: ${error.message}`);
+  }
+});
+
+logger.info('Automatic live events refresh schedule configured successfully');
 
 // Serve static frontend files if build directory exists
 const frontendBuildPath = path.join(__dirname, '../frontend/build');

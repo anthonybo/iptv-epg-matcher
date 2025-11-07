@@ -113,7 +113,7 @@ const isProgramCurrent = (program, now) => {
   return now >= start && now < stop;
 };
 
-const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft }) => {
+const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft, channel }) => {
   if (!metrics) {
     return null;
   }
@@ -124,6 +124,9 @@ const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft }) =>
   const hiddenLeft = Math.max(0, scrollLeft - metrics.left);
   const labelRef = useRef(null);
   const [labelWidth, setLabelWidth] = useState(0);
+
+  // Display title as-is from backend (backend handles LIVE prefix)
+  const displayTitle = program.title ?? 'Unknown program';
 
   useLayoutEffect(() => {
     if (!showStickyTitle || !labelRef.current) {
@@ -150,7 +153,7 @@ const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft }) =>
     }
 
     return undefined;
-  }, [program.title, showStickyTitle]);
+  }, [displayTitle, showStickyTitle]);
 
   const maxLabelWidth = Math.max(0, width - LABEL_SAFE_PADDING);
   const availableTravel = Math.max(0, width - labelWidth - LABEL_SAFE_PADDING);
@@ -179,7 +182,7 @@ const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft }) =>
           : 'bg-gray-700/90 ring-1 ring-gray-600/60 hover:bg-gray-600/90 hover:ring-gray-500/70'
       }`}
       style={{ left: `${metrics.left}px`, width: `${width}px` }}
-      title={`${program.title ?? 'Unknown program'}\n${formatDisplayTime(program.start)} - ${formatDisplayTime(program.stop)}${
+      title={`${displayTitle}\n${formatDisplayTime(program.start)} - ${formatDisplayTime(program.stop)}${
         program.description ? `\n${program.description}` : ''
       }`}
     >
@@ -187,17 +190,17 @@ const ProgramBlock = React.memo(({ program, metrics, isCurrent, scrollLeft }) =>
         <div
           ref={labelRef}
           className={titleClassName}
-          data-title={program.title ?? 'Unknown program'}
+          data-title={displayTitle}
           style={titleStyle}
-          title={program.title ?? 'Unknown program'}
+          title={displayTitle}
         >
           <span className="guide-program-title-text">
-            {program.title ?? 'Unknown program'}
+            {displayTitle}
           </span>
         </div>
         {isLabelTruncated && (
           <div className="guide-program-title-tooltip" role="tooltip" style={tooltipStyle}>
-            {program.title ?? 'Unknown program'}
+            {displayTitle}
           </div>
         )}
         <div className="text-xs font-semibold text-gray-100 whitespace-nowrap">
@@ -233,13 +236,14 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
   const [gridScrollLeft, setGridScrollLeft] = useState(0);
   const [channelToRemove, setChannelToRemove] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
+  const [showPublishedData, setShowPublishedData] = useState(false);
   const gridRef = useRef(null);
   const autoScrolledRef = useRef(false);
   const scrollAnimationFrameRef = useRef(null);
 
   // Fetch matched channels with their EPG data
   useEffect(() => {
-    if (!sessionId) {
+    if (!sessionId && !showPublishedData) {
       setMatchedChannels([]);
       setError('No session ID available');
       setLoading(false);
@@ -254,7 +258,12 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
         setLoading(true);
         setError(null);
 
-        const response = await apiClient.get(`/epg/${sessionId}/matched-channels`, {
+        // Choose endpoint based on toggle
+        const endpoint = showPublishedData
+          ? '/epg/published-channels-with-programs'
+          : '/epg/matched-channels-with-programs';
+
+        const response = await apiClient.get(endpoint, {
           signal: controller.signal,
         });
 
@@ -284,7 +293,7 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
       isMounted = false;
       controller.abort();
     };
-  }, [sessionId]);
+  }, [sessionId, showPublishedData]);
 
   // Update current time every minute
   useEffect(() => {
@@ -391,7 +400,7 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
         await apiClient.delete(`/epg/${sessionId}/match/${encodeURIComponent(channelToRemove.id)}`);
 
         // Refresh the channel list
-        const response = await apiClient.get(`/epg/${sessionId}/matched-channels`);
+        const response = await apiClient.get('/epg/matched-channels-with-programs');
         setMatchedChannels(response.data.channels || []);
         setChannelToRemove(null);
         setDeleteError(null);
@@ -466,12 +475,38 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
       {/* Header - Compact mode has smaller header */}
       {!compactMode ? (
         <div className="bg-gray-800 border-b border-gray-700 px-4 py-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-4">
             <div>
               <h2 className="text-xl font-semibold text-white">TV Guide</h2>
               <p className="text-sm text-gray-400 mt-0.5">
                 {filteredChannels.length} {filteredChannels.length === 1 ? 'channel' : 'channels'} with EPG data
               </p>
+            </div>
+
+            {/* Toggle between EPG Sources and Published XMLTV */}
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg">
+              <span className="text-xs text-gray-400">Source:</span>
+              <button
+                onClick={() => setShowPublishedData(false)}
+                className={`px-3 py-1 text-xs rounded transition-colors ${
+                  !showPublishedData
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-300 hover:text-white hover:bg-gray-600'
+                }`}
+              >
+                EPG Sources
+              </button>
+              <button
+                onClick={() => setShowPublishedData(true)}
+                className={`px-3 py-1 text-xs rounded transition-colors ${
+                  showPublishedData
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-gray-300 hover:text-white hover:bg-gray-600'
+                }`}
+                title="Preview your published XMLTV with LIVE prefixes"
+              >
+                Published XMLTV
+              </button>
             </div>
 
             {/* Search box */}
@@ -648,6 +683,7 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
                           metrics={metrics}
                           isCurrent={isProgramCurrent(program, currentTime)}
                           scrollLeft={gridScrollLeft}
+                          channel={channel}
                         />
                       );
                     })}
