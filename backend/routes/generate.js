@@ -264,25 +264,115 @@ router.post('/', async (req, res) => {
 
     logger.info(`Found ${matchedChannels.length} matched channels for user ${userId}`);
 
-    // Fetch currently live events from database for LIVE prefix detection
-    const liveEvents = await liveEventsService.getCurrentlyLiveEvents();
-    logger.info(`Loaded ${liveEvents.length} currently live events for LIVE prefix detection`);
+    // Fetch ALL events from database for LIVE prefix detection (not just currently live)
+    // This allows us to pre-generate XMLTV with LIVE prefixes for scheduled events
+    const liveEvents = await liveEventsService.getAllEvents();
+    logger.info(`Loaded ${liveEvents.length} total events for LIVE prefix detection`);
 
-    // Helper function to check if program title matches any live event
-    const matchesLiveEvent = (programTitle) => {
-      if (!programTitle || liveEvents.length === 0) return false;
+    // Robust tokenization system for matching
+    const STOP_WORDS = new Set(['vs', 'at', 'v', '@', 'the', 'a', 'an', 'and', 'or', 'of', 'game', 'next', 'live', 'team', 'match', 'vs.']);
+    const MASCOTS = new Set([
+      'aggies', 'anteaters', 'bears', 'bruins', 'bulldogs', 'cardinals', 'cougars', 'crimson', 'tide',
+      'ducks', 'eagles', 'falcons', 'gators', 'hawkeyes', 'huskies', 'jayhawks', 'knights', 'lions',
+      'longhorns', 'mountaineers', 'musketeers', 'nittany', 'panthers', 'razorbacks', 'rebels',
+      'seminoles', 'sooners', 'spartans', 'sun', 'devils', 'tar', 'heels', 'terrapins', 'tigers', 'trojans',
+      'utes', 'volunteers', 'wildcats', 'wolverines', 'badgers', 'buckeyes', 'cornhuskers', 'cyclones',
+      'fighting', 'irish', 'golden', 'hokies', 'horned', 'frogs', 'hurricanes', 'orange', 'orangemen',
+      'red', 'raiders', 'scarlet', 'demon', 'deacons', 'blue', 'gamecocks', 'hoosiers',
+      'boilermakers', 'gophers', 'huskers', 'thundering', 'herd', 'mean', 'green', 'hawks',
+      'chanticleers', 'ragin', 'cajuns', 'warhawks', 'foxes', 'gaels', 'flames', 'blackhawks',
+      'fc', 'cf', 'united', 'city', 'town', 'hotspur', 'wanderers', 'athletic', 'rovers'
+    ]);
 
-      const titleLower = programTitle.toLowerCase();
+    // Common 2-letter abbreviations that should be kept (soccer clubs, cities)
+    const VALID_SHORT_TOKENS = new Set(['fc', 'ac', 'dc', 'la', 'ny', 'sf', 'kc']);
 
-      // Check if program title contains both team names from any live event
+    // Tokenize text into significant words
+    const tokenize = (text) => {
+      if (!text) return [];
+
+      // Convert to lowercase, remove punctuation, split into words
+      const words = text.toLowerCase()
+        .replace(/[^\w\s]/g, ' ')  // Replace punctuation with spaces
+        .split(/\s+/)               // Split on whitespace
+        .filter(word => {
+          // Keep words with 3+ chars, OR 2-char words in the valid short tokens list
+          return (word.length >= 3 || VALID_SHORT_TOKENS.has(word)) && word.length > 0;
+        })
+        .filter(word => !STOP_WORDS.has(word))  // Remove stop words
+        .filter(word => !MASCOTS.has(word))  // Remove mascots
+        .filter(word => !/^\d+$/.test(word));  // Remove pure numbers
+
+      return words;
+    };
+
+    // Robust token-based matching for live events
+    const matchesLiveEvent = (programTitle, channelName, programStartTime, programStopTime) => {
+      if (liveEvents.length === 0) return false;
+
+      const titleTokens = tokenize(programTitle);
+      const channelTokens = tokenize(channelName);
+
+      // Check if program time overlaps with any live event
       for (const event of liveEvents) {
-        const homeTeamLower = (event.home_team || '').toLowerCase();
-        const awayTeamLower = (event.away_team || '').toLowerCase();
+        const homeTeam = event.home_team || '';
+        const awayTeam = event.away_team || '';
+        const eventStart = new Date(event.event_start).getTime();
+        const eventEnd = new Date(event.event_end).getTime();
 
-        if (homeTeamLower && awayTeamLower &&
-            titleLower.includes(homeTeamLower) &&
-            titleLower.includes(awayTeamLower)) {
-          return true;
+        // MUST have true time overlap (not just touching at a boundary)
+        const programOverlapsEvent = programStartTime && programStopTime &&
+          (programStartTime < eventEnd && programStopTime > eventStart);
+
+        if (!programOverlapsEvent) {
+          continue; // Skip if program doesn't air when event is live
+        }
+
+        // Tokenize team names
+        const homeTokens = tokenize(homeTeam);
+        const awayTokens = tokenize(awayTeam);
+
+        // METHOD 1: Token-based title matching
+        // Check if significant words from BOTH teams appear in the title
+        if (titleTokens.length > 0 && homeTokens.length > 0 && awayTokens.length > 0) {
+          // Count how many tokens from each team appear in the title
+          const homeMatches = homeTokens.filter(token => titleTokens.includes(token)).length;
+          const awayMatches = awayTokens.filter(token => titleTokens.includes(token)).length;
+
+          // Smart threshold: require at least 1 token match, or 50% of tokens for multi-word teams
+          // This prevents false matches while still handling variations
+          // Examples:
+          // - "Chicago" (1 token) -> need 1 match
+          // - "UC Davis" (2 tokens) -> need 1 match (50% of 2)
+          // - "North Carolina" (2 tokens) -> need 1 match
+          // - "Tampa Bay Lightning" (3 tokens after filtering) -> need 2 matches (50% of 3, rounded up)
+          const homeThreshold = Math.max(1, Math.ceil(homeTokens.length * 0.5));
+          const awayThreshold = Math.max(1, Math.ceil(awayTokens.length * 0.5));
+
+          if (homeMatches >= homeThreshold && awayMatches >= awayThreshold) {
+            return true;
+          }
+        }
+
+        // METHOD 2: Channel-based matching
+        // Only apply to dedicated sports channels to avoid false matches on city names
+        // (e.g., "FOX PHOENIX" shouldn't match "Green Bay Phoenix" team)
+        const isSportsChannel = /\b(nhl|nba|mlb|nfl|espn|sports?|team|hockey|basketball|football|baseball|soccer)\b/i.test(channelName);
+
+        if (isSportsChannel && channelTokens.length > 0) {
+          const titleLower = programTitle.toLowerCase();
+          // Expanded placeholder detection to catch more variations
+          const isPlaceholder = /\b(next\s+game|upcoming|coming\s+up|scheduled|preview|pre-?game|post-?game)\b/i.test(titleLower);
+
+          // Only match if it's not a placeholder program
+          if (!isPlaceholder) {
+            const homeInChannel = homeTokens.some(token => channelTokens.includes(token));
+            const awayInChannel = awayTokens.some(token => channelTokens.includes(token));
+
+            if (homeInChannel || awayInChannel) {
+              return true;
+            }
+          }
         }
       }
 
@@ -438,10 +528,18 @@ router.post('/', async (req, res) => {
       if (channelId) {
         channelSettings[channelId] = {
           enableLivePrefix: ch.enable_live_prefix === 1,
-          autoDetectLive: ch.auto_detect_live === 1
+          autoDetectLive: ch.auto_detect_live === 1,
+          channelName: ch.name || ch.iptv_channel_name || ''
         };
+
+        // Debug: Log volleyball channel settings
+        if (channelId.includes('2115583')) {
+          logger.info(`[SETUP] Channel ${channelId}: name="${channelSettings[channelId].channelName}", enableLivePrefix=${channelSettings[channelId].enableLivePrefix}, autoDetectLive=${channelSettings[channelId].autoDetectLive}`);
+        }
       }
     });
+
+    logger.info(`[SETUP] Total channelSettings entries: ${Object.keys(channelSettings).length}`);
 
     // Add program data
     const nowTimestamp = Date.now();
@@ -461,15 +559,24 @@ router.post('/', async (req, res) => {
 
       const startTime = parseXmltvTime(prog.start);
       const stopTime = parseXmltvTime(prog.stop);
-      const isCurrentlyAiring = nowTimestamp >= startTime && nowTimestamp < stopTime;
 
-      // Check if program matches a currently live event in database
-      const isLiveEvent = isCurrentlyAiring && matchesLiveEvent(prog.title);
+      // Check if program matches a live event (program airtime overlaps with event live time)
+      const settings = channelSettings[prog.channel_id];
+      const channelName = settings ? settings.channelName : '';
+      const isLiveEvent = matchesLiveEvent(prog.title, channelName, startTime, stopTime);
+
+      // Debug logging for volleyball channel
+      if (prog.channel_id && prog.channel_id.includes('2115583')) {
+        logger.info(`[LIVE PREFIX DEBUG] Channel: ${prog.channel_id}, Title: ${prog.title}`);
+        logger.info(`[LIVE PREFIX DEBUG] Settings: ${JSON.stringify(settings)}`);
+        logger.info(`[LIVE PREFIX DEBUG] isLiveEvent: ${isLiveEvent}`);
+      }
 
       // Check if LIVE prefix should be added
-      const settings = channelSettings[prog.channel_id];
-      const shouldAddLivePrefix = settings && isCurrentlyAiring &&
-        (settings.enableLivePrefix || (settings.autoDetectLive && isLiveEvent));
+      // BOTH enableLivePrefix and autoDetectLive require live_events database confirmation
+      // This ensures we only show LIVE when the program airs during an actual live event
+      const shouldAddLivePrefix = settings && isLiveEvent &&
+        (settings.enableLivePrefix || settings.autoDetectLive);
 
       // Prepend small caps "LIVE" to title if applicable
       const title = shouldAddLivePrefix
@@ -617,25 +724,115 @@ router.post('/update-all', async (req, res) => {
       });
     }
 
-    // Fetch currently live events from database for LIVE prefix detection
-    const liveEvents = await liveEventsService.getCurrentlyLiveEvents();
-    logger.info(`Loaded ${liveEvents.length} currently live events for LIVE prefix detection`);
+    // Fetch ALL events from database for LIVE prefix detection (not just currently live)
+    // This allows us to pre-generate XMLTV with LIVE prefixes for scheduled events
+    const liveEvents = await liveEventsService.getAllEvents();
+    logger.info(`Loaded ${liveEvents.length} total events for LIVE prefix detection`);
 
-    // Helper function to check if program title matches any live event
-    const matchesLiveEvent = (programTitle) => {
-      if (!programTitle || liveEvents.length === 0) return false;
+    // Robust tokenization system for matching
+    const STOP_WORDS = new Set(['vs', 'at', 'v', '@', 'the', 'a', 'an', 'and', 'or', 'of', 'game', 'next', 'live', 'team', 'match', 'vs.']);
+    const MASCOTS = new Set([
+      'aggies', 'anteaters', 'bears', 'bruins', 'bulldogs', 'cardinals', 'cougars', 'crimson', 'tide',
+      'ducks', 'eagles', 'falcons', 'gators', 'hawkeyes', 'huskies', 'jayhawks', 'knights', 'lions',
+      'longhorns', 'mountaineers', 'musketeers', 'nittany', 'panthers', 'razorbacks', 'rebels',
+      'seminoles', 'sooners', 'spartans', 'sun', 'devils', 'tar', 'heels', 'terrapins', 'tigers', 'trojans',
+      'utes', 'volunteers', 'wildcats', 'wolverines', 'badgers', 'buckeyes', 'cornhuskers', 'cyclones',
+      'fighting', 'irish', 'golden', 'hokies', 'horned', 'frogs', 'hurricanes', 'orange', 'orangemen',
+      'red', 'raiders', 'scarlet', 'demon', 'deacons', 'blue', 'gamecocks', 'hoosiers',
+      'boilermakers', 'gophers', 'huskers', 'thundering', 'herd', 'mean', 'green', 'hawks',
+      'chanticleers', 'ragin', 'cajuns', 'warhawks', 'foxes', 'gaels', 'flames', 'blackhawks',
+      'fc', 'cf', 'united', 'city', 'town', 'hotspur', 'wanderers', 'athletic', 'rovers'
+    ]);
 
-      const titleLower = programTitle.toLowerCase();
+    // Common 2-letter abbreviations that should be kept (soccer clubs, cities)
+    const VALID_SHORT_TOKENS = new Set(['fc', 'ac', 'dc', 'la', 'ny', 'sf', 'kc']);
 
-      // Check if program title contains both team names from any live event
+    // Tokenize text into significant words
+    const tokenize = (text) => {
+      if (!text) return [];
+
+      // Convert to lowercase, remove punctuation, split into words
+      const words = text.toLowerCase()
+        .replace(/[^\w\s]/g, ' ')  // Replace punctuation with spaces
+        .split(/\s+/)               // Split on whitespace
+        .filter(word => {
+          // Keep words with 3+ chars, OR 2-char words in the valid short tokens list
+          return (word.length >= 3 || VALID_SHORT_TOKENS.has(word)) && word.length > 0;
+        })
+        .filter(word => !STOP_WORDS.has(word))  // Remove stop words
+        .filter(word => !MASCOTS.has(word))  // Remove mascots
+        .filter(word => !/^\d+$/.test(word));  // Remove pure numbers
+
+      return words;
+    };
+
+    // Robust token-based matching for live events
+    const matchesLiveEvent = (programTitle, channelName, programStartTime, programStopTime) => {
+      if (liveEvents.length === 0) return false;
+
+      const titleTokens = tokenize(programTitle);
+      const channelTokens = tokenize(channelName);
+
+      // Check if program time overlaps with any live event
       for (const event of liveEvents) {
-        const homeTeamLower = (event.home_team || '').toLowerCase();
-        const awayTeamLower = (event.away_team || '').toLowerCase();
+        const homeTeam = event.home_team || '';
+        const awayTeam = event.away_team || '';
+        const eventStart = new Date(event.event_start).getTime();
+        const eventEnd = new Date(event.event_end).getTime();
 
-        if (homeTeamLower && awayTeamLower &&
-            titleLower.includes(homeTeamLower) &&
-            titleLower.includes(awayTeamLower)) {
-          return true;
+        // MUST have true time overlap (not just touching at a boundary)
+        const programOverlapsEvent = programStartTime && programStopTime &&
+          (programStartTime < eventEnd && programStopTime > eventStart);
+
+        if (!programOverlapsEvent) {
+          continue; // Skip if program doesn't air when event is live
+        }
+
+        // Tokenize team names
+        const homeTokens = tokenize(homeTeam);
+        const awayTokens = tokenize(awayTeam);
+
+        // METHOD 1: Token-based title matching
+        // Check if significant words from BOTH teams appear in the title
+        if (titleTokens.length > 0 && homeTokens.length > 0 && awayTokens.length > 0) {
+          // Count how many tokens from each team appear in the title
+          const homeMatches = homeTokens.filter(token => titleTokens.includes(token)).length;
+          const awayMatches = awayTokens.filter(token => titleTokens.includes(token)).length;
+
+          // Smart threshold: require at least 1 token match, or 50% of tokens for multi-word teams
+          // This prevents false matches while still handling variations
+          // Examples:
+          // - "Chicago" (1 token) -> need 1 match
+          // - "UC Davis" (2 tokens) -> need 1 match (50% of 2)
+          // - "North Carolina" (2 tokens) -> need 1 match
+          // - "Tampa Bay Lightning" (3 tokens after filtering) -> need 2 matches (50% of 3, rounded up)
+          const homeThreshold = Math.max(1, Math.ceil(homeTokens.length * 0.5));
+          const awayThreshold = Math.max(1, Math.ceil(awayTokens.length * 0.5));
+
+          if (homeMatches >= homeThreshold && awayMatches >= awayThreshold) {
+            return true;
+          }
+        }
+
+        // METHOD 2: Channel-based matching
+        // Only apply to dedicated sports channels to avoid false matches on city names
+        // (e.g., "FOX PHOENIX" shouldn't match "Green Bay Phoenix" team)
+        const isSportsChannel = /\b(nhl|nba|mlb|nfl|espn|sports?|team|hockey|basketball|football|baseball|soccer)\b/i.test(channelName);
+
+        if (isSportsChannel && channelTokens.length > 0) {
+          const titleLower = programTitle.toLowerCase();
+          // Expanded placeholder detection to catch more variations
+          const isPlaceholder = /\b(next\s+game|upcoming|coming\s+up|scheduled|preview|pre-?game|post-?game)\b/i.test(titleLower);
+
+          // Only match if it's not a placeholder program
+          if (!isPlaceholder) {
+            const homeInChannel = homeTokens.some(token => channelTokens.includes(token));
+            const awayInChannel = awayTokens.some(token => channelTokens.includes(token));
+
+            if (homeInChannel || awayInChannel) {
+              return true;
+            }
+          }
         }
       }
 
@@ -789,10 +986,13 @@ router.post('/update-all', async (req, res) => {
           if (channelId) {
             channelSettings[channelId] = {
               enableLivePrefix: ch.enable_live_prefix === 1,
-              autoDetectLive: ch.auto_detect_live === 1
+              autoDetectLive: ch.auto_detect_live === 1,
+              channelName: ch.name || ch.iptv_channel_name || ''
             };
           }
         });
+
+        logger.info(`[UPDATE-ALL] Total channelSettings entries: ${Object.keys(channelSettings).length}`);
 
         // Add program data with LIVE prefix support
         const nowTimestamp = Date.now();
@@ -812,15 +1012,24 @@ router.post('/update-all', async (req, res) => {
 
           const startTime = parseXmltvTime(prog.start);
           const stopTime = parseXmltvTime(prog.stop);
-          const isCurrentlyAiring = nowTimestamp >= startTime && nowTimestamp < stopTime;
 
-          // Check if program matches a currently live event in database
-          const isLiveEvent = isCurrentlyAiring && matchesLiveEvent(prog.title);
+          // Check if program matches a live event (program airtime overlaps with event live time)
+          const settings = channelSettings[prog.channel_id];
+          const channelName = settings ? settings.channelName : '';
+          const isLiveEvent = matchesLiveEvent(prog.title, channelName, startTime, stopTime);
+
+          // Debug logging for volleyball channel
+          if (prog.channel_id && prog.channel_id.includes('2115583')) {
+            logger.info(`[UPDATE-ALL DEBUG] Channel: ${prog.channel_id}, Title: ${prog.title}`);
+            logger.info(`[UPDATE-ALL DEBUG] Settings: ${JSON.stringify(settings)}`);
+            logger.info(`[UPDATE-ALL DEBUG] isLiveEvent: ${isLiveEvent}`);
+          }
 
           // Check if LIVE prefix should be added
-          const settings = channelSettings[prog.channel_id];
-          const shouldAddLivePrefix = settings && isCurrentlyAiring &&
-            (settings.enableLivePrefix || (settings.autoDetectLive && isLiveEvent));
+          // BOTH enableLivePrefix and autoDetectLive require live_events database confirmation
+          // This ensures we only show LIVE when the program airs during an actual live event
+          const shouldAddLivePrefix = settings && isLiveEvent &&
+            (settings.enableLivePrefix || settings.autoDetectLive);
 
           // Prepend small caps "LIVE" to title if applicable
           const title = shouldAddLivePrefix

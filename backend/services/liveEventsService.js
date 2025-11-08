@@ -311,8 +311,44 @@ async function isProgramLive(programTitle) {
   }
 }
 
+/**
+ * Get all events from database (not just currently live)
+ * @returns {Promise<Array>} Array of all events
+ */
+async function getAllEvents() {
+  try {
+    const db = await iptvDatabaseService.connect();
+
+    const events = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT
+          event_id,
+          event_name,
+          sport_type,
+          league_name,
+          home_team,
+          away_team,
+          event_start,
+          event_end,
+          source
+        FROM live_events
+        ORDER BY event_start
+      `, [], (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows || []);
+      });
+    });
+
+    return events;
+  } catch (error) {
+    logger.error('Error fetching all events from database:', error);
+    return [];
+  }
+}
+
 module.exports = {
   refreshLiveEvents,
   getCurrentlyLiveEvents,
+  getAllEvents,
   isProgramLive
 };
