@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 /**
  * ChannelCard - Displays a single channel with logo/placeholder and info
@@ -6,9 +6,21 @@ import React, { useState } from 'react';
  * @param {Function} onClick - Callback when card is clicked
  * @param {boolean} isSelected - Whether this channel is currently selected
  * @param {boolean} isMatched - Whether this channel is matched with EPG
+ * @param {boolean} isAutoTesting - Whether this channel is currently being auto-tested
  */
-const ChannelCard = ({ channel, onClick, isSelected, isMatched }) => {
+const ChannelCard = ({ channel, onClick, isSelected, isMatched, isAutoTesting = false }) => {
   const [imageError, setImageError] = useState(false);
+  const cardRef = useRef(null);
+
+  // Scroll into view when auto-testing this channel
+  useEffect(() => {
+    if (isAutoTesting && cardRef.current) {
+      cardRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+    }
+  }, [isAutoTesting]);
 
   // Clean up channel name - remove M3U metadata if present
   const cleanChannelName = (name) => {
@@ -44,9 +56,12 @@ const ChannelCard = ({ channel, onClick, isSelected, isMatched }) => {
 
   return (
     <button
+      ref={cardRef}
       onClick={onClick}
       className={`group w-full overflow-hidden rounded-2xl border transition-all duration-200 text-left shadow-lg shadow-slate-950/20 ${
-        isSelected
+        isAutoTesting
+          ? 'border-purple-600 ring-4 ring-purple-600/50 animate-pulse'
+          : isSelected
           ? 'border-blue-500/70 ring-2 ring-blue-400/60'
           : 'border-slate-800/80 hover:-translate-y-0.5 hover:border-blue-500/40'
       } bg-slate-900/80`}

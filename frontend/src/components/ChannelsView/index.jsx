@@ -5,6 +5,7 @@ import ChannelGrid from './ChannelGrid';
 import ChannelCard from './ChannelCard';
 import ChannelTable from './ChannelTable';
 import PiPPlayer from './PiPPlayer';
+import IPTVPlayer from '../../IPTVPlayer';
 
 /**
  * ChannelsView - Main view for browsing and filtering channels
@@ -24,6 +25,24 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
   });
   const [pipChannel, setPipChannel] = React.useState(null);
   const sourceMenuRef = React.useRef(null);
+
+  // Auto-test state
+  const [autoTesting, setAutoTesting] = React.useState(false);
+  const [currentTestIndex, setCurrentTestIndex] = React.useState(0);
+  const [showAutoTestPlayer, setShowAutoTestPlayer] = React.useState(false);
+  const [autoTestChannel, setAutoTestChannel] = React.useState(null);
+
+  // Auto-test refs (to prevent race conditions)
+  const autoTestingRef = React.useRef(false);
+  const currentTestIndexRef = React.useRef(0);
+  const channelsRef = React.useRef([]);
+  const isAdvancingRef = React.useRef(false);
+  const autoTestTimerRef = React.useRef(null);
+  const errorDebounceRef = React.useRef(null);
+  const originalConsoleErrorRef = React.useRef(null);
+  const originalConsoleLogRef = React.useRef(null);
+  const playerErrorListenerRef = React.useRef(null);
+  const playerLogListenerRef = React.useRef(null);
 
   // Save view mode preference to localStorage
   const handleViewModeChange = (mode) => {
@@ -72,6 +91,237 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     totalChannels,
     filteredCount
   } = useChannels(sessionId, sourceFilter?.id);
+
+  // Auto-test functions (defined after useChannels so 'channels' is available)
+  const cleanupErrorListener = React.useCallback(() => {
+    if (playerErrorListenerRef.current && originalConsoleErrorRef.current) {
+      console.error = originalConsoleErrorRef.current;
+      playerErrorListenerRef.current = null;
+    }
+    if (playerLogListenerRef.current && originalConsoleLogRef.current) {
+      console.log = originalConsoleLogRef.current;
+      playerLogListenerRef.current = null;
+    }
+  }, []);
+
+  // Forward declaration - will be defined below
+  const handleNextChannelRef = React.useRef(null);
+
+  const setupErrorListener = React.useCallback(() => {
+    cleanupErrorListener();
+
+    // Common error/success detection function
+    const checkForErrors = (logString) => {
+      // Check if video is successfully playing
+      if (logString.includes('[INFO] Video playing')) {
+        if (autoTestingRef.current) {
+          if (originalConsoleLogRef.current) {
+            originalConsoleLogRef.current('[Auto-Test] Working channel found! Stopping auto-test.');
+          }
+          // Clear timeout since we found a working channel
+          if (autoTestTimerRef.current) {
+            clearTimeout(autoTestTimerRef.current);
+            autoTestTimerRef.current = null;
+          }
+          // Clear any pending error debounce
+          if (errorDebounceRef.current) {
+            clearTimeout(errorDebounceRef.current);
+            errorDebounceRef.current = null;
+          }
+          // Stop auto-testing but keep the highlight and player visible
+          setAutoTesting(false);
+          autoTestingRef.current = false;
+          // Note: We keep showAutoTestPlayer=true and autoTestChannel set
+          // so the working channel stays highlighted and visible in PiP
+        }
+        return;
+      }
+
+      // Check for errors
+      if (logString.includes('[ERROR] mpegts player error') ||
+          logString.includes('[ERROR] Video error') ||
+          logString.includes('HttpStatusCodeInvalid') ||
+          logString.includes('NetworkError') ||
+          logString.includes('Video error') ||
+          logString.includes('MediaError') ||
+          logString.includes('404') ||
+          logString.includes('403') ||
+          logString.includes('502') ||
+          logString.includes('Bad Gateway')) {
+
+        if (autoTestingRef.current && !isAdvancingRef.current) {
+          if (errorDebounceRef.current) {
+            clearTimeout(errorDebounceRef.current);
+          }
+
+          errorDebounceRef.current = setTimeout(() => {
+            if (originalConsoleLogRef.current) {
+              originalConsoleLogRef.current('[Auto-Test] Error detected, moving to next channel...');
+            }
+            if (handleNextChannelRef.current) {
+              handleNextChannelRef.current();
+            }
+          }, 300);
+        }
+      }
+    };
+
+    // Intercept console.error
+    if (!originalConsoleErrorRef.current) {
+      originalConsoleErrorRef.current = console.error;
+    }
+
+    playerErrorListenerRef.current = (...args) => {
+      originalConsoleErrorRef.current.apply(console, args);
+      const errorString = args.join(' ');
+      checkForErrors(errorString);
+    };
+
+    console.error = playerErrorListenerRef.current;
+
+    // Intercept console.log (for IPTVPlayer errors)
+    if (!originalConsoleLogRef.current) {
+      originalConsoleLogRef.current = console.log;
+    }
+
+    playerLogListenerRef.current = (...args) => {
+      originalConsoleLogRef.current.apply(console, args);
+      const logString = args.join(' ');
+      checkForErrors(logString);
+    };
+
+    console.log = playerLogListenerRef.current;
+  }, [cleanupErrorListener]);
+
+  const handleNextChannel = React.useCallback(() => {
+    if (isAdvancingRef.current) {
+      console.log('[Auto-Test] Already advancing, ignoring duplicate call');
+      return;
+    }
+
+    isAdvancingRef.current = true;
+
+    if (autoTestTimerRef.current) {
+      clearTimeout(autoTestTimerRef.current);
+      autoTestTimerRef.current = null;
+    }
+
+    if (errorDebounceRef.current) {
+      clearTimeout(errorDebounceRef.current);
+      errorDebounceRef.current = null;
+    }
+
+    const testChannels = channelsRef.current;
+    const currentIndex = currentTestIndexRef.current;
+
+    console.log(`[Auto-Test] Current index: ${currentIndex}, Total channels: ${testChannels.length}`);
+
+    if (currentIndex >= testChannels.length - 1) {
+      console.log('[Auto-Test] Stopping - reached end of channels');
+      setAutoTesting(false);
+      autoTestingRef.current = false;
+      isAdvancingRef.current = false;
+      return;
+    }
+
+    // Resume auto-testing if it was stopped after finding a working channel
+    if (!autoTestingRef.current) {
+      console.log('[Auto-Test] Resuming auto-test...');
+      setAutoTesting(true);
+      autoTestingRef.current = true;
+      setupErrorListener();
+    }
+
+    const nextIndex = currentIndex + 1;
+    currentTestIndexRef.current = nextIndex;
+    setCurrentTestIndex(nextIndex);
+
+    console.log(`[Auto-Test] Moving to channel ${nextIndex + 1} of ${testChannels.length}`);
+
+    const nextChannel = testChannels[nextIndex];
+    setAutoTestChannel({
+      id: nextChannel.id,
+      sourceId: nextChannel.sourceId,
+      name: nextChannel.name,
+      logo: nextChannel.logo,
+      url: nextChannel.url
+    });
+
+    setTimeout(() => {
+      isAdvancingRef.current = false;
+    }, 500);
+
+    autoTestTimerRef.current = setTimeout(() => {
+      console.log('[Auto-Test] Timeout reached (60s), moving to next channel...');
+      if (handleNextChannelRef.current) {
+        handleNextChannelRef.current();
+      }
+    }, 60000);
+  }, [setupErrorListener]);
+
+  // Assign the callback to the ref so setupErrorListener can call it
+  React.useEffect(() => {
+    handleNextChannelRef.current = handleNextChannel;
+  }, [handleNextChannel]);
+
+  const handleStopAutoTest = React.useCallback(() => {
+    console.log('[Auto-Test] Stopping auto-test');
+    setAutoTesting(false);
+    autoTestingRef.current = false;
+    setShowAutoTestPlayer(false);
+
+    if (autoTestTimerRef.current) {
+      clearTimeout(autoTestTimerRef.current);
+      autoTestTimerRef.current = null;
+    }
+
+    if (errorDebounceRef.current) {
+      clearTimeout(errorDebounceRef.current);
+      errorDebounceRef.current = null;
+    }
+
+    cleanupErrorListener();
+  }, [cleanupErrorListener]);
+
+  const handleAutoTest = React.useCallback(() => {
+    if (channels.length === 0) return;
+
+    setAutoTesting(true);
+    autoTestingRef.current = true;
+    setCurrentTestIndex(0);
+    currentTestIndexRef.current = 0;
+    channelsRef.current = channels;
+    setShowAutoTestPlayer(true);
+
+    const firstChannel = channels[0];
+    setAutoTestChannel({
+      id: firstChannel.id,
+      sourceId: firstChannel.sourceId,
+      name: firstChannel.name,
+      logo: firstChannel.logo,
+      url: firstChannel.url
+    });
+
+    setupErrorListener();
+
+    autoTestTimerRef.current = setTimeout(() => {
+      console.log('[Auto-Test] Timeout reached (60s), moving to next channel...');
+      handleNextChannel();
+    }, 60000);
+  }, [channels, setupErrorListener, handleNextChannel]);
+
+  // Cleanup auto-test on unmount
+  React.useEffect(() => {
+    return () => {
+      if (autoTestTimerRef.current) {
+        clearTimeout(autoTestTimerRef.current);
+      }
+      if (errorDebounceRef.current) {
+        clearTimeout(errorDebounceRef.current);
+      }
+      cleanupErrorListener();
+    };
+  }, [cleanupErrorListener]);
 
   if (!sessionId) {
     return (
@@ -205,8 +455,40 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
               </div>
             </div>
 
-            {/* View Toggle and Search */}
+            {/* View Toggle, Auto-Find, and Search */}
             <div className="flex items-center gap-3">
+              {/* Auto-Find Button */}
+              <button
+                onClick={handleAutoTest}
+                disabled={channels.length === 0 || autoTesting}
+                className={`flex items-center justify-center rounded-lg border p-2 transition-colors ${
+                  autoTesting
+                    ? 'border-purple-600 bg-purple-600 text-white cursor-not-allowed'
+                    : 'border-blue-600 bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+                title={autoTesting ? 'Auto-testing channels...' : 'Auto-find working channel'}
+              >
+                <svg
+                  className={`w-5 h-5 ${autoTesting ? 'animate-spin' : ''}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              </button>
+
               {/* View Mode Toggle */}
               <div className="flex items-center rounded-lg border border-slate-800/80 bg-slate-900/70 p-1">
                 <button
@@ -277,14 +559,19 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
                 loading={loading}
                 hasMore={hasMore}
                 onLoadMore={loadMore}
-                ChannelCard={(props) => (
-                  <ChannelCard
-                    {...props}
-                    onClick={() => onChannelSelect && onChannelSelect(props.channel)}
-                    isSelected={selectedChannel?.id === props.channel.id}
-                    isMatched={matchedChannels[props.channel.id] || matchedChannels[props.channel.tvgId]}
-                  />
-                )}
+                ChannelCard={(props) => {
+                  const channelKey = `${props.channel.sourceId}-${props.channel.id}`;
+                  const autoTestKey = showAutoTestPlayer && autoTestChannel ? `${autoTestChannel.sourceId}-${autoTestChannel.id}` : null;
+                  return (
+                    <ChannelCard
+                      {...props}
+                      onClick={() => onChannelSelect && onChannelSelect(props.channel)}
+                      isSelected={selectedChannel?.id === props.channel.id}
+                      isMatched={matchedChannels[props.channel.id] || matchedChannels[props.channel.tvgId]}
+                      isAutoTesting={autoTestKey === channelKey}
+                    />
+                  );
+                }}
               />
             </div>
           ) : (
@@ -298,20 +585,162 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
                 selectedChannel={selectedChannel}
                 matchedChannels={matchedChannels}
                 onPreview={handlePipPreview}
+                autoTestChannelKey={showAutoTestPlayer && autoTestChannel ? `${autoTestChannel.sourceId}-${autoTestChannel.id}` : null}
               />
             </div>
           )}
         </div>
       </div>
 
-      {/* PiP Player */}
-      {pipChannel && (
+      {/* PiP Player for Preview */}
+      {pipChannel && !autoTesting && (
         <PiPPlayer
           channel={pipChannel}
           sessionId={sessionId}
           onClose={handleClosePip}
         />
       )}
+
+      {/* PiP Player for Auto-Test */}
+      {showAutoTestPlayer && autoTestChannel && (
+        <AutoTestPiPPlayer
+          channel={autoTestChannel}
+          sessionId={sessionId}
+          currentIndex={currentTestIndex}
+          totalChannels={channelsRef.current.length}
+          onSkip={handleNextChannel}
+          onStop={handleStopAutoTest}
+          isActive={autoTesting}
+        />
+      )}
+    </div>
+  );
+};
+
+// Auto-Test PiP Player Component
+const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, onSkip, onStop, isActive }) => {
+  const [isMinimized, setIsMinimized] = React.useState(false);
+
+  if (!channel) return null;
+
+  return (
+    <div
+      className={`fixed z-[9999] transition-all duration-300 ${
+        isMinimized
+          ? 'bottom-4 right-4 w-16 h-16'
+          : 'bottom-4 right-4 w-[480px] h-[320px]'
+      }`}
+      style={{
+        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)'
+      }}
+    >
+      <div className="relative w-full h-full rounded-xl overflow-hidden border-2 border-purple-600 bg-slate-950 flex flex-col">
+        {/* Header */}
+        {!isMinimized && (
+          <div className="flex-shrink-0 z-50 bg-slate-950 px-3 py-2 border-b border-purple-600/40">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                {channel.logo && (
+                  <img
+                    src={channel.logo}
+                    alt={channel.name}
+                    className="w-6 h-6 object-contain flex-shrink-0 rounded"
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-medium text-slate-200 truncate">
+                    {channel.name}
+                  </div>
+                  <div className={`text-xs ${isActive ? 'text-purple-400' : 'text-green-400'}`}>
+                    {isActive ? `Testing ${currentIndex + 1} of ${totalChannels}` : '✓ Working channel'}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {/* Skip/Next button - always visible */}
+                <button
+                  onClick={onSkip}
+                  className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                    isActive
+                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                      : 'bg-blue-600 hover:bg-blue-500 text-white'
+                  }`}
+                  title={isActive ? "Skip to next channel" : "Continue testing next channel"}
+                >
+                  {isActive ? 'Skip' : 'Next'}
+                </button>
+                {/* Stop/Close button */}
+                <button
+                  onClick={onStop}
+                  className="px-2 py-1 rounded text-xs font-medium bg-red-900/50 hover:bg-red-900 text-red-300 transition-colors"
+                  title={isActive ? "Stop auto-testing" : "Close player"}
+                >
+                  {isActive ? 'Stop' : 'Close'}
+                </button>
+                {/* Minimize button */}
+                <button
+                  onClick={() => setIsMinimized(!isMinimized)}
+                  className="p-1 rounded hover:bg-slate-800/60 text-slate-400 hover:text-slate-200 transition-colors"
+                  title="Minimize"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Minimized view */}
+        {isMinimized && (
+          <button
+            onClick={() => setIsMinimized(false)}
+            className="w-full h-full flex flex-col items-center justify-center bg-purple-900/20 hover:bg-purple-900/30 transition-colors border-2 border-purple-600 rounded-xl"
+            title="Expand auto-test player"
+          >
+            {channel.logo ? (
+              <img
+                src={channel.logo}
+                alt={channel.name}
+                className="w-8 h-8 object-contain mb-1"
+              />
+            ) : (
+              <svg className="w-6 h-6 text-purple-400 mb-1 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            )}
+            <span className="text-xs text-purple-400">{currentIndex + 1}/{totalChannels}</span>
+          </button>
+        )}
+
+        {/* Video player */}
+        {!isMinimized && (
+          <div className="flex-1 bg-black overflow-hidden relative pip-player-container">
+            <style>{`
+              .pip-player-container video {
+                width: 100% !important;
+                height: 100% !important;
+                object-fit: contain !important;
+              }
+              .pip-player-container > div {
+                width: 100% !important;
+                height: 100% !important;
+              }
+            `}</style>
+            <div className="absolute inset-0">
+              <IPTVPlayer
+                sessionId={sessionId}
+                selectedChannel={channel}
+                playbackMethod="mpegts-player"
+                matchedChannels={{}}
+                theatreMode={true}
+              />
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

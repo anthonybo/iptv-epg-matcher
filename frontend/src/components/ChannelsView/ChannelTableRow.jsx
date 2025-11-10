@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 /**
  * ChannelTableRow - Table row for a single channel with actions
@@ -7,6 +7,7 @@ import React, { useState } from 'react';
  * @param {boolean} isSelected - Whether this row is selected
  * @param {boolean} isActive - Whether this channel is currently active
  * @param {boolean} isMatched - Whether this channel is matched with EPG
+ * @param {boolean} isAutoTesting - Whether this channel is being shown in auto-test (testing or found)
  * @param {Function} onToggle - Callback when toggle is clicked
  * @param {Function} onClick - Callback when row is clicked
  * @param {Function} onPreview - Callback when preview button is clicked
@@ -17,11 +18,23 @@ const ChannelTableRow = ({
   isSelected,
   isActive,
   isMatched,
+  isAutoTesting = false,
   onToggle,
   onClick,
   onPreview
 }) => {
   const [imageError, setImageError] = useState(false);
+  const rowRef = useRef(null);
+
+  // Scroll into view when auto-testing this channel
+  useEffect(() => {
+    if (isAutoTesting && rowRef.current) {
+      rowRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+    }
+  }, [isAutoTesting]);
 
   // Clean up channel name
   const cleanChannelName = (name) => {
@@ -38,8 +51,11 @@ const ChannelTableRow = ({
 
   return (
     <tr
+      ref={rowRef}
       className={`group border-b border-slate-800/50 transition-colors ${
-        isActive
+        isAutoTesting
+          ? 'bg-purple-600/20 border-l-4 border-l-purple-600 animate-pulse'
+          : isActive
           ? 'bg-blue-500/10'
           : 'bg-slate-900/40 hover:bg-slate-800/60'
       }`}
