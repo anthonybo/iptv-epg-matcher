@@ -31,6 +31,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
   const [currentTestIndex, setCurrentTestIndex] = React.useState(0);
   const [showAutoTestPlayer, setShowAutoTestPlayer] = React.useState(false);
   const [autoTestChannel, setAutoTestChannel] = React.useState(null);
+  const [foundWorkingChannel, setFoundWorkingChannel] = React.useState(false);
 
   // Auto-test refs (to prevent race conditions)
   const autoTestingRef = React.useRef(false);
@@ -131,6 +132,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
           // Stop auto-testing but keep the highlight and player visible
           setAutoTesting(false);
           autoTestingRef.current = false;
+          setFoundWorkingChannel(true);
           // Note: We keep showAutoTestPlayer=true and autoTestChannel set
           // so the working channel stays highlighted and visible in PiP
         }
@@ -229,6 +231,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       console.log('[Auto-Test] Resuming auto-test...');
       setAutoTesting(true);
       autoTestingRef.current = true;
+      setFoundWorkingChannel(false);
       setupErrorListener();
     }
 
@@ -268,6 +271,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     console.log('[Auto-Test] Stopping auto-test');
     setAutoTesting(false);
     autoTestingRef.current = false;
+    setFoundWorkingChannel(false);
     setShowAutoTestPlayer(false);
 
     if (autoTestTimerRef.current) {
@@ -283,23 +287,37 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     cleanupErrorListener();
   }, [cleanupErrorListener]);
 
-  const handleAutoTest = React.useCallback(() => {
+  const handleAutoTest = React.useCallback((startingChannel = null) => {
     if (channels.length === 0) return;
 
     setAutoTesting(true);
     autoTestingRef.current = true;
-    setCurrentTestIndex(0);
-    currentTestIndexRef.current = 0;
+    setFoundWorkingChannel(false);
     channelsRef.current = channels;
     setShowAutoTestPlayer(true);
 
-    const firstChannel = channels[0];
+    // Find the starting index
+    let startIndex = 0;
+    if (startingChannel) {
+      const foundIndex = channels.findIndex(ch =>
+        ch.id === startingChannel.id && ch.sourceId === startingChannel.sourceId
+      );
+      if (foundIndex !== -1) {
+        startIndex = foundIndex;
+        console.log(`[Auto-Test] Starting from channel ${startIndex + 1}: ${startingChannel.name}`);
+      }
+    }
+
+    setCurrentTestIndex(startIndex);
+    currentTestIndexRef.current = startIndex;
+
+    const channelToTest = channels[startIndex];
     setAutoTestChannel({
-      id: firstChannel.id,
-      sourceId: firstChannel.sourceId,
-      name: firstChannel.name,
-      logo: firstChannel.logo,
-      url: firstChannel.url
+      id: channelToTest.id,
+      sourceId: channelToTest.sourceId,
+      name: channelToTest.name,
+      logo: channelToTest.logo,
+      url: channelToTest.url
     });
 
     setupErrorListener();
@@ -585,7 +603,9 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
                 selectedChannel={selectedChannel}
                 matchedChannels={matchedChannels}
                 onPreview={handlePipPreview}
+                onAutoTest={handleAutoTest}
                 autoTestChannelKey={showAutoTestPlayer && autoTestChannel ? `${autoTestChannel.sourceId}-${autoTestChannel.id}` : null}
+                isAutoTesting={autoTesting}
               />
             </div>
           )}
@@ -611,6 +631,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
           onSkip={handleNextChannel}
           onStop={handleStopAutoTest}
           isActive={autoTesting}
+          foundWorking={foundWorkingChannel}
         />
       )}
     </div>
@@ -618,7 +639,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
 };
 
 // Auto-Test PiP Player Component
-const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, onSkip, onStop, isActive }) => {
+const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, onSkip, onStop, isActive, foundWorking = false }) => {
   const [isMinimized, setIsMinimized] = React.useState(false);
 
   if (!channel) return null;
@@ -651,8 +672,8 @@ const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, on
                   <div className="text-xs font-medium text-slate-200 truncate">
                     {channel.name}
                   </div>
-                  <div className={`text-xs ${isActive ? 'text-purple-400' : 'text-green-400'}`}>
-                    {isActive ? `Testing ${currentIndex + 1} of ${totalChannels}` : '✓ Working channel'}
+                  <div className={`text-xs ${isActive ? 'text-purple-400' : foundWorking ? 'text-green-400' : 'text-slate-400'}`}>
+                    {isActive ? `Testing ${currentIndex + 1} of ${totalChannels}` : foundWorking ? '✓ Working channel' : 'Reached end'}
                   </div>
                 </div>
               </div>

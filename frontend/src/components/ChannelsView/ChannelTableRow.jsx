@@ -8,9 +8,11 @@ import React, { useState, useEffect, useRef } from 'react';
  * @param {boolean} isActive - Whether this channel is currently active
  * @param {boolean} isMatched - Whether this channel is matched with EPG
  * @param {boolean} isAutoTesting - Whether this channel is being shown in auto-test (testing or found)
+ * @param {boolean} autoTestDisabled - Whether auto-test button should be disabled
  * @param {Function} onToggle - Callback when toggle is clicked
  * @param {Function} onClick - Callback when row is clicked
  * @param {Function} onPreview - Callback when preview button is clicked
+ * @param {Function} onAutoTest - Callback when auto-test button is clicked
  */
 const ChannelTableRow = ({
   channel,
@@ -19,9 +21,11 @@ const ChannelTableRow = ({
   isActive,
   isMatched,
   isAutoTesting = false,
+  autoTestDisabled = false,
   onToggle,
   onClick,
-  onPreview
+  onPreview,
+  onAutoTest
 }) => {
   const [imageError, setImageError] = useState(false);
   const rowRef = useRef(null);
@@ -156,6 +160,25 @@ const ChannelTableRow = ({
       {/* Actions */}
       <td className="px-4 py-3">
         <div className="flex items-center justify-end gap-1.5">
+          {/* Auto-Test from here */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onAutoTest && onAutoTest(channel);
+            }}
+            disabled={autoTestDisabled}
+            className={`p-1.5 rounded-lg transition-colors ${
+              autoTestDisabled
+                ? 'text-slate-600 cursor-not-allowed'
+                : 'text-slate-400 hover:text-purple-400 hover:bg-purple-500/10'
+            }`}
+            title={autoTestDisabled ? 'Auto-test in progress' : 'Auto-test from here'}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+            </svg>
+          </button>
+
           {/* PiP Preview */}
           <button
             onClick={(e) => {

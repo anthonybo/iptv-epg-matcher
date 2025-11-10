@@ -39,6 +39,8 @@ const TableRowSkeleton = () => (
  * @param {object} matchedChannels - Matched channel data
  * @param {Function} onPreview - Callback when preview button is clicked
  * @param {string} autoTestChannelKey - Composite key (sourceId-id) of channel currently being auto-tested
+ * @param {Function} onAutoTest - Callback when auto-test button is clicked
+ * @param {boolean} isAutoTesting - Whether auto-testing is currently active
  */
 const ChannelTable = ({
   channels,
@@ -49,7 +51,9 @@ const ChannelTable = ({
   selectedChannel,
   matchedChannels = {},
   onPreview,
-  autoTestChannelKey = null
+  autoTestChannelKey = null,
+  onAutoTest,
+  isAutoTesting = false
 }) => {
   const [selectedChannels, setSelectedChannels] = useState(new Set());
   const [sortColumn, setSortColumn] = useState(null);
@@ -317,7 +321,7 @@ const ChannelTable = ({
           <tbody>
             {sortedChannels.map((channel, index) => {
               const key = `${channel.sourceId}-${channel.id}`;
-              const isAutoTesting = autoTestChannelKey === key;
+              const isChannelAutoTesting = autoTestChannelKey === key;
               return (
                 <ChannelTableRow
                   key={key}
@@ -326,10 +330,12 @@ const ChannelTable = ({
                   isSelected={selectedChannels.has(key)}
                   isActive={selectedChannel?.id === channel.id}
                   isMatched={matchedChannels[channel.id] || matchedChannels[channel.tvgId]}
-                  isAutoTesting={isAutoTesting}
+                  isAutoTesting={isChannelAutoTesting}
+                  autoTestDisabled={isAutoTesting}
                   onToggle={toggleChannel}
                   onClick={onChannelClick}
                   onPreview={onPreview}
+                  onAutoTest={onAutoTest}
                 />
               );
             })}
