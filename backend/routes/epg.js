@@ -1029,16 +1029,17 @@ router.get('/matched-channels', async (req, res) => {
           m.epg_source_name,
           m.epg_source_id,
           m.use_dummy_epg,
+          c.id as iptv_channel_table_id,
+          c.source_id,
           c.name,
           c.logo,
           c.url,
           c.group_title,
           c.enable_live_prefix,
           s.name as source_name
-        FROM epg_matches m
+        FROM (SELECT * FROM epg_matches WHERE user_id = ?) m
         JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
         JOIN iptv_sources s ON c.source_id = s.id
-        WHERE m.user_id = ?
         ORDER BY c.name
       `, [userId], (err, rows) => {
         if (err) reject(err);

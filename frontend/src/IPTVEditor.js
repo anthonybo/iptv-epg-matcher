@@ -18,9 +18,12 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [publishResult, setPublishResult] = useState(null);
   const [channelToRemove, setChannelToRemove] = useState(null);
+  const [removingChannel, setRemovingChannel] = useState(false);
   const [sources, setSources] = useState([]);
   const [globalAutoDetect, setGlobalAutoDetect] = useState(false);
   const [refreshingLiveEvents, setRefreshingLiveEvents] = useState(false);
+  const [testingChannelId, setTestingChannelId] = useState(null);
+  const [testedChannels, setTestedChannels] = useState({});
 
   // Load matched channels and sources from database
   useEffect(() => {
@@ -104,16 +107,26 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
   };
 
   const handleRemoveChannel = async () => {
-    if (!channelToRemove) return;
+    if (!channelToRemove || removingChannel) return;
+
+    setRemovingChannel(true);
 
     try {
       await apiClient.delete(`/epg/matched-channels/${channelToRemove.match_id}`);
+      // Remove all channels with this match_id (removes from all sources)
       setChannels(prev => prev.filter(ch => ch.match_id !== channelToRemove.match_id));
       setChannelToRemove(null);
       loadMatchedChannels(); // Refresh categories
     } catch (error) {
-      console.error('Failed to remove channel:', error);
+      console.error('[IPTVEditor] Delete failed:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        channelData: channelToRemove
+      });
+      alert(`Failed to remove channel: ${error.response?.data?.error || error.message}`);
       setChannelToRemove(null);
+    } finally {
+      setRemovingChannel(false);
     }
   };
 
@@ -187,6 +200,24 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
       loadMatchedChannels();
     } catch (error) {
       console.error('Failed to rename category:', error);
+    }
+  };
+
+  const handleToggleInlineTest = (channel) => {
+    // Use iptv_channel_table_id as unique identifier (most reliable)
+    const uniqueKey = channel.iptv_channel_table_id || `${channel.match_id}_${channel.source_id}`;
+
+    if (testingChannelId === uniqueKey) {
+      // Close inline player
+      setTestingChannelId(null);
+    } else {
+      // Open inline player for this channel
+      setTestingChannelId(uniqueKey);
+      // Mark as tested
+      setTestedChannels(prev => ({
+        ...prev,
+        [uniqueKey]: new Date().toISOString()
+      }));
     }
   };
 
@@ -490,20 +521,28 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
                     {searchTerm ? 'No channels match your search' : 'No matched channels yet'}
                   </div>
                 ) : (
-                  filteredChannels.map((channel) => (
-                    <ChannelCard
-                      key={`${channel.match_id}-${channel.iptv_channel_id}-${channel.source_name}-${channel.epg_source_name}`}
-                      channel={channel}
-                      isEditing={editingChannel?.match_id === channel.match_id}
-                      onEdit={() => setEditingChannel(channel)}
-                      onSave={handleSaveChannel}
-                      onCancel={() => setEditingChannel(null)}
-                      onRemove={() => setChannelToRemove(channel)}
-                      onClick={() => handleChannelClick(channel)}
-                      onToggleDummyEpg={handleToggleDummyEpg}
-                      onToggleLivePrefix={handleToggleLivePrefix}
-                    />
-                  ))
+                  filteredChannels.map((channel) => {
+                    const uniqueKey = channel.iptv_channel_table_id || `${channel.match_id}_${channel.source_id}`;
+
+                    return (
+                      <ChannelCard
+                        key={`${channel.iptv_channel_table_id || channel.match_id}-${channel.source_id}`}
+                        channel={channel}
+                        isEditing={editingChannel?.match_id === channel.match_id}
+                        isTesting={testingChannelId === uniqueKey}
+                        testedAt={testedChannels[uniqueKey]}
+                        sessionId={sessionId}
+                        onEdit={() => setEditingChannel(channel)}
+                        onSave={handleSaveChannel}
+                        onCancel={() => setEditingChannel(null)}
+                        onRemove={() => setChannelToRemove(channel)}
+                        onClick={() => handleChannelClick(channel)}
+                        onToggleDummyEpg={handleToggleDummyEpg}
+                        onToggleLivePrefix={handleToggleLivePrefix}
+                        onToggleTest={() => handleToggleInlineTest(channel)}
+                      />
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -636,13 +675,21 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
             <div className="flex gap-3">
               <button
                 onClick={handleRemoveChannel}
-                className="flex-1 rounded-lg border border-rose-700 bg-rose-600 px-4 py-2.5 font-semibold text-white transition hover:bg-rose-500"
+                disabled={removingChannel}
+                className="flex-1 rounded-lg border border-rose-700 bg-rose-600 px-4 py-2.5 font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                Remove Channel
+                {removingChannel && (
+                  <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                )}
+                {removingChannel ? 'Removing...' : 'Remove Channel'}
               </button>
               <button
                 onClick={() => setChannelToRemove(null)}
-                className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 font-semibold text-slate-300 transition hover:bg-slate-700"
+                disabled={removingChannel}
+                className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2.5 font-semibold text-slate-300 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -654,7 +701,7 @@ const IPTVEditor = ({ matchedChannels, onUpdateMatches, onNavigateToPlayer, sess
   );
 };
 
-const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, onClick, onToggleDummyEpg, onToggleLivePrefix }) => {
+const ChannelCard = ({ channel, isEditing, isTesting, testedAt, sessionId, onEdit, onSave, onCancel, onRemove, onClick, onToggleDummyEpg, onToggleLivePrefix, onToggleTest }) => {
   const [editedChannel, setEditedChannel] = useState(channel);
 
   useEffect(() => {
@@ -662,10 +709,19 @@ const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, o
   }, [channel]);
 
   const handleCardClick = (e) => {
-    // Don't trigger if clicking on action buttons
-    if (!e.target.closest('button')) {
+    // Don't trigger if clicking on action buttons or player
+    if (!e.target.closest('button') && !e.target.closest('.inline-player')) {
       onClick?.();
     }
+  };
+
+  const formatTimeAgo = (timestamp) => {
+    if (!timestamp) return '';
+    const seconds = Math.floor((new Date() - new Date(timestamp)) / 1000);
+    if (seconds < 60) return 'Just now';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
   };
 
   if (isEditing) {
@@ -722,67 +778,112 @@ const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, o
   }
 
   return (
-    <div
-      onClick={handleCardClick}
-      className="flex items-center gap-4 rounded-xl border border-slate-800 bg-slate-900/50 p-4 transition hover:border-slate-700 hover:bg-slate-900 cursor-pointer"
-    >
-      {/* Logo */}
-      <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-lg bg-slate-800">
-        {channel.logo ? (
-          <img src={channel.logo} alt={channel.name} className="h-full w-full object-cover" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-slate-600">
-            <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <rect x="2" y="3" width="20" height="14" rx="2" strokeWidth="2" />
-            </svg>
-          </div>
-        )}
-      </div>
-
-      {/* Info */}
-      <div className="flex-1">
-        <h4 className="font-semibold text-slate-200">{channel.name || channel.iptv_channel_name}</h4>
-        <div className="mt-1 flex flex-col gap-1 text-xs text-slate-500">
-          <div className="flex items-center gap-2">
-            <span className="rounded bg-slate-800 px-2 py-0.5">{channel.group_title || 'Uncategorized'}</span>
-            {channel.source_name && (
-              <span className="rounded bg-purple-900/30 px-2 py-0.5 text-purple-300">
-                IPTV: {channel.source_name}
-              </span>
-            )}
-          </div>
-          {channel.epg_channel_name && (
-            <div className="flex items-center gap-1">
-              <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+    <div className="flex flex-col gap-3">
+      <div
+        onClick={handleCardClick}
+        className={`flex items-center gap-4 rounded-xl border p-4 transition cursor-pointer ${
+          isTesting
+            ? 'border-blue-500 bg-blue-900/10'
+            : testedAt
+            ? 'border-green-700 bg-slate-900/50 hover:border-slate-700 hover:bg-slate-900'
+            : 'border-slate-800 bg-slate-900/50 hover:border-slate-700 hover:bg-slate-900'
+        }`}
+      >
+        {/* Logo */}
+        <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-lg bg-slate-800">
+          {channel.logo ? (
+            <img src={channel.logo} alt={channel.name} className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-slate-600">
+              <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <rect x="2" y="3" width="20" height="14" rx="2" strokeWidth="2" />
               </svg>
-              <span>EPG: {channel.epg_channel_name}</span>
-              {channel.epg_source_name && (
-                <span className="rounded bg-blue-900/30 px-2 py-0.5 text-blue-300">
-                  {channel.epg_source_name}
-                </span>
-              )}
             </div>
           )}
         </div>
-      </div>
 
-      {/* Actions */}
-      <div className="flex flex-col gap-2">
-        <div className="flex gap-2">
-          <button
-            onClick={onEdit}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-slate-700"
-          >
-            Edit
-          </button>
-          <button
-            onClick={onRemove}
-            className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-900"
-          >
-            Remove
-          </button>
+        {/* Info */}
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <h4 className="font-semibold text-slate-200">{channel.name || channel.iptv_channel_name}</h4>
+            {testedAt && !isTesting && (
+              <span className="flex items-center gap-1 rounded bg-green-900/30 px-2 py-0.5 text-xs text-green-300">
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Tested {formatTimeAgo(testedAt)}
+              </span>
+            )}
+            {isTesting && (
+              <span className="flex items-center gap-1 rounded bg-blue-600 px-2 py-0.5 text-xs text-white">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
+                Testing
+              </span>
+            )}
+          </div>
+          <div className="mt-1 flex flex-col gap-1 text-xs text-slate-500">
+            <div className="flex items-center gap-2">
+              <span className="rounded bg-slate-800 px-2 py-0.5">{channel.group_title || 'Uncategorized'}</span>
+              {channel.source_name && (
+                <span className="rounded bg-purple-900/30 px-2 py-0.5 text-purple-300">
+                  IPTV: {channel.source_name}
+                </span>
+              )}
+            </div>
+            {channel.epg_channel_name && (
+              <div className="flex items-center gap-1">
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                <span>EPG: {channel.epg_channel_name}</span>
+                {channel.epg_source_name && (
+                  <span className="rounded bg-blue-900/30 px-2 py-0.5 text-blue-300">
+                    {channel.epg_source_name}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Actions */}
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleTest?.();
+              }}
+              className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                isTesting
+                  ? 'border-blue-700 bg-blue-600 text-white hover:bg-blue-500'
+                  : 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {isTesting ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                ) : (
+                  <>
+                    <circle cx="12" cy="12" r="10" strokeWidth="2" />
+                    <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" />
+                  </>
+                )}
+              </svg>
+            </button>
+            <button
+              onClick={onEdit}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-slate-700"
+            >
+              Edit
+            </button>
+            <button
+              onClick={onRemove}
+              className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-2 text-sm font-semibold text-rose-300 transition hover:bg-rose-900"
+            >
+              Remove
+            </button>
+          </div>
         <label
           className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition"
           onClick={(e) => e.stopPropagation()}
@@ -800,24 +901,49 @@ const ChannelCard = ({ channel, isEditing, onEdit, onSave, onCancel, onRemove, o
           />
           <span title="Generate dummy EPG for channels with dynamic names">Dummy EPG</span>
         </label>
-        <label
-          className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <input
-            type="checkbox"
-            checked={channel.enable_live_prefix === 1}
-            onChange={(e) => {
-              e.stopPropagation();
-              if (onToggleLivePrefix) {
-                onToggleLivePrefix(channel.iptv_channel_id, e.target.checked);
-              }
-            }}
-            className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-2 focus:ring-blue-500 focus:ring-offset-slate-900"
-          />
-          <span title="Add 'LIVE:' prefix to currently airing programs">LIVE prefix</span>
-        </label>
+          <label
+            className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer hover:text-slate-300 transition"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={channel.enable_live_prefix === 1}
+              onChange={(e) => {
+                e.stopPropagation();
+                if (onToggleLivePrefix) {
+                  onToggleLivePrefix(channel.iptv_channel_id, e.target.checked);
+                }
+              }}
+              className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-2 focus:ring-blue-500 focus:ring-offset-slate-900"
+            />
+            <span title="Add 'LIVE:' prefix to currently airing programs">LIVE prefix</span>
+          </label>
+        </div>
       </div>
+
+      {/* Inline Player */}
+      {isTesting && (
+        <div className="inline-player rounded-lg border border-blue-500 bg-slate-900 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h5 className="text-sm font-semibold text-slate-200">Stream Test</h5>
+            <span className="text-xs text-slate-400">Testing: {channel.name || channel.iptv_channel_name}</span>
+          </div>
+          <div className="rounded-lg overflow-hidden" style={{ minHeight: '300px' }}>
+            <IPTVPlayer
+              sessionId={sessionId}
+              selectedChannel={{
+                id: channel.iptv_channel_id,
+                name: channel.name || channel.iptv_channel_name,
+                logo: channel.logo,
+                url: channel.url
+              }}
+              playbackMethod="mpegts-player"
+              matchedChannels={{}}
+              theatreMode={false}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -901,6 +1027,10 @@ const CategoryManager = ({ categories, channels, onRenameCategory }) => {
 
 const ChannelDetailDrawer = ({ channel, epgData, loadingEpg, sessionId, onClose, onNavigateToPlayer }) => {
   const [showPip, setShowPip] = useState(false);
+  const [showScrollToNow, setShowScrollToNow] = useState(false);
+  const epgContainerRef = React.useRef(null);
+  const currentProgramRef = React.useRef(null);
+  const hasAutoScrolledRef = React.useRef(false);
 
   const formatTime = (timestamp) => {
     if (!timestamp) return '';
@@ -914,6 +1044,132 @@ const ChannelDetailDrawer = ({ channel, epgData, loadingEpg, sessionId, onClose,
     return `${month}/${day} ${hour}:${minute}`;
   };
 
+  const isProgramCurrent = (program) => {
+    const now = new Date();
+    // Parse XMLTV timestamps as UTC (format: YYYYMMDDHHmmss +0000)
+    const startTime = new Date(Date.UTC(
+      parseInt(program.start.substring(0, 4)),
+      parseInt(program.start.substring(4, 6)) - 1,
+      parseInt(program.start.substring(6, 8)),
+      parseInt(program.start.substring(8, 10)),
+      parseInt(program.start.substring(10, 12))
+    ));
+    const stopTime = new Date(Date.UTC(
+      parseInt(program.stop.substring(0, 4)),
+      parseInt(program.stop.substring(4, 6)) - 1,
+      parseInt(program.stop.substring(6, 8)),
+      parseInt(program.stop.substring(8, 10)),
+      parseInt(program.stop.substring(10, 12))
+    ));
+    return now >= startTime && now <= stopTime;
+  };
+
+  const scrollToCurrentProgram = () => {
+    if (epgContainerRef.current) {
+      const container = epgContainerRef.current;
+
+      if (currentProgramRef.current) {
+        // Scroll to current program if it exists
+        const programElement = currentProgramRef.current;
+        const containerHeight = container.clientHeight;
+        const programTop = programElement.offsetTop;
+        const programHeight = programElement.clientHeight;
+        const scrollPosition = programTop - (containerHeight / 2) + (programHeight / 2);
+
+        container.scrollTo({
+          top: Math.max(0, scrollPosition),
+          behavior: 'smooth'
+        });
+      } else {
+        // No current program found - find the next upcoming program or scroll to top
+        const now = new Date();
+        let firstUpcomingIndex = -1;
+        let lastPastIndex = -1;
+
+        for (let i = 0; i < epgData.length; i++) {
+          const program = epgData[i];
+          // Parse XMLTV timestamps as UTC
+          const startTime = new Date(Date.UTC(
+            parseInt(program.start.substring(0, 4)),
+            parseInt(program.start.substring(4, 6)) - 1,
+            parseInt(program.start.substring(6, 8)),
+            parseInt(program.start.substring(8, 10)),
+            parseInt(program.start.substring(10, 12))
+          ));
+          const stopTime = new Date(Date.UTC(
+            parseInt(program.stop.substring(0, 4)),
+            parseInt(program.stop.substring(4, 6)) - 1,
+            parseInt(program.stop.substring(6, 8)),
+            parseInt(program.stop.substring(8, 10)),
+            parseInt(program.stop.substring(10, 12))
+          ));
+
+          if (stopTime < now) {
+            lastPastIndex = i;
+          } else if (startTime > now && firstUpcomingIndex === -1) {
+            firstUpcomingIndex = i;
+            break;
+          }
+        }
+
+        // Scroll to the transition point between past and upcoming
+        const targetIndex = firstUpcomingIndex !== -1 ? firstUpcomingIndex : lastPastIndex;
+
+        if (targetIndex > 0) {
+          const programElements = container.querySelectorAll('.epg-program');
+
+          if (programElements[targetIndex]) {
+            const programElement = programElements[targetIndex];
+            const containerHeight = container.clientHeight;
+            const programTop = programElement.offsetTop;
+            const programHeight = programElement.clientHeight;
+            const scrollPosition = programTop - (containerHeight / 3);
+
+            container.scrollTo({
+              top: Math.max(0, scrollPosition),
+              behavior: 'smooth'
+            });
+          }
+        }
+      }
+
+      setShowScrollToNow(false);
+    }
+  };
+
+  // Auto-scroll to current program when drawer opens
+  React.useEffect(() => {
+    if (!loadingEpg && epgData.length > 0 && !hasAutoScrolledRef.current) {
+      // Small delay to ensure DOM is ready
+      setTimeout(() => {
+        scrollToCurrentProgram();
+        hasAutoScrolledRef.current = true;
+      }, 300);
+    }
+  }, [loadingEpg, epgData]);
+
+  // Reset auto-scroll flag when drawer closes/opens
+  React.useEffect(() => {
+    hasAutoScrolledRef.current = false;
+  }, [channel]);
+
+  // Detect when user scrolls away from current program
+  const handleScroll = () => {
+    if (currentProgramRef.current && epgContainerRef.current) {
+      const container = epgContainerRef.current;
+      const programElement = currentProgramRef.current;
+
+      const containerTop = container.scrollTop;
+      const containerBottom = containerTop + container.clientHeight;
+      const programTop = programElement.offsetTop;
+      const programBottom = programTop + programElement.clientHeight;
+
+      // Show button if current program is not visible
+      const isVisible = programTop >= containerTop && programBottom <= containerBottom;
+      setShowScrollToNow(!isVisible);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-end">
       {/* Backdrop */}
@@ -923,7 +1179,7 @@ const ChannelDetailDrawer = ({ channel, epgData, loadingEpg, sessionId, onClose,
       />
 
       {/* Drawer */}
-      <div className="relative h-full w-full max-w-2xl overflow-y-auto border-l border-slate-800 bg-slate-950 shadow-2xl">
+      <div className="relative flex flex-col h-full w-full max-w-2xl border-l border-slate-800 bg-slate-950 shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
           <div className="flex items-center justify-between p-6">
@@ -1004,45 +1260,50 @@ const ChannelDetailDrawer = ({ channel, epgData, loadingEpg, sessionId, onClose,
         </div>
 
         {/* EPG Programs */}
-        <div className="p-6">
-          <h3 className="mb-4 text-lg font-bold text-slate-100">Program Guide</h3>
+        <div className="relative flex flex-col flex-1 overflow-hidden">
+          <div className="flex items-center justify-between p-6 pb-4 border-b border-slate-800">
+            <h3 className="text-lg font-bold text-slate-100">Program Guide</h3>
+            {showScrollToNow && (
+              <button
+                onClick={scrollToCurrentProgram}
+                className="flex items-center gap-2 rounded-lg border border-blue-700 bg-blue-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-blue-500"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Scroll to Now
+              </button>
+            )}
+          </div>
 
           {loadingEpg ? (
-            <div className="py-12 text-center text-slate-400">Loading EPG data...</div>
+            <div className="flex-1 flex items-center justify-center text-slate-400">Loading EPG data...</div>
           ) : epgData.length === 0 ? (
-            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
-              <svg className="mx-auto h-12 w-12 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              <p className="mt-3">No EPG data available for this channel</p>
-              <p className="mt-1 text-sm">Try changing the EPG match to get program information</p>
+            <div className="flex-1 flex items-center justify-center p-6">
+              <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
+                <svg className="mx-auto h-12 w-12 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                <p className="mt-3">No EPG data available for this channel</p>
+                <p className="mt-1 text-sm">Try changing the EPG match to get program information</p>
+              </div>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div
+              ref={epgContainerRef}
+              onScroll={handleScroll}
+              className="flex-1 overflow-y-auto p-6 space-y-2"
+            >
               {epgData.map((program, index) => {
-                const now = new Date();
-                const startTime = new Date(
-                  program.start.substring(0, 4),
-                  parseInt(program.start.substring(4, 6)) - 1,
-                  program.start.substring(6, 8),
-                  program.start.substring(8, 10),
-                  program.start.substring(10, 12)
-                );
-                const stopTime = new Date(
-                  program.stop.substring(0, 4),
-                  parseInt(program.stop.substring(4, 6)) - 1,
-                  program.stop.substring(6, 8),
-                  program.stop.substring(8, 10),
-                  program.stop.substring(10, 12)
-                );
-                const isCurrentProgram = now >= startTime && now <= stopTime;
+                const isCurrentProgram = isProgramCurrent(program);
 
                 return (
                   <div
                     key={`${program.start}-${index}`}
-                    className={`rounded-lg border p-4 transition ${
+                    ref={isCurrentProgram ? currentProgramRef : null}
+                    className={`epg-program rounded-lg border p-4 transition ${
                       isCurrentProgram
-                        ? 'border-blue-700 bg-blue-900/20'
+                        ? 'border-blue-700 bg-blue-900/20 ring-2 ring-blue-500/50'
                         : 'border-slate-800 bg-slate-900/50'
                     }`}
                   >

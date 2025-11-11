@@ -817,11 +817,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
             try {
                 // Format the M3U channel info with all required properties
                 const m3uChannel = {
-                    id: selectedChannel.tvgId || selectedChannel.id || '',
+                    id: selectedChannel.id || selectedChannel.tvgId || '', // CRITICAL: id first (database ID), tvgId second (EPG hint)
                     name: selectedChannel.name || '',
                     logo: selectedChannel.logo || selectedChannel.tvgLogo || null,
                     url: selectedChannel.url || '',
-                    group: selectedChannel.groupTitle || selectedChannel.group || ''
+                    group: selectedChannel.groupTitle || selectedChannel.group || '',
+                    sourceId: selectedChannel.sourceId || null
                 };
 
                 console.log('Formatted M3U channel:', m3uChannel);
