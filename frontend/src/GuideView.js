@@ -253,9 +253,12 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
     const controller = new AbortController();
     let isMounted = true;
 
-    const fetchMatchedChannels = async () => {
+    const fetchMatchedChannels = async (silent = false) => {
       try {
-        setLoading(true);
+        // Only show loading on initial fetch, not on refresh
+        if (!silent) {
+          setLoading(true);
+        }
         setError(null);
 
         // Choose endpoint based on toggle
@@ -281,17 +284,25 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
         console.error('Error fetching matched channels:', err);
         setError(err.response?.data?.error || err.message);
       } finally {
-        if (isMounted) {
+        if (isMounted && !silent) {
           setLoading(false);
         }
       }
     };
 
+    // Initial fetch
     fetchMatchedChannels();
+
+    // Set up periodic refresh every 30 seconds to catch new EPG matches
+    const refreshInterval = setInterval(() => {
+      console.log('[GuideView] Refreshing EPG data...');
+      fetchMatchedChannels(true); // Silent refresh
+    }, 30000);
 
     return () => {
       isMounted = false;
       controller.abort();
+      clearInterval(refreshInterval);
     };
   }, [sessionId, showPublishedData]);
 

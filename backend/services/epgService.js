@@ -1760,12 +1760,14 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
         // Process channel data into our format, using categoryMap to get category names
         const channels = channelsData.map(channel => {
             const categoryName = categoryMap[channel.category_id] || channel.category_name || 'Uncategorized';
+            // Build stream URL with .ts extension for live streams (some providers require it)
+            const streamUrl = `${normalizedUrl}${channel.stream_type}/${username}/${password}/${channel.stream_id}${channel.stream_type === 'live' ? '.ts' : ''}`;
             return {
                 id: `xtream_${channel.stream_id}`,
                 name: channel.name || `Channel ${channel.stream_id}`,
                 logo: channel.stream_icon || null,
                 group: categoryName,
-                url: `${normalizedUrl}${channel.stream_type}/${username}/${password}/${channel.stream_id}`,
+                url: streamUrl,
                 epgChannelId: channel.epg_channel_id || null,
                 streamType: channel.stream_type || 'live',
                 added: channel.added || new Date().toISOString(),

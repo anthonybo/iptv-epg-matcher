@@ -37,10 +37,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     const [loadingEpgSources, setLoadingEpgSources] = useState(false);
     const [currentSource, setCurrentSource] = useState(null);
     const [dummyEpgAdded, setDummyEpgAdded] = useState(false);
+    const [addedToGuide, setAddedToGuide] = useState(false);
 
-    // Reset dummy EPG state when channel changes
+    // Reset dummy EPG and add to guide state when channel changes
     useEffect(() => {
         setDummyEpgAdded(false);
+        setAddedToGuide(false);
     }, [selectedChannel?.id]);
 
     // Function to find the current program from a list of programs
@@ -684,8 +686,9 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         };
 
         // Format the M3U channel
+        // IMPORTANT: Use channel.id (actual database ID like xtream_541950) NOT tvgId (EPG hint)
         const m3uChannel = {
-            id: selectedChannel.tvgId || selectedChannel.id || '',
+            id: selectedChannel.id || selectedChannel.tvgId || '',
             name: selectedChannel.name || '',
             logo: selectedChannel.logo || selectedChannel.tvgLogo || null,
             url: selectedChannel.url || '',
@@ -725,6 +728,70 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         }
     };
 
+    // Handle adding channel to Guide/IPTV Editor
+    const handleAddToGuide = async () => {
+        if (!selectedChannel) return;
+
+        console.log('Adding channel to Guide:', selectedChannel);
+
+        // Check if there's EPG data available
+        if (!epgData || !epgData.channel) {
+            setStatus('Please match this channel to an EPG source first, or use "Use Dummy EPG" to add without EPG data.');
+            setStatusType('error');
+            return;
+        }
+
+        // Set loading state
+        setLoading(true);
+        setStatus('Adding channel to Guide...');
+        setStatusType('info');
+
+        // Format the EPG channel from current EPG data
+        const epgChannel = {
+            id: epgData.channel.id || epgData.channel.channelId || '',
+            name: epgData.channel.name || epgData.channel.channelName || '',
+            icon: epgData.channel.icon || epgData.channel.logo || null,
+            source_name: epgData.channel.source_name || epgData.channel.sourceName || 'Unknown',
+            source_id: epgData.channel.source_id || epgData.channel.sourceId || ''
+        };
+
+        // Format the M3U channel
+        // IMPORTANT: Use channel.id (actual database ID like xtream_541950) NOT tvgId (EPG hint)
+        const m3uChannel = {
+            id: selectedChannel.id || selectedChannel.tvgId || '',
+            name: selectedChannel.name || '',
+            logo: selectedChannel.logo || selectedChannel.tvgLogo || null,
+            url: selectedChannel.url || '',
+            group: selectedChannel.groupTitle || selectedChannel.group || '',
+            sourceId: selectedChannel.sourceId || null
+        };
+
+        console.log('Adding to Guide:', { epgChannel, m3uChannel, selectedChannelDebug: selectedChannel });
+
+        try {
+            // Call the match endpoint to save (using apiClient for auth token)
+            const response = await apiClient.post(`/epg/${session}/match`, {
+                epgChannel: epgChannel,
+                m3uChannel: m3uChannel,
+                useDummyEpg: false
+            });
+
+            console.log('Channel added to Guide:', response.data);
+
+            // Update status with success message
+            setStatus(`✓ Successfully added "${m3uChannel.name}" to Guide! Check IPTV Editor to see it.`);
+            setStatusType('success');
+            setAddedToGuide(true);
+
+        } catch (error) {
+            console.error('Error adding channel to Guide:', error.response || error);
+            setStatus(`Failed to add to Guide: ${error.response?.data?.error || error.message}`);
+            setStatusType('error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     // Handle EPG match selection
     const handleMatch = (result) => {
         if (!result) return;
@@ -756,16 +823,16 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     url: selectedChannel.url || '',
                     group: selectedChannel.groupTitle || selectedChannel.group || ''
                 };
-                
+
                 console.log('Formatted M3U channel:', m3uChannel);
-                
+
                 // Detailed logging for debugging
-                console.log('Matching channels with full details:', { 
+                console.log('Matching channels with full details:', {
                     epgChannel: epgChannel,
                     m3uChannel: m3uChannel,
                     selectedChannel: selectedChannel
                 });
-                
+
                 // Call the match endpoint on the backend (using apiClient for auth token)
                 apiClient.post(`/epg/${session}/match`, {
                     epgChannel,
@@ -773,11 +840,11 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 })
                 .then(response => {
                     console.log('Match saved:', response.data);
-                    
+
                     // Clear search results
                     setSearchResults([]);
                     setSearchStatus('');
-                    
+
                     // Update status
                     setStatus(`Successfully matched ${m3uChannel.name} to ${epgChannel.name} from ${epgChannel.source_name || 'unknown source'}`);
                     setStatusType('success');
@@ -1227,6 +1294,50 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                             {loading ? 'Searching...' : 'Search'}
                         </button>
                     </div>
+
+                    {/* Add to Guide Button */}
+                    {epgData && epgData.channel && (
+                        <div className="flex items-center gap-3 pt-3 border-t border-slate-800">
+                            <div className="flex-1 text-xs text-slate-400">
+                                Channel has EPG data. Add it to your Guide/IPTV Editor.
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleAddToGuide}
+                                disabled={!selectedChannel || loading || addedToGuide}
+                                className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition focus:outline-none focus:ring-2 ${
+                                    addedToGuide
+                                        ? 'border-green-500/60 bg-green-500/20 text-green-100 cursor-default'
+                                        : 'border-emerald-500/60 bg-emerald-500/20 text-emerald-100 hover:border-emerald-400 hover:bg-emerald-500/30 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-800/60 disabled:text-slate-500'
+                                }`}
+                                title={addedToGuide ? "Channel added! Check IPTV Editor" : "Add this channel with its EPG data to your Guide"}
+                            >
+                                {loading ? (
+                                    <>
+                                        <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        Adding...
+                                    </>
+                                ) : addedToGuide ? (
+                                    <>
+                                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                        </svg>
+                                        Added to Guide!
+                                    </>
+                                ) : (
+                                    <>
+                                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                                        </svg>
+                                        Add to Guide
+                                    </>
+                                )}
+                            </button>
+                        </div>
+                    )}
 
                     {/* Use Dummy EPG Button */}
                     <div className="flex items-center gap-3 pt-3 border-t border-slate-800">

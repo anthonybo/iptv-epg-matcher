@@ -21,19 +21,21 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
     try {
         const { sessionId, channelId } = req.params;
         const format = req.query.format || 'ts'; // Default to ts format
+        const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null; // Get source_id if provided
         const userId = req.user?.id; // Get user ID if authenticated
 
-        logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}, userId ${userId || 'none'}`);
+        logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}, userId ${userId || 'none'}, sourceId ${sourceId || 'all'}`);
 
         let channels = [];
 
         // Try to get channels from database first
         try {
-            logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}`);
+            logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
             const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
                 page: 1,
                 limit: 999999, // Essentially unlimited - load ALL channels for streaming
-                userId: userId // Pass userId for authenticated users - enables per-user channel queries
+                userId: userId, // Pass userId for authenticated users - enables per-user channel queries
+                sourceId: sourceId // Pass sourceId to filter channels by IPTV source
             });
 
             if (dbResult && dbResult.channels && dbResult.channels.length > 0) {
@@ -194,14 +196,41 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
 
                     if (createLinkResponse.ok) {
                         const linkData = await createLinkResponse.json();
-                        logger.info(`[STREAM] create_link response:`, linkData);
+                        logger.info(`[STREAM] create_link response:`, JSON.stringify(linkData, null, 2));
+                        logger.info(`[STREAM] linkData type: ${typeof linkData}, has js: ${!!linkData?.js}, has cmd: ${!!linkData?.js?.cmd}`);
 
                         if (linkData && linkData.js && linkData.js.cmd) {
-                            const cmd = linkData.js.cmd;
-                            const match = cmd.match(/ffmpeg\s+(.+)/);
+                            const freshCmd = linkData.js.cmd;
+                            logger.info(`[STREAM] Extracted cmd from response: ${freshCmd}`);
+                            const match = freshCmd.match(/ffmpeg\s+(.+)/);
                             if (match && match[1]) {
-                                streamUrl = match[1];
-                                logger.info(`[STREAM] Got FRESH Stalker stream URL: ${streamUrl}`);
+                                let freshUrl = match[1];
+                                logger.info(`[STREAM] Got FRESH Stalker stream URL: ${freshUrl}`);
+
+                                // Extract play_token from fresh URL
+                                const freshTokenMatch = freshUrl.match(/play_token=([^&]+)/);
+                                const freshToken = freshTokenMatch ? freshTokenMatch[1] : null;
+
+                                // Extract stream ID from ORIGINAL cmd parameter in channel.url
+                                // Some Stalker portals return empty stream parameter in create_link response
+                                const originalCmdMatch = channel.url.match(/cmd=([^&]+)/);
+                                if (originalCmdMatch && freshToken) {
+                                    const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                                    logger.info(`[STREAM] Original cmd: ${originalCmd}`);
+                                    const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
+                                    const originalStreamId = originalStreamMatch ? originalStreamMatch[1] : null;
+
+                                    if (originalStreamId) {
+                                        // Check if fresh URL has empty stream parameter
+                                        if (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/)) {
+                                            logger.info(`[STREAM] Portal returned empty stream ID - using original stream ID: ${originalStreamId}`);
+                                            freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
+                                            logger.info(`[STREAM] Fixed stream URL: ${freshUrl}`);
+                                        }
+                                    }
+                                }
+
+                                streamUrl = freshUrl;
 
                                 // Replace localhost with actual server address if present
                                 if (streamUrl.includes('localhost')) {
@@ -211,10 +240,10 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                                     logger.info(`[STREAM] Replaced localhost with server address: ${streamUrl}`);
                                 }
                             } else {
-                                logger.warn(`[STREAM] Could not extract stream URL from cmd: ${cmd.substring(0, 100)}`);
+                                logger.warn(`[STREAM] Could not extract stream URL from cmd: ${freshCmd.substring(0, 100)}`);
                             }
                         } else {
-                            logger.warn(`[STREAM] Invalid create_link response structure:`, linkData);
+                            logger.warn(`[STREAM] Invalid create_link response structure:`, JSON.stringify(linkData, null, 2));
                         }
                     } else {
                         logger.error(`[STREAM] create_link request failed: ${createLinkResponse.status} ${createLinkResponse.statusText}`);
@@ -629,9 +658,10 @@ setInterval(() => {
 router.get('/:sessionId/:channelId/hls.m3u8', authMiddleware, async (req, res) => {
   try {
     const { sessionId, channelId } = req.params;
+    const sourceId = req.query.source_id; // Get source_id if provided
     const sessionKey = `${sessionId}_${channelId}`;
 
-    logger.info(`HLS playlist request for ${sessionKey}`);
+    logger.info(`HLS playlist request for ${sessionKey}${sourceId ? ` from source ${sourceId}` : ''}`);
 
     // Get or create HLS session
     let hlsSession = hlsSessions.get(sessionKey);
@@ -651,7 +681,11 @@ router.get('/:sessionId/:channelId/hls.m3u8', authMiddleware, async (req, res) =
       // Import the channel lookup logic - we'll need to refactor this
       // For now, make a request to our own stream endpoint to get the URL
       const baseUrl = `http://localhost:${process.env.PORT || 5001}`;
-      const streamInfoUrl = `${baseUrl}/api/stream/${sessionId}/${channelId}?redirect=true`;
+      let streamInfoUrl = `${baseUrl}/api/stream/${sessionId}/${channelId}?redirect=true`;
+      // Pass through sourceId if provided to ensure correct channel lookup
+      if (sourceId) {
+        streamInfoUrl += `&source_id=${sourceId}`;
+      }
 
       logger.info(`Fetching stream URL from: ${streamInfoUrl}`);
 

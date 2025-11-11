@@ -25,7 +25,18 @@ const IPTVPlayer = ({
   showDebug: externalShowDebug
 }) => {
   // Helper to get channel ID from either 'id' or 'tvgId' field
-  const getChannelId = () => selectedChannel?.id || selectedChannel?.tvgId;
+  // CRITICAL: Use 'id' first (IPTV channel ID like xtream_1111) not 'tvgId' (EPG hint like AnimalPlanet.us)
+  // BUILD TIMESTAMP: 2025-11-10 16:40 PST
+  const getChannelId = () => {
+    const channelId = selectedChannel?.id || selectedChannel?.tvgId;
+    console.log('[IPTVPlayer v16:40] getChannelId called:', {
+      id: selectedChannel?.id,
+      tvgId: selectedChannel?.tvgId,
+      returning: channelId,
+      fullChannel: selectedChannel
+    });
+    return channelId;
+  };
 
   // Helper to get group title from either 'groupTitle' or 'group.title' field
   const getGroupTitle = () => selectedChannel?.groupTitle || selectedChannel?.group?.title || '';
@@ -51,6 +62,11 @@ const IPTVPlayer = ({
   const containerRef = useRef(null);
   const playerInstanceRef = useRef(null);
   const logIdRef = useRef(0);
+  const retryCountRef = useRef(0);
+  const retryTimerRef = useRef(null);
+  const stallTimerRef = useRef(null);
+  const lastPlayingTimeRef = useRef(0);
+  const currentChannelIdRef = useRef(null);
   
   // Enhanced logging function
   const log = (level, message, data = null) => {
@@ -102,7 +118,9 @@ const IPTVPlayer = ({
           matchedEpgId: epgId
         });
 
-        fetchEpgData(epgId);
+        // Pass the IPTV channel ID, not the EPG ID
+        // Backend will look up the match and get the EPG data
+        fetchEpgData(channelId);
       } else {
         // Clear EPG data when there's no match
         setEpgData(null);
@@ -116,7 +134,9 @@ const IPTVPlayer = ({
   // Fetch EPG data for the current channel using proper ID
   const fetchEpgData = async (epgId) => {
     if (!sessionId || !epgId) return;
-    
+
+    console.log('[IPTVPlayer] fetchEpgData called with:', epgId);
+
     try {
       // If epgId is an object, extract the actual ID with multiple fallbacks
       let channelIdStr;
@@ -229,6 +249,18 @@ const IPTVPlayer = ({
 
   // Clean up player instance
   const cleanupPlayer = () => {
+    // Clear any pending retry timers
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+
+    // Clear stall detection timer
+    if (stallTimerRef.current) {
+      clearTimeout(stallTimerRef.current);
+      stallTimerRef.current = null;
+    }
+
     if (playerInstanceRef.current) {
       log('info', 'Destroying player instance');
       try {
@@ -243,7 +275,9 @@ const IPTVPlayer = ({
   // Initialize the appropriate player
   const initializePlayer = () => {
     cleanupPlayer();
-    
+    retryCountRef.current = 0; // Reset retry count when changing channels
+    currentChannelIdRef.current = getChannelId(); // Track current channel
+
     if (!containerRef.current) {
       log('error', 'Player container not available');
       return;
@@ -282,7 +316,11 @@ const IPTVPlayer = ({
     }
     
     // Get URL from the backend proxy
-    const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
+    let baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
+    // Add sourceId if available to ensure we only search in the correct IPTV source
+    if (selectedChannel?.sourceId) {
+      baseUrl += `?source_id=${selectedChannel.sourceId}`;
+    }
     const proxyHlsUrl = addAuthToStreamUrl(baseUrl);
 
     log('info', 'Initializing Clappr player', { url: proxyHlsUrl });
@@ -326,12 +364,114 @@ const IPTVPlayer = ({
         log('info', 'Playback started');
         setLoading(false);
         setError(null);
+        retryCountRef.current = 0; // Reset retry count on successful playback
+        lastPlayingTimeRef.current = Date.now();
+
+        // Clear stall timer when playing resumes
+        if (stallTimerRef.current) {
+          clearTimeout(stallTimerRef.current);
+          stallTimerRef.current = null;
+        }
       });
-      
+
+      playerInstanceRef.current.on(window.Clappr.Events.PLAYER_TIMEUPDATE, () => {
+        // Update last playing time when video is progressing
+        lastPlayingTimeRef.current = Date.now();
+
+        // Clear stall timer on normal playback
+        if (stallTimerRef.current) {
+          clearTimeout(stallTimerRef.current);
+          stallTimerRef.current = null;
+        }
+      });
+
+      // Stall detection for Clappr
+      const handleClapprStall = (eventType) => {
+        log('warn', `Clappr ${eventType} - checking for stall`);
+
+        // Clear any existing stall timer
+        if (stallTimerRef.current) {
+          clearTimeout(stallTimerRef.current);
+        }
+
+        // Set a timer to detect if we're stuck
+        stallTimerRef.current = setTimeout(() => {
+          // Don't recover if channel has changed
+          if (getChannelId() !== currentChannelIdRef.current) {
+            log('info', 'Channel changed, ignoring stall');
+            return;
+          }
+
+          const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
+
+          if (timeSinceLastPlaying > 10000) { // Stalled for more than 10 seconds
+            log('error', `Clappr stalled for ${timeSinceLastPlaying}ms - attempting recovery`);
+
+            const MAX_RETRIES = 3;
+            const retryCount = retryCountRef.current;
+
+            if (retryCount < MAX_RETRIES) {
+              retryCountRef.current++;
+              log('info', `Recovering from stall (${retryCount + 1}/${MAX_RETRIES})...`);
+              setError(`Stream stalled - recovering (${retryCount + 1}/${MAX_RETRIES})...`);
+
+              cleanupPlayer();
+              initializeClapprPlayer();
+            } else {
+              log('error', `Stream stalled after ${MAX_RETRIES} recovery attempts`);
+              setError('Stream appears to be frozen. Try selecting another channel or refresh the page.');
+            }
+          }
+        }, 12000); // Check after 12 seconds of waiting/stalling
+      };
+
+      playerInstanceRef.current.on(window.Clappr.Events.PLAYER_BUFFERING, () => handleClapprStall('buffering'));
+      playerInstanceRef.current.on(window.Clappr.Events.PLAYER_BUFFERFULL, () => {
+        // Clear stall timer when buffer is full
+        if (stallTimerRef.current) {
+          clearTimeout(stallTimerRef.current);
+          stallTimerRef.current = null;
+        }
+      });
+
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_ERROR, (error) => {
         log('error', 'Player error', { error });
-        setError('Error playing stream. Try another method.');
         setLoading(false);
+
+        // Attempt auto-recovery with exponential backoff
+        const MAX_RETRIES = 3;
+        const retryCount = retryCountRef.current;
+        const errorChannelId = getChannelId();
+
+        // Don't retry if channel has changed (e.g., during auto-test)
+        if (errorChannelId !== currentChannelIdRef.current) {
+          log('info', 'Channel changed, skipping retry');
+          return;
+        }
+
+        if (retryCount < MAX_RETRIES) {
+          const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 8000); // Max 8 seconds
+          retryCountRef.current++;
+
+          log('info', `Stream error - attempting recovery (${retryCount + 1}/${MAX_RETRIES}) in ${retryDelay/1000}s...`);
+          setError(`Stream error - retrying (${retryCount + 1}/${MAX_RETRIES})...`);
+
+          retryTimerRef.current = setTimeout(() => {
+            // Double-check channel hasn't changed during the delay
+            if (getChannelId() !== currentChannelIdRef.current) {
+              log('info', 'Channel changed during retry delay, aborting');
+              return;
+            }
+            log('info', 'Retrying stream...');
+            cleanupPlayer();
+            initializeClapprPlayer();
+          }, retryDelay);
+          return;
+        }
+
+        // Max retries exceeded - show error
+        log('error', `Stream failed after ${MAX_RETRIES} retry attempts`);
+        setError('Error playing stream. Try another method.');
       });
       
     } catch (e) {
@@ -398,7 +538,11 @@ const IPTVPlayer = ({
     log('info', 'Initializing mpegts.js player');
 
     // Get URL for TS stream
-    const baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    let baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    // Add sourceId if available to ensure we only search in the correct IPTV source
+    if (selectedChannel?.sourceId) {
+      baseTsUrl += `&source_id=${selectedChannel.sourceId}`;
+    }
     let proxyTsUrl = addAuthToStreamUrl(baseTsUrl);
 
     // Validate the URL before using it
@@ -441,6 +585,40 @@ const IPTVPlayer = ({
           log('error', 'mpegts player error', { errorType, errorDetail, errorInfo });
           setLoading(false);
 
+          // Attempt auto-recovery with exponential backoff
+          const MAX_RETRIES = 3;
+          const retryCount = retryCountRef.current;
+          const errorChannelId = getChannelId();
+
+          // Don't retry if channel has changed (e.g., during auto-test)
+          if (errorChannelId !== currentChannelIdRef.current) {
+            log('info', 'Channel changed, skipping retry');
+            return;
+          }
+
+          if (retryCount < MAX_RETRIES) {
+            const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 8000); // Max 8 seconds
+            retryCountRef.current++;
+
+            log('info', `Stream error - attempting recovery (${retryCount + 1}/${MAX_RETRIES}) in ${retryDelay/1000}s...`);
+            setError(`Stream error - retrying (${retryCount + 1}/${MAX_RETRIES})...`);
+
+            retryTimerRef.current = setTimeout(() => {
+              // Double-check channel hasn't changed during the delay
+              if (getChannelId() !== currentChannelIdRef.current) {
+                log('info', 'Channel changed during retry delay, aborting');
+                return;
+              }
+              log('info', 'Retrying stream...');
+              cleanupPlayer();
+              initializeMpegtsPlayer();
+            }, retryDelay);
+            return;
+          }
+
+          // Max retries exceeded - show error
+          log('error', `Stream failed after ${MAX_RETRIES} retry attempts`);
+
           // Handle specific error types
           if (errorType === window.mpegts.ErrorTypes.NETWORK_ERROR) {
             if (errorDetail === window.mpegts.ErrorDetails.NETWORK_STATUS_CODE_INVALID) {
@@ -464,7 +642,70 @@ const IPTVPlayer = ({
           log('info', 'Video playing');
           setLoading(false);
           setError(null);
+          retryCountRef.current = 0; // Reset retry count on successful playback
+          lastPlayingTimeRef.current = Date.now();
+
+          // Clear stall timer when playing resumes
+          if (stallTimerRef.current) {
+            clearTimeout(stallTimerRef.current);
+            stallTimerRef.current = null;
+          }
         });
+
+        videoEl.addEventListener('timeupdate', () => {
+          // Update last playing time when video is progressing
+          lastPlayingTimeRef.current = Date.now();
+
+          // Clear stall timer on normal playback
+          if (stallTimerRef.current) {
+            clearTimeout(stallTimerRef.current);
+            stallTimerRef.current = null;
+          }
+        });
+
+        // Stall detection - when video stops buffering/loading
+        const handleStall = (eventType) => {
+          log('warn', `Video ${eventType} - checking for stall`);
+          const stallChannelId = getChannelId();
+
+          // Clear any existing stall timer
+          if (stallTimerRef.current) {
+            clearTimeout(stallTimerRef.current);
+          }
+
+          // Set a timer to detect if we're stuck
+          stallTimerRef.current = setTimeout(() => {
+            // Don't recover if channel has changed
+            if (getChannelId() !== currentChannelIdRef.current) {
+              log('info', 'Channel changed, ignoring stall');
+              return;
+            }
+
+            const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
+
+            if (timeSinceLastPlaying > 10000) { // Stalled for more than 10 seconds
+              log('error', `Video stalled for ${timeSinceLastPlaying}ms - attempting recovery`);
+
+              const MAX_RETRIES = 3;
+              const retryCount = retryCountRef.current;
+
+              if (retryCount < MAX_RETRIES) {
+                retryCountRef.current++;
+                log('info', `Recovering from stall (${retryCount + 1}/${MAX_RETRIES})...`);
+                setError(`Stream stalled - recovering (${retryCount + 1}/${MAX_RETRIES})...`);
+
+                cleanupPlayer();
+                initializeMpegtsPlayer();
+              } else {
+                log('error', `Stream stalled after ${MAX_RETRIES} recovery attempts`);
+                setError('Stream appears to be frozen. Try selecting another channel or refresh the page.');
+              }
+            }
+          }, 12000); // Check after 12 seconds of waiting/stalling
+        };
+
+        videoEl.addEventListener('waiting', () => handleStall('waiting'));
+        videoEl.addEventListener('stalled', () => handleStall('stalled'));
 
         videoEl.addEventListener('error', () => {
           log('error', 'Video error', { error: videoEl.error });
@@ -493,7 +734,11 @@ const IPTVPlayer = ({
   const initializeVlcLink = () => {
     log('info', 'Initializing VLC link page');
 
-    const baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    let baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    // Add sourceId if available to ensure we only search in the correct IPTV source
+    if (selectedChannel?.sourceId) {
+      baseTsUrl += `&source_id=${selectedChannel.sourceId}`;
+    }
     const proxyTsUrl = addAuthToStreamUrl(baseTsUrl);
     
     // Create new player container
@@ -636,7 +881,11 @@ const IPTVPlayer = ({
         const serverIP = networkInfo.primaryAddress;
         const port = apiUrl.match(/:(\d+)/)?.[1] || '5001';
         const castApiUrl = `http://${serverIP}:${port}/api`;
-        const streamUrl = `${castApiUrl}/stream/${sessionId}/${getChannelId()}/hls.m3u8`;
+        let streamUrl = `${castApiUrl}/stream/${sessionId}/${getChannelId()}/hls.m3u8`;
+        // Add sourceId if available to ensure we only search in the correct IPTV source
+        if (selectedChannel?.sourceId) {
+          streamUrl += `?source_id=${selectedChannel.sourceId}`;
+        }
         const channelName = selectedChannel?.name || 'IPTV Stream';
         const logoUrl = selectedChannel?.logo || selectedChannel?.tvgLogo;
 
