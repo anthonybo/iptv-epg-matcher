@@ -387,8 +387,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         const matchedEpgId = channelIdentifier ? matchedChannels[channelIdentifier] : null;
 
         console.log('[EPGMatcher] Channel changed:', {
-            channelId: channelIdentifier,
+            selectedChannel: selectedChannel,
+            channelId: selectedChannel.id,
+            channelTvgId: selectedChannel.tvgId,
+            channelIdentifier: channelIdentifier,
             matchedEpgId: matchedEpgId,
+            matchedChannels: matchedChannels,
             hasSession: !!session
         });
 
@@ -616,12 +620,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 if (response.data.sources && Array.isArray(response.data.sources)) {
                     setEpgSources(response.data.sources);
                 }
-                
-                // Find current program
+
+                // Use current program from backend (more reliable than frontend detection)
                 const programs = response.data.programs || [];
-                const currentProgram = findCurrentProgram(programs);
+                const currentProgram = response.data.currentProgram || findCurrentProgram(programs);
                 setCurrentProgram(currentProgram);
-                
+
                 // Set source information for the current channel
                 if (response.data.channel && response.data.channel.source_name) {
                     setSourceInfo({
@@ -630,7 +634,17 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                         programCount: programs.length
                     });
                 }
-                
+
+                // Auto-scroll to current program after data loads
+                if (currentProgram) {
+                    setTimeout(() => {
+                        const currentProgramElement = document.querySelector('[data-current-program="true"]');
+                        if (currentProgramElement) {
+                            currentProgramElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+                    }, 100);
+                }
+
                 setError(null);
             } else {
                 console.error('EPG Data error response:', response.data);
@@ -716,6 +730,9 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
             setSearchResults([]);
             setSearchStatus('');
             setEpgSearch('');
+
+            // Trigger a refresh of matched channels in App.js
+            window.dispatchEvent(new CustomEvent('refreshMatchedChannels'));
 
             // DON'T call onEpgMatch callback - it would trigger a duplicate match
             // The channel is already saved to the database, just update UI state if needed
@@ -849,6 +866,10 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     // Update status
                     setStatus(`Successfully matched ${m3uChannel.name} to ${epgChannel.name} from ${epgChannel.source_name || 'unknown source'}`);
                     setStatusType('success');
+
+                    // Trigger a refresh of matched channels in App.js
+                    // Dispatch custom event so App.js can refresh its matchedChannels state
+                    window.dispatchEvent(new CustomEvent('refreshMatchedChannels'));
                 })
                 .catch(error => {
                     console.error('Error saving match:', error.response || error);
@@ -861,6 +882,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
 
                 // DON'T call onEpgMatch callback - it would trigger a duplicate match
                 // The match is already saved to the database by the API call above
+                // Instead, we dispatch a custom event to trigger a refresh
             } catch (error) {
                 console.error('Error updating matched channels in session', error);
                 setStatus(`Failed to match: ${error.message}`);
@@ -1171,7 +1193,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 </div>
 
                 {currentProgram && (
-                    <div className="flex-shrink-0 border-b border-emerald-500/30 bg-emerald-500/10 p-4">
+                    <div className="flex-shrink-0 border-b border-emerald-500/30 bg-emerald-500/10 p-4" data-current-program="true">
                         <div className="mb-2 flex justify-between">
                             <h4 className="m-0 font-medium text-emerald-100">
                                 {currentProgram.title}

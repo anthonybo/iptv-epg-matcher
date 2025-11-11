@@ -452,11 +452,21 @@ const getProgramsByChannelId = async (channelId, startTime, endTime) => {
     // Default time window: from now to 24 hours later
     const now = startTime || new Date();
     const tomorrow = endTime || new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    
-    // Format date objects to ISO strings for SQLite comparison
-    const nowStr = now.toISOString();
-    const tomorrowStr = tomorrow.toISOString();
-    
+
+    // Format date objects to EPG format for SQLite comparison (YYYYMMDDHHmmss +0000)
+    const formatToEPGDate = (date) => {
+      const year = date.getUTCFullYear();
+      const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(date.getUTCDate()).padStart(2, '0');
+      const hour = String(date.getUTCHours()).padStart(2, '0');
+      const minute = String(date.getUTCMinutes()).padStart(2, '0');
+      const second = String(date.getUTCSeconds()).padStart(2, '0');
+      return `${year}${month}${day}${hour}${minute}${second} +0000`;
+    };
+
+    const nowStr = formatToEPGDate(now);
+    const tomorrowStr = formatToEPGDate(tomorrow);
+
     // Log the time window for debugging
     logger.info(`Searching for programs between ${nowStr} and ${tomorrowStr}`);
     logger.info(`Channel ID to search: ${channelId}`);

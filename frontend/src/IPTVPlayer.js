@@ -118,9 +118,8 @@ const IPTVPlayer = ({
           matchedEpgId: epgId
         });
 
-        // Pass the IPTV channel ID, not the EPG ID
-        // Backend will look up the match and get the EPG data
-        fetchEpgData(channelId);
+        // Use the EPG ID for fetching program data
+        fetchEpgData(epgId);
       } else {
         // Clear EPG data when there's no match
         setEpgData(null);

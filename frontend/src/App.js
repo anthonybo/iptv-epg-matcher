@@ -145,14 +145,17 @@ function App() {
           // Use both the channel ID and tvgId as keys, storing the EPG channel ID as the value
           if (channel.id && channel.epgId) {
             acc[channel.id] = channel.epgId;
+            console.log(`[App] Matched channel map: ${channel.id} -> ${channel.epgId}`);
           }
-          if (channel.tvgId && channel.tvgId !== channel.id && channel.epgId) {
-            acc[channel.tvgId] = channel.epgId;
+          if (channel.tvg?.id && channel.tvg.id !== channel.id && channel.epgId) {
+            acc[channel.tvg.id] = channel.epgId;
+            console.log(`[App] Matched channel map (tvg): ${channel.tvg.id} -> ${channel.epgId}`);
           }
           return acc;
         }, {});
 
         console.log(`[App] Loaded ${response.data.channels.length} matched channels`);
+        console.log('[App] matchedChannels map:', matchesMap);
         setMatchedChannels(matchesMap);
         saveMatchedChannels(matchesMap);
         return matchesMap;
@@ -170,6 +173,20 @@ function App() {
     // Load any previously matched channels from localStorage initially
     const savedMatches = JSON.parse(localStorage.getItem('matchedChannels') || '{}');
     setMatchedChannels(savedMatches);
+  }, []);
+
+  // Listen for match updates from EPGMatcher
+  useEffect(() => {
+    const handleRefreshMatches = () => {
+      console.log('[App] Received refreshMatchedChannels event, fetching latest matches');
+      fetchMatchedChannels();
+    };
+
+    window.addEventListener('refreshMatchedChannels', handleRefreshMatches);
+
+    return () => {
+      window.removeEventListener('refreshMatchedChannels', handleRefreshMatches);
+    };
   }, []);
 
   // Load user sources if authenticated (wait for auth to be ready)
@@ -1235,6 +1252,15 @@ function App() {
       if (activeTab === 'guide') {
         if (now - lastMatchesFetch > 5000) { // Refresh if more than 5 seconds since last fetch
           console.log('[App] Refreshing matched channels for Guide view');
+          window.lastMatchesFetchTime = now;
+          await fetchMatchedChannels();
+        }
+      }
+
+      // Also refresh matched channels when switching to player view
+      if (activeTab === 'player') {
+        if (now - lastMatchesFetch > 5000) { // Refresh if more than 5 seconds since last fetch
+          console.log('[App] Refreshing matched channels for Player view');
           window.lastMatchesFetchTime = now;
           await fetchMatchedChannels();
         }
