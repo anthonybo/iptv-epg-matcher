@@ -493,11 +493,36 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
           logger.info(`create_link response:`, linkData);
 
           if (linkData && linkData.js && linkData.js.cmd) {
-            const cmd = linkData.js.cmd;
-            const match = cmd.match(/ffmpeg\s+(.+)/);
+            const freshCmd = linkData.js.cmd;
+            const match = freshCmd.match(/ffmpeg\s+(.+)/);
             if (match && match[1]) {
-              streamUrl = match[1];
-              logger.info(`Got FRESH Stalker stream URL: ${streamUrl}`);
+              let freshUrl = match[1];
+              logger.info(`Got FRESH Stalker stream URL: ${freshUrl}`);
+
+              // Extract play_token from fresh URL
+              const freshTokenMatch = freshUrl.match(/play_token=([^&]+)/);
+              const freshToken = freshTokenMatch ? freshTokenMatch[1] : null;
+
+              // Extract stream ID from ORIGINAL cmd parameter in channel.url
+              // Some Stalker portals return empty stream parameter in create_link response
+              const originalCmdMatch = channel.url.match(/cmd=([^&]+)/);
+              if (originalCmdMatch && freshToken) {
+                const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                logger.info(`Original cmd: ${originalCmd}`);
+                const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
+                const originalStreamId = originalStreamMatch ? originalStreamMatch[1] : null;
+
+                if (originalStreamId) {
+                  // Check if fresh URL has empty stream parameter
+                  if (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/)) {
+                    logger.info(`Portal returned empty stream ID - using original stream ID: ${originalStreamId}`);
+                    freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
+                    logger.info(`Fixed stream URL: ${freshUrl}`);
+                  }
+                }
+              }
+
+              streamUrl = freshUrl;
             }
           }
         } else {
@@ -536,15 +561,20 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     const fetch = require('node-fetch');
     const { PassThrough } = require('stream');
 
-    // For Stalker streams, include proper authentication headers
-    const streamHeaders = {
-      'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
-      'X-User-Agent': 'Model: MAG250; Link: WiFi'
-    };
+    // Set headers based on source type
+    const streamHeaders = {};
 
-    // Add MAC address cookie for Stalker portals
-    if (channel.source_type === 'stalker' && channel.source_mac) {
-      streamHeaders['Cookie'] = `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`;
+    // For Stalker streams, include proper authentication headers
+    if (channel.source_type === 'stalker') {
+      streamHeaders['User-Agent'] = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
+      streamHeaders['X-User-Agent'] = 'Model: MAG250; Link: WiFi';
+
+      if (channel.source_mac) {
+        streamHeaders['Cookie'] = `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`;
+      }
+    } else {
+      // For XTREAM and other sources, use standard browser User-Agent
+      streamHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36';
     }
 
     const streamResponse = await fetch(streamUrl, {
@@ -747,15 +777,20 @@ router.get('/stream/:channelId', async (req, res) => {
     const fetch = require('node-fetch');
     const { PassThrough } = require('stream');
 
-    // For Stalker streams, include proper authentication headers
-    const streamHeaders = {
-      'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
-      'X-User-Agent': 'Model: MAG250; Link: WiFi'
-    };
+    // Set headers based on source type
+    const streamHeaders = {};
 
-    // Add MAC address cookie for Stalker portals
-    if (channel.source_type === 'stalker' && channel.source_mac) {
-      streamHeaders['Cookie'] = `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`;
+    // For Stalker streams, include proper authentication headers
+    if (channel.source_type === 'stalker') {
+      streamHeaders['User-Agent'] = 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
+      streamHeaders['X-User-Agent'] = 'Model: MAG250; Link: WiFi';
+
+      if (channel.source_mac) {
+        streamHeaders['Cookie'] = `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`;
+      }
+    } else {
+      // For XTREAM and other sources, use standard browser User-Agent
+      streamHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36';
     }
 
     const streamResponse = await fetch(streamUrl, {
