@@ -232,30 +232,38 @@ class ChannelHandler(handler.ContentHandler):
         logger.info(f"Processed {self.channel_count} channels from source {self.source_name}")
     
     def _process_channel_batch(self):
-        """Process a batch of channels"""
+        """Process a batch of channels using bulk INSERT for performance"""
         if not self.channel_batch:
             return
-            
+
         try:
-            # Insert all channels in a single transaction
+            # Use bulk INSERT with sub-batches to avoid SQLite parameter limits
+            # SQLite max params ~32,766; 500 channels × 4 fields = 2,000 params (safe)
             self.cursor.execute("BEGIN TRANSACTION")
-            
-            for channel in self.channel_batch:
-                # Try to insert, and if it fails due to duplicate, update instead
-                try:
-                    self.cursor.execute(
-                        "INSERT INTO channels (id, source_id, name, icon) VALUES (?, ?, ?, ?)",
-                        (channel["id"], channel["source_id"], channel["name"], channel["icon"])
-                    )
-                except sqlite3.IntegrityError:
-                    # Update existing channel
-                    self.cursor.execute(
-                        "UPDATE channels SET source_id = ?, name = ?, icon = ? WHERE id = ?",
-                        (channel["source_id"], channel["name"], channel["icon"], channel["id"])
-                    )
-            
+
+            BULK_SIZE = 500
+            for i in range(0, len(self.channel_batch), BULK_SIZE):
+                batch = self.channel_batch[i:i + BULK_SIZE]
+
+                # Build multi-value INSERT statement
+                placeholders = ','.join(['(?,?,?,?)'] * len(batch))
+                values = []
+                for channel in batch:
+                    values.extend([
+                        channel["id"],
+                        channel["source_id"],
+                        channel["name"],
+                        channel["icon"]
+                    ])
+
+                # Execute bulk INSERT (INSERT OR REPLACE for SQLite upsert behavior)
+                self.cursor.execute(
+                    f"INSERT OR REPLACE INTO channels (id, source_id, name, icon) VALUES {placeholders}",
+                    values
+                )
+
             self.cursor.execute("COMMIT")
-            
+
             self.channel_batch = []
         except Exception as e:
             logger.error(f"Error processing channel batch: {e}")
@@ -360,30 +368,41 @@ class ProgramHandler(handler.ContentHandler):
         logger.info(f"Skipped {self.skipped_programs} programs with unknown channels")
     
     def _process_program_batch(self):
-        """Process a batch of programs"""
+        """Process a batch of programs using bulk INSERT for performance"""
         if not self.program_batch:
             return
-            
+
         try:
-            # Insert all programs in a single transaction
+            # Use bulk INSERT with sub-batches to avoid SQLite parameter limits
+            # SQLite max params ~32,766; 500 programs × 7 fields = 3,500 params (safe)
             self.cursor.execute("BEGIN TRANSACTION")
-            
-            for program in self.program_batch:
-                try:
-                    self.cursor.execute(
-                        "INSERT OR REPLACE INTO programs (id, channel_id, title, description, start, stop, category) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (program["id"], program["channel_id"], program["title"], 
-                         program["description"], program["start"], program["stop"], 
-                         program["category"])
-                    )
-                except sqlite3.IntegrityError as e:
-                    # Log details about the error for diagnosis
-                    logger.error(f"IntegrityError for program: {program['id']}, channel: {program['channel_id']}")
-                    # Continue with next program
-                    continue
-            
+
+            BULK_SIZE = 500
+            for i in range(0, len(self.program_batch), BULK_SIZE):
+                batch = self.program_batch[i:i + BULK_SIZE]
+
+                # Build multi-value INSERT statement
+                placeholders = ','.join(['(?,?,?,?,?,?,?)'] * len(batch))
+                values = []
+                for program in batch:
+                    values.extend([
+                        program["id"],
+                        program["channel_id"],
+                        program["title"],
+                        program["description"],
+                        program["start"],
+                        program["stop"],
+                        program["category"]
+                    ])
+
+                # Execute bulk INSERT
+                self.cursor.execute(
+                    f"INSERT OR REPLACE INTO programs (id, channel_id, title, description, start, stop, category) VALUES {placeholders}",
+                    values
+                )
+
             self.cursor.execute("COMMIT")
-            
+
             self.program_batch = []
         except Exception as e:
             logger.error(f"Error processing program batch: {e}")
@@ -403,8 +422,8 @@ def init_database(db_path):
     # Ensure db directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
-    # Connect to database
-    conn = sqlite3.connect(db_path, timeout=10.0)  # 10 second timeout
+    # Connect to database with longer timeout to avoid locks during concurrent access
+    conn = sqlite3.connect(db_path, timeout=60.0)  # 60 second timeout for concurrent Node.js access
     conn.row_factory = sqlite3.Row  # Use row factory for better row access
 
     cursor = conn.cursor()
@@ -535,13 +554,82 @@ def download_file(url, cache_dir):
         return None
 
 
+def delete_all_sources(db_connection):
+    """Delete all existing EPG data before refresh (uses indexes for fast CASCADE DELETE)"""
+    cursor = db_connection.cursor()
+    try:
+        # Checkpoint WAL to ensure clean state
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        cursor.execute("PRAGMA foreign_keys = ON")
+        logger.info("Deleting all existing EPG data...")
+
+        # Get count before deletion
+        cursor.execute("SELECT COUNT(*) FROM programs")
+        program_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM channels")
+        channel_count = cursor.fetchone()[0]
+
+        logger.info(f"Deleting {channel_count:,} channels and {program_count:,} programs...")
+
+        # Delete all sources (cascades to channels and programs)
+        # This is fast because indexes still exist!
+        cursor.execute("DELETE FROM sources")
+        db_connection.commit()
+
+        # Checkpoint again after deletion
+        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        logger.info("All existing EPG data deleted successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting existing data: {e}")
+        return False
+
+
+def drop_indexes_for_bulk_load(db_connection):
+    """Drop indexes to speed up bulk INSERT operations"""
+    cursor = db_connection.cursor()
+    try:
+        logger.info("Dropping indexes for bulk load optimization...")
+        cursor.execute("DROP INDEX IF EXISTS idx_channel_source")
+        cursor.execute("DROP INDEX IF EXISTS idx_channel_name")
+        cursor.execute("DROP INDEX IF EXISTS idx_program_channel")
+        cursor.execute("DROP INDEX IF EXISTS idx_program_start")
+        cursor.execute("DROP INDEX IF EXISTS idx_program_stop")
+        db_connection.commit()
+        logger.info("Indexes dropped successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error dropping indexes: {e}")
+        return False
+
+
+def recreate_indexes_after_bulk_load(db_connection):
+    """Recreate indexes after bulk INSERT operations"""
+    cursor = db_connection.cursor()
+    try:
+        logger.info("Recreating indexes after bulk load...")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_source ON channels(source_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_name ON channels(name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_program_channel ON programs(channel_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_program_start ON programs(start)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_program_stop ON programs(stop)")
+        db_connection.commit()
+        logger.info("Indexes recreated successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error recreating indexes: {e}")
+        return False
+
+
 def parse_epg_file(file_path, db_connection, source_id, source_name):
     """Parse an EPG file (XML, possibly gzipped) into the database"""
     logger.info(f"Parsing EPG file: {file_path} (source: {source_name})")
-    
+
     # Use our two-pass parser
     parser = TwoPassEPGParser(file_path, db_connection, source_id, source_name)
-    
+
     try:
         return parser.parse()
     except Exception as e:
@@ -549,24 +637,27 @@ def parse_epg_file(file_path, db_connection, source_id, source_name):
         return False
 
 
-def process_source(source_url, db_connection, cache_dir, force=False):
+def process_source(source_url, db_connection, cache_dir, force=False, skip_delete=False):
     """Process a single EPG source"""
     logger.info(f"Processing EPG source: {source_url}")
-    
+
     # Generate source ID and name
     import hashlib
     source_id = hashlib.md5(source_url.encode('utf-8')).hexdigest()
     source_name = source_url.split("/")[-1]
-    
-    # Delete any existing data for this source to start fresh
+
+    # Get cursor for database operations
     cursor = db_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys = ON") # Enable foreign keys to ensure cascade delete
-    
-    # If source exists, delete it first (this will cascade delete all related channels and programs)
-    cursor.execute("DELETE FROM sources WHERE id = ?", (source_id,))
-    db_connection.commit()
-    logger.info(f"Deleted existing data for source: {source_name}")
-    
+
+    # Delete any existing data for this source to start fresh (unless skip_delete=True)
+    if not skip_delete:
+        cursor.execute("PRAGMA foreign_keys = ON") # Enable foreign keys to ensure cascade delete
+
+        # If source exists, delete it first (this will cascade delete all related channels and programs)
+        cursor.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        db_connection.commit()
+        logger.info(f"Deleted existing data for source: {source_name}")
+
     # Download the file if it's a URL
     if source_url.startswith("http"):
         local_path = download_file(source_url, cache_dir)
@@ -574,7 +665,7 @@ def process_source(source_url, db_connection, cache_dir, force=False):
             return False
     else:
         local_path = source_url
-    
+
     # Add source to database before parsing
     cursor.execute(
         "INSERT INTO sources (id, name, url, channel_count, program_count) VALUES (?, ?, ?, 0, 0)",
@@ -898,16 +989,23 @@ def run_parser(db_path, cache_dir, force=False):
     """Run the parser with the given options"""
     # Initialize database
     db_connection = init_database(db_path)
-    
+
     # Process each source
     sources = DEFAULT_EPG_SOURCES
     start_time = time.time()
     success_count = 0
-    
+
     try:
+        # Step 1: Delete all existing data BEFORE dropping indexes (uses indexes for fast CASCADE DELETE)
+        delete_all_sources(db_connection)
+
+        # Step 2: Drop indexes for fast bulk INSERT
+        drop_indexes_for_bulk_load(db_connection)
+
+        # Step 3: Process each source (skip individual deletes since we deleted all above)
         for idx, source in enumerate(sources):
             print(f"Processing source {idx+1}/{len(sources)}: {source}")
-            if process_source(source, db_connection, cache_dir, force):
+            if process_source(source, db_connection, cache_dir, force, skip_delete=True):
                 success_count += 1
                 print(f"✓ Successfully processed source {idx+1}/{len(sources)}: {source}")
             else:
@@ -920,13 +1018,16 @@ def run_parser(db_path, cache_dir, force=False):
         except:
             pass
     finally:
+        # Always recreate indexes even if there was an error
+        recreate_indexes_after_bulk_load(db_connection)
+
         # Close database connection
         db_connection.close()
-        
+
         # Final report
         elapsed = time.time() - start_time
         print(f"\nEPG parsing complete! Processed {success_count}/{len(sources)} sources in {elapsed:.1f} seconds")
-        
+
         # Optimize the database
         optimize_database(db_path)
 
@@ -980,15 +1081,22 @@ def main():
         
         # Initialize database
         db_connection = init_database(args.db)
-        
+
         # Process each source
         start_time = time.time()
         success_count = 0
-        
+
         try:
+            # Step 1: Delete all existing data BEFORE dropping indexes (uses indexes for fast CASCADE DELETE)
+            delete_all_sources(db_connection)
+
+            # Step 2: Drop indexes for fast bulk INSERT
+            drop_indexes_for_bulk_load(db_connection)
+
+            # Step 3: Process each source (skip individual deletes since we deleted all above)
             for idx, source in enumerate(sources):
                 logger.info(f"Processing source {idx+1}/{len(sources)}: {source}")
-                if process_source(source, db_connection, args.cache, args.force):
+                if process_source(source, db_connection, args.cache, args.force, skip_delete=True):
                     success_count += 1
                     logger.info(f"✓ Successfully processed source {idx+1}/{len(sources)}: {source}")
                 else:
@@ -1001,6 +1109,9 @@ def main():
             except:
                 pass
         finally:
+            # Always recreate indexes even if there was an error
+            recreate_indexes_after_bulk_load(db_connection)
+
             # Close database connection
             db_connection.close()
             

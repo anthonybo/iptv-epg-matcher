@@ -307,14 +307,29 @@ const databaseService = {
     try {
       // Use a transaction for better performance
       await exec('BEGIN TRANSACTION');
-      
-      for (const channel of channels) {
+
+      // Use bulk INSERT with batches of 500 to avoid SQLite parameter limits
+      // SQLite max params ~32,766; 500 channels × 4 fields = 2,000 params (safe)
+      const BULK_SIZE = 500;
+
+      for (let i = 0; i < channels.length; i += BULK_SIZE) {
+        const batch = channels.slice(i, i + BULK_SIZE);
+
+        // Build multi-value INSERT statement
+        const placeholders = batch.map(() => '(?, ?, ?, ?)').join(', ');
+        const values = batch.flatMap(channel => [
+          channel.id,
+          channel.sourceId,
+          channel.name,
+          channel.icon || null
+        ]);
+
         await run(
-          'INSERT OR REPLACE INTO channels (id, source_id, name, icon) VALUES (?, ?, ?, ?)',
-          [channel.id, channel.sourceId, channel.name, channel.icon || null]
+          `INSERT OR REPLACE INTO channels (id, source_id, name, icon) VALUES ${placeholders}`,
+          values
         );
       }
-      
+
       await exec('COMMIT');
       return channels.length;
     } catch (error) {
@@ -388,24 +403,34 @@ const databaseService = {
     try {
       // Use a transaction for better performance
       await exec('BEGIN TRANSACTION');
-      
-      for (const program of programs) {
+
+      // Use bulk INSERT with batches of 500 to avoid SQLite parameter limits
+      // SQLite max params ~32,766; 500 programs × 7 fields = 3,500 params (safe)
+      const BULK_SIZE = 500;
+
+      for (let i = 0; i < programs.length; i += BULK_SIZE) {
+        const batch = programs.slice(i, i + BULK_SIZE);
+
+        // Build multi-value INSERT statement
+        const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ');
+        const values = batch.flatMap(program => [
+          program.id,
+          program.channelId,
+          program.title,
+          program.description || null,
+          program.start,
+          program.stop,
+          program.category || null
+        ]);
+
         await run(
-          `INSERT OR REPLACE INTO programs 
-           (id, channel_id, title, description, start, stop, category) 
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [
-            program.id,
-            program.channelId,
-            program.title,
-            program.description || null,
-            program.start,
-            program.stop,
-            program.category || null
-          ]
+          `INSERT OR REPLACE INTO programs
+           (id, channel_id, title, description, start, stop, category)
+           VALUES ${placeholders}`,
+          values
         );
       }
-      
+
       await exec('COMMIT');
       return programs.length;
     } catch (error) {
