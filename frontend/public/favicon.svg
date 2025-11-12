@@ -1,46 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Modern gradient background -->
   <defs>
-    <linearGradient id="mainGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
-    </linearGradient>
-    <linearGradient id="screenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" style="stop-color:#60a5fa;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#3b82f6;stop-opacity:1" />
+    <!-- Unique purple gradient - different from common platforms -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#6366f1;stop-opacity:1" />
     </linearGradient>
   </defs>
 
-  <!-- Main background circle -->
-  <circle cx="64" cy="64" r="60" fill="url(#mainGrad)"/>
+  <!-- Background -->
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
 
-  <!-- TV/Monitor screen -->
-  <rect x="24" y="32" width="80" height="54" rx="6" fill="#1e293b" stroke="#0f172a" stroke-width="2"/>
+  <!-- EPG Grid - represents program guide with one row highlighted -->
+  <g fill="white">
+    <!-- Top row (inactive) -->
+    <rect x="20" y="28" width="88" height="16" rx="4" opacity="0.4"/>
 
-  <!-- Screen content (EPG grid) -->
-  <rect x="30" y="38" width="68" height="42" rx="3" fill="url(#screenGrad)"/>
+    <!-- Middle row (active/playing) - larger and bright -->
+    <rect x="20" y="52" width="88" height="24" rx="6"/>
 
-  <!-- EPG program guide lines (representing schedule) -->
-  <line x1="35" y1="48" x2="93" y2="48" stroke="white" stroke-width="1.5" opacity="0.6"/>
-  <line x1="35" y1="58" x2="93" y2="58" stroke="white" stroke-width="1.5" opacity="0.6"/>
-  <line x1="35" y1="68" x2="93" y2="68" stroke="white" stroke-width="1.5" opacity="0.6"/>
-
-  <!-- Vertical separator (channel columns) -->
-  <line x1="58" y1="38" x2="58" y2="80" stroke="white" stroke-width="1.5" opacity="0.4"/>
-
-  <!-- Link/Match symbol (two connected nodes) -->
-  <g opacity="0.95">
-    <!-- Left node (IPTV channel) -->
-    <circle cx="44" cy="56" r="4" fill="#fbbf24" stroke="white" stroke-width="1.5"/>
-    <!-- Right node (EPG data) -->
-    <circle cx="82" cy="65" r="4" fill="#34d399" stroke="white" stroke-width="1.5"/>
-    <!-- Connection line showing "matching" -->
-    <line x1="47" y1="57" x2="79" y2="64" stroke="#f0abfc" stroke-width="2.5" stroke-linecap="round"/>
+    <!-- Bottom row (inactive) -->
+    <rect x="20" y="84" width="88" height="16" rx="4" opacity="0.4"/>
   </g>
 
-  <!-- Power/Status indicator -->
-  <circle cx="64" cy="90" r="3" fill="#22c55e"/>
-
-  <!-- Bottom control bar -->
-  <rect x="48" y="92" width="32" height="6" rx="3" fill="#475569" opacity="0.8"/>
+  <!-- Small play indicator on the active row -->
+  <circle cx="98" cy="64" r="6" fill="#22c55e"/>
 </svg>
