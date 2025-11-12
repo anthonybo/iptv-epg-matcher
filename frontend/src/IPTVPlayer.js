@@ -67,6 +67,9 @@ const IPTVPlayer = ({
   const stallTimerRef = useRef(null);
   const lastPlayingTimeRef = useRef(0);
   const currentChannelIdRef = useRef(null);
+  const healthCheckIntervalRef = useRef(null);
+  const lastKnownCurrentTimeRef = useRef(0);
+  const videoElementRef = useRef(null);
   
   // Enhanced logging function
   const log = (level, message, data = null) => {
@@ -260,6 +263,12 @@ const IPTVPlayer = ({
       stallTimerRef.current = null;
     }
 
+    // Clear health check interval
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+      healthCheckIntervalRef.current = null;
+    }
+
     if (playerInstanceRef.current) {
       log('info', 'Destroying player instance');
       try {
@@ -269,6 +278,114 @@ const IPTVPlayer = ({
       }
       playerInstanceRef.current = null;
     }
+
+    videoElementRef.current = null;
+  };
+
+  // Start proactive health check to detect frozen video
+  const startHealthCheck = () => {
+    // Clear any existing health check
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+    }
+
+    // Check every 5 seconds if video is progressing
+    healthCheckIntervalRef.current = setInterval(() => {
+      const videoEl = videoElementRef.current;
+
+      if (!videoEl) {
+        return;
+      }
+
+      // Don't check if video is paused
+      if (videoEl.paused) {
+        return;
+      }
+
+      // For live streams, being in 'ended' state is a problem - trigger recovery
+      if (videoEl.ended) {
+        log('error', 'Video in ended state - live stream should never end');
+
+        const MAX_RETRIES = 3;
+        const retryCount = retryCountRef.current;
+
+        if (retryCount < MAX_RETRIES) {
+          retryCountRef.current++;
+          log('info', `Recovering from ended state (${retryCount + 1}/${MAX_RETRIES})...`);
+          setError(`Stream ended - reconnecting (${retryCount + 1}/${MAX_RETRIES})...`);
+
+          // Clear interval before cleanup
+          clearInterval(healthCheckIntervalRef.current);
+          healthCheckIntervalRef.current = null;
+
+          // Trigger recovery based on playback method
+          cleanupPlayer();
+          if (playbackMethod === 'mpegts-player') {
+            initializeMpegtsPlayer();
+          } else if (playbackMethod === 'hls-player') {
+            initializeClapprPlayer();
+          }
+        } else {
+          log('error', `Stream ended after ${MAX_RETRIES} recovery attempts`);
+          setError('Stream disconnected and cannot be recovered. Try another channel or refresh the page.');
+          clearInterval(healthCheckIntervalRef.current);
+          healthCheckIntervalRef.current = null;
+        }
+        return;
+      }
+
+      // Don't check if channel has changed
+      if (getChannelId() !== currentChannelIdRef.current) {
+        clearInterval(healthCheckIntervalRef.current);
+        healthCheckIntervalRef.current = null;
+        return;
+      }
+
+      const currentTime = videoEl.currentTime;
+      const lastKnownTime = lastKnownCurrentTimeRef.current;
+
+      // Check if video has progressed at all
+      if (currentTime === lastKnownTime && lastKnownTime > 0) {
+        // Video hasn't progressed - it's frozen
+        const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
+
+        if (timeSinceLastPlaying > 10000) { // Frozen for more than 10 seconds
+          log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`);
+
+          const MAX_RETRIES = 3;
+          const retryCount = retryCountRef.current;
+
+          if (retryCount < MAX_RETRIES) {
+            retryCountRef.current++;
+            log('info', `Recovering from freeze (${retryCount + 1}/${MAX_RETRIES})...`);
+            setError(`Stream frozen - recovering (${retryCount + 1}/${MAX_RETRIES})...`);
+
+            // Clear interval before cleanup
+            clearInterval(healthCheckIntervalRef.current);
+            healthCheckIntervalRef.current = null;
+
+            // Trigger recovery based on playback method
+            cleanupPlayer();
+            if (playbackMethod === 'mpegts-player') {
+              initializeMpegtsPlayer();
+            } else if (playbackMethod === 'hls-player') {
+              initializeClapprPlayer();
+            }
+          } else {
+            log('error', `Stream frozen after ${MAX_RETRIES} recovery attempts`);
+            setError('Stream is frozen and cannot be recovered. Try another channel or refresh the page.');
+            clearInterval(healthCheckIntervalRef.current);
+            healthCheckIntervalRef.current = null;
+          }
+        }
+      } else {
+        // Video is progressing normally - update last known time
+        lastKnownCurrentTimeRef.current = currentTime;
+        lastPlayingTimeRef.current = Date.now();
+      }
+    }, 5000); // Check every 5 seconds
+
+    log('info', 'Health check started');
   };
 
   // Initialize the appropriate player
@@ -281,10 +398,10 @@ const IPTVPlayer = ({
       log('error', 'Player container not available');
       return;
     }
-    
+
     setLoading(true);
     setError(null);
-    
+
     switch (playbackMethod) {
       case 'hls-player':
         initializeClapprPlayer();
@@ -564,6 +681,9 @@ const IPTVPlayer = ({
       videoEl.style.height = '100%';
       videoEl.controls = !theatreMode; // Hide controls in theatre mode
       containerRef.current.appendChild(videoEl);
+
+      // Store video element reference for health checks
+      videoElementRef.current = videoEl;
       
       if (window.mpegts.getFeatureList().mseLivePlayback) {
         const player = window.mpegts.createPlayer({
@@ -571,10 +691,16 @@ const IPTVPlayer = ({
           url: proxyTsUrl,
           isLive: true,
           enableStashBuffer: false,
-          // Add retry options
+          // Buffer management - increased for better handling
           liveBufferLatencyChasing: true,
-          maxBufferSize: 32 * 1024 * 1024, // 32MB
-          autoCleanupSourceBuffer: true
+          maxBufferSize: 64 * 1024 * 1024, // 64MB - increased from 32MB
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackBufferSize: 32 * 1024 * 1024, // Clean up old buffer
+          // Retry on error
+          enableWorker: false, // Disable worker to avoid threading issues
+          lazyLoad: false,
+          lazyLoadMaxDuration: 3 * 60, // 3 minutes
+          lazyLoadRecoverDuration: 30 // 30 seconds
         });
         
         player.attachMediaElement(videoEl);
@@ -643,12 +769,16 @@ const IPTVPlayer = ({
           setError(null);
           retryCountRef.current = 0; // Reset retry count on successful playback
           lastPlayingTimeRef.current = Date.now();
+          lastKnownCurrentTimeRef.current = videoEl.currentTime;
 
           // Clear stall timer when playing resumes
           if (stallTimerRef.current) {
             clearTimeout(stallTimerRef.current);
             stallTimerRef.current = null;
           }
+
+          // Start proactive health check
+          startHealthCheck();
         });
 
         videoEl.addEventListener('timeupdate', () => {
@@ -710,6 +840,39 @@ const IPTVPlayer = ({
           log('error', 'Video error', { error: videoEl.error });
           setError('Error playing video. Try another method or channel.');
           setLoading(false);
+        });
+
+        // Handle unexpected stream end for live streams
+        videoEl.addEventListener('ended', () => {
+          log('warn', 'Live stream ended unexpectedly - attempting recovery');
+
+          // Don't recover if channel has changed
+          if (getChannelId() !== currentChannelIdRef.current) {
+            log('info', 'Channel changed, ignoring stream end');
+            return;
+          }
+
+          const MAX_RETRIES = 3;
+          const retryCount = retryCountRef.current;
+
+          if (retryCount < MAX_RETRIES) {
+            retryCountRef.current++;
+            log('info', `Recovering from stream end (${retryCount + 1}/${MAX_RETRIES})...`);
+            setError(`Stream ended - reconnecting (${retryCount + 1}/${MAX_RETRIES})...`);
+
+            // Wait a moment before retrying
+            setTimeout(() => {
+              if (getChannelId() !== currentChannelIdRef.current) {
+                log('info', 'Channel changed during retry delay, aborting');
+                return;
+              }
+              cleanupPlayer();
+              initializeMpegtsPlayer();
+            }, 2000);
+          } else {
+            log('error', `Stream ended after ${MAX_RETRIES} recovery attempts`);
+            setError('Stream disconnected and cannot be recovered. Try another channel or refresh the page.');
+          }
         });
 
         player.play().catch(e => {
