@@ -1386,16 +1386,17 @@ router.get('/matched-channels-with-programs', async (req, res) => {
             continue;
           }
 
-          // Get programs for this channel (next 24 hours)
+          // Get programs for this channel (12 hours in the past to 48 hours in the future for guide view)
           const programsSql = `
             SELECT id, title, description, start, stop, channel_id
             FROM programs
             WHERE channel_id = ?
               AND start IS NOT NULL
               AND stop IS NOT NULL
-              AND stop > strftime('%Y%m%d%H%M%S +0000', 'now')
+              AND stop > strftime('%Y%m%d%H%M%S +0000', 'now', '-12 hours')
+              AND start < strftime('%Y%m%d%H%M%S +0000', 'now', '+48 hours')
             ORDER BY start
-            LIMIT 50
+            LIMIT 100
           `;
 
           const programs = await runQuery(programsSql, [epgChannelId]);
