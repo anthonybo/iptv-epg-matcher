@@ -59,6 +59,7 @@ function AppContent() {
     const lastCategoryFetch = window.lastCategoryFetchTime || 0;
     const lastMatchesFetch = window.lastMatchesFetchTime || 0;
     const CACHE_LIFETIME = 60000; // 1 minute
+    const MATCHES_CACHE_LIFETIME = 5 * 60 * 1000; // 5 minutes - reduced API calls from every 5s to 5min
 
     const loadDataIfNeeded = async () => {
       if (activeTab === 'channels' && sessionId) {
@@ -70,21 +71,22 @@ function AppContent() {
           }
         }
 
-        if (now - lastMatchesFetch > 5000) {
-          console.log('[App] Refreshing matched channels for channels view');
+        // Only fetch matches if cache is expired (5 minutes)
+        if (now - lastMatchesFetch > MATCHES_CACHE_LIFETIME) {
+          console.log('[App] Refreshing matched channels for channels view (cache expired)');
           window.lastMatchesFetchTime = now;
           await fetchMatchedChannels();
         }
       }
 
-      if (activeTab === 'guide' && now - lastMatchesFetch > 5000) {
-        console.log('[App] Refreshing matched channels for guide view');
+      if (activeTab === 'guide' && now - lastMatchesFetch > MATCHES_CACHE_LIFETIME) {
+        console.log('[App] Refreshing matched channels for guide view (cache expired)');
         window.lastMatchesFetchTime = now;
         await fetchMatchedChannels();
       }
 
-      if (activeTab === 'player' && now - lastMatchesFetch > 5000) {
-        console.log('[App] Refreshing matched channels for player view');
+      if (activeTab === 'player' && now - lastMatchesFetch > MATCHES_CACHE_LIFETIME) {
+        console.log('[App] Refreshing matched channels for player view (cache expired)');
         window.lastMatchesFetchTime = now;
         await fetchMatchedChannels();
       }

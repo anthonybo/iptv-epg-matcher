@@ -73,18 +73,19 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000); // Check every 30 minutes
 
-// Add cleanup timer to regularly force garbage collection
-let lastGcTime = Date.now();
-setInterval(() => {
-  const timeSinceLastGc = Date.now() - lastGcTime;
-  
-  // Enforce GC at least every 5 minutes
-  if (global.gc && timeSinceLastGc > 5 * 60 * 1000) {
-    logger.info('Performing scheduled garbage collection');
-    global.gc();
-    lastGcTime = Date.now();
-  }
-}, 60 * 1000); // Check every minute
+// DISABLED: Aggressive GC timer - Node.js handles GC automatically
+// This was checking every minute and forcing GC, causing performance issues
+// let lastGcTime = Date.now();
+// setInterval(() => {
+//   const timeSinceLastGc = Date.now() - lastGcTime;
+//
+//   // Enforce GC at least every 5 minutes
+//   if (global.gc && timeSinceLastGc > 5 * 60 * 1000) {
+//     logger.info('Performing scheduled garbage collection');
+//     global.gc();
+//     lastGcTime = Date.now();
+//   }
+// }, 60 * 1000); // Check every minute
 
 // Add this near the top of server.js
 if (process.env.NODE_ENV === 'production') {
@@ -534,8 +535,8 @@ function syncSessionSystems() {
 // Run sync immediately
 syncSessionSystems();
 
-// Set up periodic sync
-setInterval(syncSessionSystems, 30000); // Sync every 30 seconds
+// Set up periodic sync - reduced from 30s to 5 minutes for better performance
+setInterval(syncSessionSystems, 5 * 60 * 1000); // Sync every 5 minutes
 
 // Add the API events endpoint near the event bus listener for SSE
 // Set up the events endpoint for SSE
@@ -854,27 +855,28 @@ global.makeEpgDataAccessible = () => {
   return null;
 };
 
-// Run the data accessibility setup
+// DISABLED: These EPG scanners were causing 400%+ CPU usage by scanning the entire global object every minute
+// Run the data accessibility setup ONCE on startup only
 global.makeEpgDataAccessible();
 
-// Schedule periodic scan for EPG data
-setInterval(() => {
-  if (!global._directEpgAccess) {
-    global.makeEpgDataAccessible();
-  }
-}, 60000); // Check every minute
+// DISABLED: Periodic EPG scanner - was causing massive performance issues
+// setInterval(() => {
+//   if (!global._directEpgAccess) {
+//     global.makeEpgDataAccessible();
+//   }
+// }, 60000); // Check every minute
 
-// Set up EPG data finder - find any loaded EPG data and expose it
+// Set up EPG data finder - find any loaded EPG data and expose it ONCE on startup
 logger.info('Initializing EPG data finder');
 epgFinder.findAndExposeEpgData();
 
-// Set up periodic EPG data scanning every minute
-setInterval(() => {
-  if (!global._directEpgAccess) {
-    logger.info('Periodic EPG data scan triggered');
-    epgFinder.findAndExposeEpgData();
-  }
-}, 60000);
+// DISABLED: Second periodic EPG scanner - was duplicating work and causing CPU spikes
+// setInterval(() => {
+//   if (!global._directEpgAccess) {
+//     logger.info('Periodic EPG data scan triggered');
+//     epgFinder.findAndExposeEpgData();
+//   }
+// }, 60000);
 
 // Initialize database on startup
 (async () => {
