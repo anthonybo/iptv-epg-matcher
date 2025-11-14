@@ -46,7 +46,7 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-950 font-sans text-slate-100">
-      {isTheatreMode && (
+      {isTheatreMode && activeTab === 'player' && (
         <TheatreView
           sessionId={sessionId}
           selectedChannel={selectedChannel}
@@ -56,7 +56,8 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
         />
       )}
 
-      <header className="sticky top-0 z-40 flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
+      {!isTheatreMode && (
+        <header className="sticky top-0 z-40 flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -126,20 +127,23 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
           )}
         </div>
       </header>
+      )}
 
       <div className="flex flex-1">
-        <Sidebar
-          showSidebar={showSidebar}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          handleReset={handleReset}
-          totalChannels={totalChannels}
-          categoryCount={categories.length}
-          matchedChannelCount={Object.keys(matchedChannels).length}
-          totalMatchesCount={totalMatches}
-          epgSourceCount={epgSources.length}
-          userSourcesCount={userSources.length}
-        />
+        {!isTheatreMode && (
+          <Sidebar
+            showSidebar={showSidebar}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            handleReset={handleReset}
+            totalChannels={totalChannels}
+            categoryCount={categories.length}
+            matchedChannelCount={Object.keys(matchedChannels).length}
+            totalMatchesCount={totalMatches}
+            epgSourceCount={epgSources.length}
+            userSourcesCount={userSources.length}
+          />
+        )}
 
         <main className="flex-1 overflow-y-auto bg-slate-950">
           {children}
