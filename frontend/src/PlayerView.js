@@ -32,6 +32,7 @@ const PlayerView = ({
   const [currentFeedUrl, setCurrentFeedUrl] = useState(selectedChannel?.url);
   const [selectedFeed, setSelectedFeed] = useState(null);
   const [sourceName, setSourceName] = useState(null);
+  const [videoQuality, setVideoQuality] = useState(null);
 
   const playerButtonClasses = (type) => [
     'inline-flex items-center justify-center rounded-xl border p-2.5 transition',
@@ -45,6 +46,7 @@ const PlayerView = ({
       setCurrentChannel(selectedChannel);
       setCurrentFeedUrl(selectedChannel.url);
       setSelectedFeed(null); // Reset feed selection when channel changes
+      setVideoQuality(null); // Reset quality when channel changes
 
       // Set source name from channel data (comes from backend now)
       console.log('[PlayerView] Channel changed:', {
@@ -155,6 +157,17 @@ const PlayerView = ({
                   </svg>
                   <span>{sourceName || 'Unknown Source'}</span>
                 </span>
+                {videoQuality && (
+                  <>
+                    <span className="text-slate-600">•</span>
+                    <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500/20 px-2.5 py-1 text-emerald-200 border-2 border-emerald-500/40 font-semibold text-sm">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
+                      </svg>
+                      <span>{videoQuality.resolution}</span>
+                    </span>
+                  </>
+                )}
               </div>
             ) : (
               <span className="text-slate-400">No channel selected</span>
@@ -247,11 +260,12 @@ const PlayerView = ({
 
           <div className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-4 shadow-2xl shadow-slate-950/40">
             {selectedChannel && sessionId ? (
-              <IPTVPlayer 
+              <IPTVPlayer
                 sessionId={sessionId}
                 selectedChannel={selectedChannel}
                 playbackMethod={playerType}
                 matchedChannels={matchedChannels}
+                onQualityDetected={setVideoQuality}
               />
             ) : (
               <div className="flex h-96 flex-col items-center justify-center gap-4 rounded-2xl border border-slate-800 bg-slate-950 text-slate-500">

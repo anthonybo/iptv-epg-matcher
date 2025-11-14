@@ -25,6 +25,7 @@ const TheatreView = ({
   const [showEpgInfo, setShowEpgInfo] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [showGuide, setShowGuide] = useState(true);
+  const [videoQuality, setVideoQuality] = useState(null);
 
   const playerButtonClasses = (type) => [
     'inline-flex items-center gap-2 rounded-lg border px-2 py-1 text-xs font-semibold transition',

@@ -6,12 +6,13 @@ import CastButton from './components/CastButton';
 /**
  * Enhanced IPTVPlayer - Browser-compatible player for IPTV streams
  * With improved UI and toggleable info overlays for channel info and EPG data
- * 
+ *
  * @param {Object} props Component properties
  * @param {string} props.sessionId The current session ID
  * @param {Object} props.selectedChannel The selected channel object
  * @param {string} props.playbackMethod Which playback method to use
  * @param {Object} props.matchedChannels Object mapping channel IDs to matched EPG IDs
+ * @param {Function} props.onQualityDetected Callback when video quality is detected
  * @returns {JSX.Element} IPTVPlayer component
  */
 const IPTVPlayer = ({
@@ -22,7 +23,8 @@ const IPTVPlayer = ({
   theatreMode = false,
   showChannelInfo: externalShowChannelInfo,
   showEpgInfo: externalShowEpgInfo,
-  showDebug: externalShowDebug
+  showDebug: externalShowDebug,
+  onQualityDetected
 }) => {
   // Helper to get channel ID from either 'id' or 'tvgId' field
   // CRITICAL: Use 'id' first (IPTV channel ID like xtream_1111) not 'tvgId' (EPG hint like AnimalPlanet.us)
@@ -49,6 +51,7 @@ const IPTVPlayer = ({
   const [internalShowChannelInfo, setInternalShowChannelInfo] = useState(false);
   const [internalShowEpgInfo, setInternalShowEpgInfo] = useState(false);
   const [epgData, setEpgData] = useState(null);
+  const [videoQuality, setVideoQuality] = useState(null);
 
   // Use external state in theatre mode, internal state otherwise
   const showDebug = theatreMode && externalShowDebug !== undefined ? externalShowDebug : internalShowDebug;
@@ -475,6 +478,18 @@ const IPTVPlayer = ({
         }
       });
       
+      // Store video element reference when player is ready
+      playerInstanceRef.current.on(window.Clappr.Events.PLAYER_READY, () => {
+        try {
+          const videoEl = playerInstanceRef.current.core.activePlayback.el;
+          if (videoEl) {
+            videoElementRef.current = videoEl;
+          }
+        } catch (err) {
+          log('warn', 'Could not get video element for Clappr player', err);
+        }
+      });
+
       // Event listeners
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_PLAY, () => {
         log('info', 'Playback started');
@@ -487,6 +502,41 @@ const IPTVPlayer = ({
         if (stallTimerRef.current) {
           clearTimeout(stallTimerRef.current);
           stallTimerRef.current = null;
+        }
+
+        // Detect video quality - must do this on 'play' event for HLS streams
+        try {
+          const videoEl = videoElementRef.current;
+          if (videoEl) {
+            const height = videoEl.videoHeight;
+            const width = videoEl.videoWidth;
+            let quality = null;
+
+            if (height >= 2160) {
+              quality = '4K';
+            } else if (height >= 1440) {
+              quality = '2K';
+            } else if (height >= 1080) {
+              quality = '1080p';
+            } else if (height >= 720) {
+              quality = '720p';
+            } else if (height >= 480) {
+              quality = '480p';
+            } else if (height > 0) {
+              quality = `${height}p`;
+            }
+
+            if (quality) {
+              const qualityInfo = { resolution: quality, width, height };
+              log('info', `Video quality detected: ${quality} (${width}x${height})`);
+              setVideoQuality(qualityInfo);
+              if (onQualityDetected) {
+                onQualityDetected(qualityInfo);
+              }
+            }
+          }
+        } catch (err) {
+          log('warn', 'Could not detect video quality for Clappr player', err);
         }
       });
 
@@ -684,7 +734,7 @@ const IPTVPlayer = ({
 
       // Store video element reference for health checks
       videoElementRef.current = videoEl;
-      
+
       if (window.mpegts.getFeatureList().mseLivePlayback) {
         const player = window.mpegts.createPlayer({
           type: 'mse',
@@ -775,6 +825,34 @@ const IPTVPlayer = ({
           if (stallTimerRef.current) {
             clearTimeout(stallTimerRef.current);
             stallTimerRef.current = null;
+          }
+
+          // Detect video quality - must do this on 'playing' event for HLS/MPEG-TS streams
+          const height = videoEl.videoHeight;
+          const width = videoEl.videoWidth;
+          let quality = null;
+
+          if (height >= 2160) {
+            quality = '4K';
+          } else if (height >= 1440) {
+            quality = '2K';
+          } else if (height >= 1080) {
+            quality = '1080p';
+          } else if (height >= 720) {
+            quality = '720p';
+          } else if (height >= 480) {
+            quality = '480p';
+          } else if (height > 0) {
+            quality = `${height}p`;
+          }
+
+          if (quality) {
+            const qualityInfo = { resolution: quality, width, height };
+            log('info', `Video quality detected: ${quality} (${width}x${height})`);
+            setVideoQuality(qualityInfo);
+            if (onQualityDetected) {
+              onQualityDetected(qualityInfo);
+            }
           }
 
           // Start proactive health check
