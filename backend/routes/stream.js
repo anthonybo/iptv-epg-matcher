@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
+const http = require('http');
+const https = require('https');
 const { getSession } = require('../utils/storageUtils');
 const logger = require('../config/logger');
 const sessionStorage = require('../utils/sessionStorage');
@@ -11,6 +13,26 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+// Connection pooling agents for efficient HTTP/HTTPS requests
+// This prevents opening too many concurrent connections and reuses existing ones
+const httpAgent = new http.Agent({
+  keepAlive: true,           // Reuse connections
+  maxSockets: 10,            // Max 10 concurrent connections per host
+  maxFreeSockets: 5,         // Keep 5 idle connections ready for reuse
+  timeout: 60000,            // 60 second timeout
+  keepAliveMsecs: 30000      // Send keep-alive packets every 30s
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 10,
+  maxFreeSockets: 5,
+  timeout: 60000,
+  keepAliveMsecs: 30000
+});
+
+logger.info('HTTP/HTTPS connection pooling enabled (maxSockets: 10, keepAlive: true)');
 
 /**
  * GET /:sessionId/:channelId
@@ -191,7 +213,8 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                             'X-User-Agent': 'Model: MAG250; Link: WiFi',
                             'Cookie': `mac=${channelWithSource.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
                         },
-                        timeout: 10000
+                        timeout: 10000,
+                        agent: channel.url.startsWith('https') ? httpsAgent : httpAgent
                     });
 
                     if (createLinkResponse.ok) {
@@ -269,7 +292,8 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                     timeout: 5000,
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
-                    }
+                    },
+                    agent: streamUrl.startsWith('https') ? httpsAgent : httpAgent
                 });
                 
                 if (!testResponse.ok) {
@@ -325,6 +349,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
                 },
                 timeout: 60000, // Increase timeout to 60 seconds
+                agent: streamUrl.startsWith('https') ? httpsAgent : httpAgent
             });
             
             if (!streamResponse.ok) {
@@ -471,7 +496,8 @@ router.get('/xtream/:sessionId/:type/:id', async (req, res) => {
                 method: 'GET',
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
-                }
+                },
+                agent: xtreamUrl.startsWith('https') ? httpsAgent : httpAgent
             });
             
             if (!streamResponse.ok) {
@@ -691,7 +717,8 @@ router.get('/:sessionId/:channelId/hls.m3u8', authMiddleware, async (req, res) =
 
       const streamInfoResp = await fetch(streamInfoUrl, {
         redirect: 'manual',
-        headers: req.headers
+        headers: req.headers,
+        agent: streamInfoUrl.startsWith('https') ? httpsAgent : httpAgent
       });
 
       const streamUrl = streamInfoResp.headers.get('location') || streamInfoResp.url;
