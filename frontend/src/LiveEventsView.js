@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import apiClient from './utils/apiClient';
 import IPTVPlayer from './IPTVPlayer';
+import VideoQualityBadge from './components/VideoQualityBadge';
 
 /**
  * LiveEventsView - Displays all live sports events for today
@@ -18,6 +19,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
   const [showSidePanel, setShowSidePanel] = useState(false);
   const [pipChannel, setPipChannel] = useState(null);
   const [showPipPlayer, setShowPipPlayer] = useState(false);
+  const [pipVideoQuality, setPipVideoQuality] = useState(null);
   const [autoTesting, setAutoTesting] = useState(false);
   const [currentTestIndex, setCurrentTestIndex] = useState(0);
   const autoTestTimerRef = React.useRef(null);
@@ -188,6 +190,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       sourcePassword: channel.source_password,
       sourceMac: channel.source_mac
     });
+    setPipVideoQuality(null); // Reset quality when changing channels
     setShowPipPlayer(true);
   };
 
@@ -203,6 +206,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     cleanupErrorListener();
     setShowPipPlayer(false);
     setPipChannel(null);
+    setPipVideoQuality(null); // Reset quality
     setAutoTesting(false);
     autoTestingRef.current = false;
     isAdvancingRef.current = false;
@@ -232,6 +236,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       sourcePassword: firstChannel.source_password,
       sourceMac: firstChannel.source_mac
     });
+    setPipVideoQuality(null); // Reset quality when starting auto-test
 
     // Set up error listener
     setupErrorListener();
@@ -298,6 +303,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       sourcePassword: nextChannel.source_password,
       sourceMac: nextChannel.source_mac
     });
+    setPipVideoQuality(null); // Reset quality when advancing to next channel
 
     // Reset advancing flag after a short delay
     setTimeout(() => {
@@ -342,25 +348,25 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
 
       // Check if this is an mpegts player error
       const errorString = args.join(' ');
-      if (errorString.includes('[ERROR] mpegts player error') ||
-          errorString.includes('HttpStatusCodeInvalid') ||
-          errorString.includes('NetworkError') ||
-          errorString.includes('404') ||
-          errorString.includes('403')) {
+      const isError = errorString.includes('[ERROR] mpegts player error') ||
+                     errorString.includes('HttpStatusCodeInvalid') ||
+                     errorString.includes('NetworkError') ||
+                     errorString.includes('Failed to fetch') ||
+                     errorString.includes('404') ||
+                     errorString.includes('403');
 
+      if (isError) {
         // Only auto-advance if we're still auto-testing (use ref for current value)
         if (autoTestingRef.current && !isAdvancingRef.current) {
-          // Clear any existing debounce timer
-          if (errorDebounceRef.current) {
-            clearTimeout(errorDebounceRef.current);
+          // In auto-test mode, skip immediately on first error - no retries needed
+          // Only advance once (debounce prevents multiple errors from same channel triggering multiple advances)
+          if (!errorDebounceRef.current) {
+            console.log('[Auto-Test] Stream error detected, moving to next channel immediately...');
+            errorDebounceRef.current = setTimeout(() => {
+              errorDebounceRef.current = null;
+              handleNextChannel();
+            }, 500); // Small delay to ensure error is fully processed
           }
-
-          // Debounce errors - only advance after 300ms of no new errors
-          // This prevents multiple errors from same channel from triggering multiple advances
-          errorDebounceRef.current = setTimeout(() => {
-            console.log('[Auto-Test] Error detected, moving to next channel...');
-            handleNextChannel();
-          }, 300);
         }
       }
     };
@@ -808,9 +814,12 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
         <div className="fixed bottom-4 right-4 z-50 w-[500px] rounded-xl border border-slate-800 bg-slate-900 shadow-2xl overflow-hidden">
           <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950 px-3 py-2">
             <div className="flex-1 min-w-0">
-              <p className="truncate text-sm font-medium text-slate-200">
-                {pipChannel.name}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="truncate text-sm font-medium text-slate-200">
+                  {pipChannel.name}
+                </p>
+                <VideoQualityBadge quality={pipVideoQuality} size="sm" />
+              </div>
               {autoTesting && (
                 <p className="text-xs text-purple-400">
                   Testing {currentTestIndex + 1} of {matchingChannels.length}
@@ -854,15 +863,11 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
           <div className="rounded-lg" style={{ minHeight: '300px' }}>
             <IPTVPlayer
               sessionId={sessionId}
-              selectedChannel={{
-                id: pipChannel.id,
-                name: pipChannel.name,
-                logo: pipChannel.logo,
-                url: pipChannel.url
-              }}
+              selectedChannel={pipChannel}
               playbackMethod="mpegts-player"
               matchedChannels={{}}
               theatreMode={false}
+              onQualityDetected={setPipVideoQuality}
             />
           </div>
         </div>

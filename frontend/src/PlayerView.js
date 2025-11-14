@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import IPTVPlayer from './IPTVPlayer';
 import EPGMatcher from './EPGMatcher';
 import FeedSelector from './components/FeedSelector/FeedSelector';
+import VideoQualityBadge from './components/VideoQualityBadge';
 
 /**
  * PlayerView component that combines the video player and EPG matcher
@@ -157,17 +158,7 @@ const PlayerView = ({
                   </svg>
                   <span>{sourceName || 'Unknown Source'}</span>
                 </span>
-                {videoQuality && (
-                  <>
-                    <span className="text-slate-600">•</span>
-                    <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500/20 px-2.5 py-1 text-emerald-200 border-2 border-emerald-500/40 font-semibold text-sm">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
-                      </svg>
-                      <span>{videoQuality.resolution}</span>
-                    </span>
-                  </>
-                )}
+                <VideoQualityBadge quality={videoQuality} showSeparator={true} />
               </div>
             ) : (
               <span className="text-slate-400">No channel selected</span>
