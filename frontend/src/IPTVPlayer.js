@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { addAuthToStreamUrl } from './utils/streamAuth';
+import { detectVideoQuality } from './utils/videoQuality';
 import { useCast } from './hooks/useCast';
 import CastButton from './components/CastButton';
 
@@ -490,6 +491,28 @@ const IPTVPlayer = ({
         }
       });
 
+      // Helper function to detect and report quality for Clappr
+      const detectQualityClappr = (eventType = 'check') => {
+        try {
+          const videoEl = videoElementRef.current;
+          if (!videoEl) {
+            return;
+          }
+
+          const qualityInfo = detectVideoQuality(videoEl.videoWidth, videoEl.videoHeight);
+
+          if (qualityInfo) {
+            log('info', `Video quality detected (${eventType}): ${qualityInfo.resolution} (${qualityInfo.width}x${qualityInfo.height})`);
+            setVideoQuality(qualityInfo);
+            if (onQualityDetected) {
+              onQualityDetected(qualityInfo);
+            }
+          }
+        } catch (err) {
+          log('warn', 'Could not detect video quality for Clappr player', err);
+        }
+      };
+
       // Event listeners
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_PLAY, () => {
         log('info', 'Playback started');
@@ -504,39 +527,15 @@ const IPTVPlayer = ({
           stallTimerRef.current = null;
         }
 
-        // Detect video quality - must do this on 'play' event for HLS streams
-        try {
-          const videoEl = videoElementRef.current;
-          if (videoEl) {
-            const height = videoEl.videoHeight;
-            const width = videoEl.videoWidth;
-            let quality = null;
+        // Detect initial video quality
+        detectQualityClappr('playing');
 
-            if (height >= 2160) {
-              quality = '4K';
-            } else if (height >= 1440) {
-              quality = '2K';
-            } else if (height >= 1080) {
-              quality = '1080p';
-            } else if (height >= 720) {
-              quality = '720p';
-            } else if (height >= 480) {
-              quality = '480p';
-            } else if (height > 0) {
-              quality = `${height}p`;
-            }
-
-            if (quality) {
-              const qualityInfo = { resolution: quality, width, height };
-              log('info', `Video quality detected: ${quality} (${width}x${height})`);
-              setVideoQuality(qualityInfo);
-              if (onQualityDetected) {
-                onQualityDetected(qualityInfo);
-              }
-            }
-          }
-        } catch (err) {
-          log('warn', 'Could not detect video quality for Clappr player', err);
+        // Listen for resolution changes (adaptive bitrate streams)
+        const videoEl = videoElementRef.current;
+        if (videoEl) {
+          videoEl.addEventListener('resize', () => {
+            detectQualityClappr('resize');
+          });
         }
       });
 
@@ -813,6 +812,19 @@ const IPTVPlayer = ({
 
         player.load();
 
+        // Helper function to detect and report quality
+        const detectQualityMpegts = (eventType = 'check') => {
+          const qualityInfo = detectVideoQuality(videoEl.videoWidth, videoEl.videoHeight);
+
+          if (qualityInfo) {
+            log('info', `Video quality detected (${eventType}): ${qualityInfo.resolution} (${qualityInfo.width}x${qualityInfo.height})`);
+            setVideoQuality(qualityInfo);
+            if (onQualityDetected) {
+              onQualityDetected(qualityInfo);
+            }
+          }
+        };
+
         videoEl.addEventListener('playing', () => {
           log('info', 'Video playing');
           setLoading(false);
@@ -827,36 +839,16 @@ const IPTVPlayer = ({
             stallTimerRef.current = null;
           }
 
-          // Detect video quality - must do this on 'playing' event for HLS/MPEG-TS streams
-          const height = videoEl.videoHeight;
-          const width = videoEl.videoWidth;
-          let quality = null;
-
-          if (height >= 2160) {
-            quality = '4K';
-          } else if (height >= 1440) {
-            quality = '2K';
-          } else if (height >= 1080) {
-            quality = '1080p';
-          } else if (height >= 720) {
-            quality = '720p';
-          } else if (height >= 480) {
-            quality = '480p';
-          } else if (height > 0) {
-            quality = `${height}p`;
-          }
-
-          if (quality) {
-            const qualityInfo = { resolution: quality, width, height };
-            log('info', `Video quality detected: ${quality} (${width}x${height})`);
-            setVideoQuality(qualityInfo);
-            if (onQualityDetected) {
-              onQualityDetected(qualityInfo);
-            }
-          }
+          // Detect initial video quality
+          detectQualityMpegts('playing');
 
           // Start proactive health check
           startHealthCheck();
+        });
+
+        // Listen for resolution changes (adaptive bitrate streams)
+        videoEl.addEventListener('resize', () => {
+          detectQualityMpegts('resize');
         });
 
         videoEl.addEventListener('timeupdate', () => {
