@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import IPTVPlayer from '../../IPTVPlayer';
+import VideoQualityBadge from '../VideoQualityBadge';
 
 /**
  * PiPPlayer - Picture-in-Picture video player for channel preview
@@ -11,6 +12,12 @@ import IPTVPlayer from '../../IPTVPlayer';
  */
 const PiPPlayer = ({ channel, sessionId, onClose }) => {
   const [isMinimized, setIsMinimized] = useState(false);
+  const [videoQuality, setVideoQuality] = useState(null);
+
+  // Reset quality when channel changes
+  useEffect(() => {
+    setVideoQuality(null);
+  }, [channel?.id]);
 
   if (!channel) return null;
 
@@ -40,6 +47,7 @@ const PiPPlayer = ({ channel, sessionId, onClose }) => {
               <span className="text-xs font-medium text-slate-200 truncate">
                 {channel.name}
               </span>
+              <VideoQualityBadge quality={videoQuality} size="sm" />
             </div>
             <div className="flex items-center gap-1 flex-shrink-0">
               {/* Minimize button */}
@@ -109,6 +117,7 @@ const PiPPlayer = ({ channel, sessionId, onClose }) => {
                 playbackMethod="mpegts-player"
                 matchedChannels={{}}
                 theatreMode={true}
+                onQualityDetected={setVideoQuality}
               />
             </div>
           </div>

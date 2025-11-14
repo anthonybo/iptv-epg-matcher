@@ -6,6 +6,7 @@ import ChannelCard from './ChannelCard';
 import ChannelTable from './ChannelTable';
 import PiPPlayer from './PiPPlayer';
 import IPTVPlayer from '../../IPTVPlayer';
+import VideoQualityBadge from '../VideoQualityBadge';
 
 /**
  * ChannelsView - Main view for browsing and filtering channels
@@ -152,18 +153,19 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
           logString.includes('Bad Gateway')) {
 
         if (autoTestingRef.current && !isAdvancingRef.current) {
-          if (errorDebounceRef.current) {
-            clearTimeout(errorDebounceRef.current);
-          }
-
-          errorDebounceRef.current = setTimeout(() => {
+          // In auto-test mode, skip immediately on first error - no retries needed
+          // Only advance once (debounce prevents multiple errors from same channel triggering multiple advances)
+          if (!errorDebounceRef.current) {
             if (originalConsoleLogRef.current) {
-              originalConsoleLogRef.current('[Auto-Test] Error detected, moving to next channel...');
+              originalConsoleLogRef.current('[Auto-Test] Stream error detected, moving to next channel immediately...');
             }
-            if (handleNextChannelRef.current) {
-              handleNextChannelRef.current();
-            }
-          }, 300);
+            errorDebounceRef.current = setTimeout(() => {
+              errorDebounceRef.current = null;
+              if (handleNextChannelRef.current) {
+                handleNextChannelRef.current();
+              }
+            }, 500); // Small delay to ensure error is fully processed
+          }
         }
       }
     };
@@ -641,6 +643,12 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
 // Auto-Test PiP Player Component
 const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, onSkip, onStop, isActive, foundWorking = false }) => {
   const [isMinimized, setIsMinimized] = React.useState(false);
+  const [videoQuality, setVideoQuality] = React.useState(null);
+
+  // Reset quality when channel changes
+  React.useEffect(() => {
+    setVideoQuality(null);
+  }, [channel?.id]);
 
   if (!channel) return null;
 
@@ -669,8 +677,11 @@ const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, on
                   />
                 )}
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium text-slate-200 truncate">
-                    {channel.name}
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs font-medium text-slate-200 truncate">
+                      {channel.name}
+                    </div>
+                    <VideoQualityBadge quality={videoQuality} size="sm" />
                   </div>
                   <div className={`text-xs ${isActive ? 'text-purple-400' : foundWorking ? 'text-green-400' : 'text-slate-400'}`}>
                     {isActive ? `Testing ${currentIndex + 1} of ${totalChannels}` : foundWorking ? '✓ Working channel' : 'Reached end'}
@@ -757,6 +768,7 @@ const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, on
                 playbackMethod="mpegts-player"
                 matchedChannels={{}}
                 theatreMode={true}
+                onQualityDetected={setVideoQuality}
               />
             </div>
           </div>
