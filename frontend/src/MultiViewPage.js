@@ -58,7 +58,17 @@ const MultiViewPage = ({ sessionId }) => {
 
   const handleRemoveStream = (id, sourceId) => {
     removeFromMultiview(id, sourceId);
-    loadStreams();
+    // Update state directly instead of reloading from localStorage
+    // This prevents other streams from stopping and restarting
+    setStreams(prevStreams => prevStreams.filter(
+      stream => !(stream.id === id && stream.sourceId === sourceId)
+    ));
+    // Also remove quality data for the removed stream
+    const streamKey = `${sourceId}_${id}`;
+    setStreamQualities(prev => {
+      const { [streamKey]: removed, ...rest } = prev;
+      return rest;
+    });
   };
 
   const handleClearAll = () => {
