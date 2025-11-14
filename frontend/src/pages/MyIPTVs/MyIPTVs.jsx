@@ -5,7 +5,7 @@ import Configuration from '../../Configuration';
 /**
  * Source card component
  */
-const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo, onEditCredentials }) => {
+const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo, onEditCredentials, refreshStatus }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [nickname, setNickname] = useState(source.nickname || source.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -60,6 +60,34 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
 
   return (
     <div className="group relative rounded-xl border border-slate-700 bg-slate-800/50 p-5 hover:border-slate-600 hover:bg-slate-800/70 transition-all">
+      {/* Refresh Status Badge */}
+      {refreshStatus && (
+        <div className="absolute -top-2 -right-2 z-10">
+          {refreshStatus === 'loading' && (
+            <div className="flex items-center justify-center w-8 h-8 rounded-full bg-blue-500 border-2 border-slate-900 shadow-lg">
+              <svg className="w-4 h-4 animate-spin text-white" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
+          )}
+          {refreshStatus === 'success' && (
+            <div className="flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500 border-2 border-slate-900 shadow-lg animate-bounce">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+          )}
+          {refreshStatus === 'error' && (
+            <div className="flex items-center justify-center w-8 h-8 rounded-full bg-red-500 border-2 border-slate-900 shadow-lg animate-pulse">
+              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Source icon */}
       <div className="mb-3 inline-flex items-center justify-center w-12 h-12 rounded-xl bg-blue-500/20 text-blue-300">
         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -384,6 +412,7 @@ const MyIPTVs = ({
   const [notification, setNotification] = useState(null);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
+  const [sourceRefreshStatus, setSourceRefreshStatus] = useState({}); // Track status per source: { sourceId: 'loading' | 'success' | 'error' }
 
   // Load sources on mount
   useEffect(() => {
@@ -467,21 +496,53 @@ const MyIPTVs = ({
     setIsRefreshingAll(true);
     setRefreshProgress({ current: 0, total: sources.length });
 
+    // Initialize all sources as loading
+    const initialStatus = {};
+    sources.forEach(source => {
+      initialStatus[source.id] = 'loading';
+    });
+    setSourceRefreshStatus(initialStatus);
+
+    const startTime = Date.now();
+
+    // Refresh all sources in parallel using Promise.allSettled
+    const refreshPromises = sources.map(async (source) => {
+      try {
+        const result = await iptvSourcesService.refreshAccountInfo(source.id);
+
+        // Update status to success
+        setSourceRefreshStatus(prev => ({ ...prev, [source.id]: 'success' }));
+        setRefreshProgress(prev => ({ ...prev, current: prev.current + 1 }));
+
+        return { sourceId: source.id, status: 'success', result };
+      } catch (err) {
+        console.error(`Error refreshing source ${source.id}:`, err);
+
+        // Update status to error
+        setSourceRefreshStatus(prev => ({ ...prev, [source.id]: 'error' }));
+        setRefreshProgress(prev => ({ ...prev, current: prev.current + 1 }));
+
+        return { sourceId: source.id, status: 'error', error: err.message };
+      }
+    });
+
+    // Wait for all refreshes to complete
+    const results = await Promise.allSettled(refreshPromises);
+
+    const endTime = Date.now();
+    const duration = ((endTime - startTime) / 1000).toFixed(1);
+
+    // Count successes and failures
     let successCount = 0;
     let failCount = 0;
 
-    for (let i = 0; i < sources.length; i++) {
-      const source = sources[i];
-      setRefreshProgress({ current: i + 1, total: sources.length });
-
-      try {
-        await iptvSourcesService.refreshAccountInfo(source.id);
+    results.forEach(result => {
+      if (result.status === 'fulfilled' && result.value.status === 'success') {
         successCount++;
-      } catch (err) {
-        console.error(`Error refreshing source ${source.id}:`, err);
+      } else {
         failCount++;
       }
-    }
+    });
 
     // Reload sources to get updated data
     await loadSources();
@@ -490,12 +551,15 @@ const MyIPTVs = ({
     setIsRefreshingAll(false);
     setRefreshProgress({ current: 0, total: 0 });
 
-    // Show final summary
+    // Show final summary with timing
     setNotification({
       type: failCount === 0 ? 'success' : 'warning',
-      message: `Refresh complete! ${successCount} succeeded, ${failCount} failed.`
+      message: `Refresh complete in ${duration}s! ${successCount} succeeded${failCount > 0 ? `, ${failCount} failed` : ''}.`
     });
-    setTimeout(() => setNotification(null), 5000);
+    setTimeout(() => {
+      setNotification(null);
+      setSourceRefreshStatus({}); // Clear status indicators
+    }, 8000);
   };
 
   const handleEditCredentials = async (sourceId, credentials) => {
@@ -665,6 +729,7 @@ const MyIPTVs = ({
               onViewChannels={handleViewChannels}
               onRefreshAccountInfo={handleRefreshAccountInfo}
               onEditCredentials={handleEditCredentials}
+              refreshStatus={sourceRefreshStatus[source.id]}
             />
           ))}
         </div>
