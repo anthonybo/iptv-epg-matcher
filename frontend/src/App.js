@@ -4,6 +4,7 @@ import { useAppSession } from './hooks/useAppSession';
 import { useAppEPG } from './hooks/useAppEPG';
 import { useAppChannels } from './hooks/useAppChannels';
 import { AppLayout } from './components/layout/AppLayout';
+import { ToastContainer } from './components/Toast';
 import Configuration from './Configuration';
 import ChannelsView from './components/ChannelsView';
 import PlayerView from './PlayerView';
@@ -11,6 +12,7 @@ import ResultView from './ResultView';
 import GuideView from './GuideView';
 import IPTVEditor from './IPTVEditor';
 import LiveEventsView from './LiveEventsView';
+import MultiViewPage from './MultiViewPage';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
 import iptvSourcesService from './services/iptvSourcesService';
@@ -170,7 +172,8 @@ function AppContent() {
                 sourceUrl: channel.source_url,
                 sourceUsername: channel.source_username,
                 sourcePassword: channel.source_password,
-                sourceMac: channel.source_mac
+                sourceMac: channel.source_mac,
+                sourceName: channel.source_name
               });
               setActiveTab('player');
             }}
@@ -283,6 +286,9 @@ function AppContent() {
           </div>
         );
 
+      case 'multiview':
+        return <MultiViewPage sessionId={sessionId} />;
+
       default:
         setActiveTab('myiptvs');
         return null;
@@ -304,6 +310,7 @@ function App() {
   return (
     <AppProvider>
       <AppContent />
+      <ToastContainer />
     </AppProvider>
   );
 }

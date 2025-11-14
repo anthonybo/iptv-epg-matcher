@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import apiClient from './utils/apiClient';
 import IPTVPlayer from './IPTVPlayer';
 import VideoQualityBadge from './components/VideoQualityBadge';
+import { addToMultiview, getMultiviewStreams } from './utils/multiviewManager';
+import { showToast } from './components/Toast';
 
 /**
  * LiveEventsView - Displays all live sports events for today
@@ -32,6 +34,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
   const isAdvancingRef = React.useRef(false);
   const [selectedSports, setSelectedSports] = useState(new Set());
   const [selectedLeagues, setSelectedLeagues] = useState(new Set());
+  const [multiviewUpdateTrigger, setMultiviewUpdateTrigger] = useState(0);
 
   // Get unique sports and leagues with counts
   const getAvailableSports = () => {
@@ -188,7 +191,11 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       sourceUrl: channel.source_url,
       sourceUsername: channel.source_username,
       sourcePassword: channel.source_password,
-      sourceMac: channel.source_mac
+      sourceMac: channel.source_mac,
+      sourceName: channel.source_name,
+      // Include ESPN event data for reliable matching
+      espnEventId: selectedEvent?.event_id,
+      espnEventName: selectedEvent?.event_name
     });
     setPipVideoQuality(null); // Reset quality when changing channels
     setShowPipPlayer(true);
@@ -247,7 +254,11 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       sourceUrl: firstChannel.source_url,
       sourceUsername: firstChannel.source_username,
       sourcePassword: firstChannel.source_password,
-      sourceMac: firstChannel.source_mac
+      sourceMac: firstChannel.source_mac,
+      sourceName: firstChannel.source_name,
+      // Include ESPN event data for reliable matching
+      espnEventId: selectedEvent?.event_id,
+      espnEventName: selectedEvent?.event_name
     });
     setPipVideoQuality(null); // Reset quality when starting auto-test
 
@@ -314,7 +325,11 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       sourceUrl: nextChannel.source_url,
       sourceUsername: nextChannel.source_username,
       sourcePassword: nextChannel.source_password,
-      sourceMac: nextChannel.source_mac
+      sourceMac: nextChannel.source_mac,
+      sourceName: nextChannel.source_name,
+      // Include ESPN event data for reliable matching
+      espnEventId: selectedEvent?.event_id,
+      espnEventName: selectedEvent?.event_name
     });
     setPipVideoQuality(null); // Reset quality when advancing to next channel
 
@@ -344,6 +359,25 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     autoTestingRef.current = false;
     isAdvancingRef.current = false;
   };
+
+  const handleAddToMultiview = () => {
+    if (!pipChannel) return;
+
+    addToMultiview(pipChannel);
+    window.dispatchEvent(new Event('multiviewUpdate'));
+    showToast(`Added "${pipChannel.name}" to Multi-View`, 'success');
+  };
+
+  // Check if ANY stream from the same source is in multiview
+  // This value is computed based on multiviewUpdateTrigger to force re-render
+  const isInMultiview = React.useMemo(() => {
+    if (!pipChannel) return false;
+    const multiviewStreams = getMultiviewStreams();
+    // Check if any stream from the same source (by sourceId) is in multiview
+    return multiviewStreams.some(
+      stream => stream.sourceId === pipChannel.sourceId
+    );
+  }, [pipChannel, multiviewUpdateTrigger]);
 
   const setupErrorListener = () => {
     // Clean up any existing listener
@@ -410,6 +444,21 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     };
   }, []);
 
+  // Listen for multiview updates to refresh badge colors
+  useEffect(() => {
+    const handleMultiviewUpdate = () => {
+      setMultiviewUpdateTrigger(prev => prev + 1);
+    };
+
+    window.addEventListener('multiviewUpdate', handleMultiviewUpdate);
+    window.addEventListener('storage', handleMultiviewUpdate);
+
+    return () => {
+      window.removeEventListener('multiviewUpdate', handleMultiviewUpdate);
+      window.removeEventListener('storage', handleMultiviewUpdate);
+    };
+  }, []);
+
   const formatTime = (isoString) => {
     const date = new Date(isoString);
     return date.toLocaleTimeString('en-US', {
@@ -460,50 +509,75 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     return 'bg-slate-500/20 text-slate-300';
   };
 
-  const EventCard = ({ event, isLive }) => (
-    <button
-      onClick={() => handleEventClick(event)}
-      className={`w-full rounded-xl border p-4 text-left transition-all hover:scale-[1.02] hover:shadow-lg ${
-        isLive
-          ? 'border-green-500/30 bg-green-500/5 hover:border-green-500/50'
-          : 'border-slate-800/70 bg-slate-950/40 hover:border-slate-700'
-      }`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="rounded-md bg-slate-800/80 px-2 py-0.5 text-xs font-semibold text-slate-300">
-              {event.sport_type}
-            </span>
-            <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${getLeagueColor(event.league_name)}`}>
-              {event.league_name}
-            </span>
-            {isLive && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2.5 py-0.5 text-xs font-medium text-green-300">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-green-400"></span>
-                LIVE
+  // Check if event has any channels in multiview (depends on multiviewUpdateTrigger for reactivity)
+  const isEventInMultiview = (eventId) => {
+    const multiviewStreams = getMultiviewStreams();
+
+    // Check if any stream in multiview has matching ESPN event ID
+    return multiviewStreams.some(stream => {
+      return stream.espnEventId === eventId;
+    });
+  };
+
+  const EventCard = ({ event, isLive }) => {
+    // Use multiviewUpdateTrigger to force re-render when multiview changes
+    const inMultiview = React.useMemo(() => {
+      return isEventInMultiview(event.event_id);
+    }, [event.event_id, multiviewUpdateTrigger]);
+
+    const borderColor = inMultiview
+      ? 'border-red-500/30 bg-red-500/5 hover:border-red-500/50'
+      : isLive
+        ? 'border-green-500/30 bg-green-500/5 hover:border-green-500/50'
+        : 'border-slate-800/70 bg-slate-950/40 hover:border-slate-700';
+
+    return (
+      <button
+        onClick={() => handleEventClick(event)}
+        className={`w-full rounded-xl border p-4 text-left transition-all hover:scale-[1.02] hover:shadow-lg ${borderColor}`}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="rounded-md bg-slate-800/80 px-2 py-0.5 text-xs font-semibold text-slate-300">
+                {event.sport_type}
               </span>
-            )}
-          </div>
-          <h3 className="mb-1 text-base font-semibold text-slate-100">
-            {event.event_name}
-          </h3>
-          <div className="flex items-center gap-3 text-sm text-slate-400">
-            <div className="flex items-center gap-1.5">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="10" />
-                <polyline points="12 6 12 12 16 14" />
-              </svg>
-              <span>{formatDate(event.event_start)} at {formatTime(event.event_start)}</span>
+              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${getLeagueColor(event.league_name)}`}>
+                {event.league_name}
+              </span>
+              {inMultiview && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-red-500/20 px-2.5 py-0.5 text-xs font-medium text-red-300">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-400"></span>
+                  ACTIVE
+                </span>
+              )}
+              {isLive && !inMultiview && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2.5 py-0.5 text-xs font-medium text-green-300">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-green-400"></span>
+                  LIVE
+                </span>
+              )}
+            </div>
+            <h3 className="mb-1 text-base font-semibold text-slate-100">
+              {event.event_name}
+            </h3>
+            <div className="flex items-center gap-3 text-sm text-slate-400">
+              <div className="flex items-center gap-1.5">
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                <span>{formatDate(event.event_start)} at {formatTime(event.event_start)}</span>
+              </div>
             </div>
           </div>
+          <svg className="h-5 w-5 flex-shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M9 18l6-6-6-6" />
+          </svg>
         </div>
-        <svg className="h-5 w-5 flex-shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M9 18l6-6-6-6" />
-        </svg>
-      </div>
-    </button>
-  );
+      </button>
+    );
+  };
 
   if (loading) {
     return (
@@ -781,9 +855,30 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
                           </div>
                         )}
                         <div className="flex-1 min-w-0">
-                          <p className="font-medium text-slate-200 break-words">
-                            {channel.name}
-                          </p>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-medium text-slate-200 break-words">
+                              {channel.name}
+                            </p>
+                            {channel.source_name && (
+                              <span
+                                className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 border text-[10px] font-semibold flex-shrink-0 ${
+                                  getMultiviewStreams().some(stream => stream.sourceId === channel.source_id)
+                                    ? 'bg-red-500/20 text-red-200 border-red-500/40'
+                                    : 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40'
+                                }`}
+                                title={`IPTV Source: ${channel.source_name}${
+                                  getMultiviewStreams().some(stream => stream.sourceId === channel.source_id)
+                                    ? ' (Active in Multi-View)'
+                                    : ''
+                                }`}
+                              >
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                                </svg>
+                                <span className="truncate max-w-[80px]">{channel.source_name}</span>
+                              </span>
+                            )}
+                          </div>
                           {channel.category && (
                             <p className="text-xs text-slate-500 break-words">
                               {channel.category}
@@ -847,6 +942,21 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
                 <p className="truncate text-sm font-medium text-slate-200">
                   {pipChannel.name}
                 </p>
+                {pipChannel.sourceName && (
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 border text-[10px] font-semibold flex-shrink-0 ${
+                      isInMultiview
+                        ? 'bg-red-500/20 text-red-200 border-red-500/40'
+                        : 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40'
+                    }`}
+                    title={`IPTV Source: ${pipChannel.sourceName}${isInMultiview ? ' (Active in Multi-View)' : ''}`}
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                    </svg>
+                    <span className="truncate max-w-[80px]">{pipChannel.sourceName}</span>
+                  </span>
+                )}
                 <VideoQualityBadge quality={pipVideoQuality} size="sm" />
               </div>
               {autoTesting && (
@@ -879,6 +989,16 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
                   </button>
                 </>
               )}
+              <button
+                onClick={handleAddToMultiview}
+                className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-purple-400"
+                title="Add to Multi-View"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+              </button>
               <button
                 onClick={handleClosePip}
                 className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"

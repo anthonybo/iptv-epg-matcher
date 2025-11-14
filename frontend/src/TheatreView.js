@@ -1,6 +1,8 @@
 import React, { useState, useCallback } from 'react';
 import IPTVPlayer from './IPTVPlayer';
 import EPGMatcher from './EPGMatcher';
+import { addToMultiview } from './utils/multiviewManager';
+import { showToast } from './components/Toast';
 
 /**
  * TheatreView - Immersive viewing experience with large player and compact EPG
@@ -40,6 +42,14 @@ const TheatreView = ({
       ? 'border-blue-500 bg-blue-600 text-white'
       : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-slate-100'
   ].join(' ');
+
+  const handleAddToMultiview = () => {
+    if (!selectedChannel) return;
+
+    addToMultiview(selectedChannel);
+    window.dispatchEvent(new Event('multiviewUpdate'));
+    showToast(`Added "${selectedChannel.name}" to Multi-View`, 'success');
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex h-screen bg-black">
@@ -131,6 +141,18 @@ const TheatreView = ({
               >
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                </svg>
+              </button>
+
+              {/* Add to Multiview */}
+              <button
+                onClick={handleAddToMultiview}
+                className="inline-flex items-center justify-center rounded-lg border border-purple-500/40 bg-purple-500/20 p-2 text-purple-100 transition hover:bg-purple-500/30"
+                title="Add to Multi-View"
+              >
+                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
                 </svg>
               </button>
 

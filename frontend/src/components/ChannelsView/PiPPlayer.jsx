@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import IPTVPlayer from '../../IPTVPlayer';
 import VideoQualityBadge from '../VideoQualityBadge';
+import { addToMultiview } from '../../utils/multiviewManager';
+import { showToast } from '../Toast';
 
 /**
  * PiPPlayer - Picture-in-Picture video player for channel preview
@@ -18,6 +20,12 @@ const PiPPlayer = ({ channel, sessionId, onClose }) => {
   useEffect(() => {
     setVideoQuality(null);
   }, [channel?.id]);
+
+  const handleAddToMultiview = () => {
+    addToMultiview(channel);
+    window.dispatchEvent(new Event('multiviewUpdate'));
+    showToast(`Added "${channel.name}" to Multi-View`, 'success');
+  };
 
   if (!channel) return null;
 
@@ -50,6 +58,17 @@ const PiPPlayer = ({ channel, sessionId, onClose }) => {
               <VideoQualityBadge quality={videoQuality} size="sm" />
             </div>
             <div className="flex items-center gap-1 flex-shrink-0">
+              {/* Add to Multiview button */}
+              <button
+                onClick={handleAddToMultiview}
+                className="p-1 rounded hover:bg-purple-500/20 text-slate-400 hover:text-purple-400 transition-colors"
+                title="Add to Multi-View"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <line x1="12" y1="5" x2="12" y2="19"></line>
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+              </button>
               {/* Minimize button */}
               <button
                 onClick={() => setIsMinimized(!isMinimized)}
