@@ -6,8 +6,31 @@
 const express = require('express');
 const router = express.Router();
 const fs = require('fs');
+const fetch = require('node-fetch');
+const http = require('http');
+const https = require('https');
 const logger = require('../config/logger');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
+
+// Connection pooling agents for efficient HTTP/HTTPS requests
+// This prevents opening too many concurrent connections and reuses existing ones
+const httpAgent = new http.Agent({
+  keepAlive: true,           // Reuse connections
+  maxSockets: 10,            // Max 10 concurrent connections per host
+  maxFreeSockets: 5,         // Keep 5 idle connections ready for reuse
+  timeout: 60000,            // 60 second timeout
+  keepAliveMsecs: 30000      // Send keep-alive packets every 30s
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 10,
+  maxFreeSockets: 5,
+  timeout: 60000,
+  keepAliveMsecs: 30000
+});
+
+logger.info('[XTREAM] HTTP/HTTPS connection pooling enabled (maxSockets: 10, keepAlive: true)');
 
 /**
  * Validate credentials and get credential info from database
@@ -478,14 +501,14 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
         logger.info(`Requesting fresh Stalker link from portal...`);
 
         // Make request to create_link to get fresh token
-        const fetch = require('node-fetch');
         const createLinkResponse = await fetch(channel.url, {
           method: 'GET',
           headers: {
             'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
             'X-User-Agent': 'Model: MAG250; Link: WiFi',
             'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
-          }
+          },
+          agent: channel.url.startsWith('https') ? httpsAgent : httpAgent
         });
 
         if (createLinkResponse.ok) {
@@ -558,7 +581,6 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     // Fetch and proxy the stream
-    const fetch = require('node-fetch');
     const { PassThrough } = require('stream');
 
     // Set headers based on source type
@@ -580,7 +602,8 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     const streamResponse = await fetch(streamUrl, {
       method: 'GET',
       headers: streamHeaders,
-      timeout: 60000
+      timeout: 60000,
+      agent: streamUrl.startsWith('https') ? httpsAgent : httpAgent
     });
 
     if (!streamResponse.ok) {
@@ -719,14 +742,14 @@ router.get('/stream/:channelId', async (req, res) => {
         logger.info(`[STREAM] Requesting fresh Stalker link from portal...`);
 
         // Make request to create_link to get fresh token
-        const fetch = require('node-fetch');
         const createLinkResponse = await fetch(channel.url, {
           method: 'GET',
           headers: {
             'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
             'X-User-Agent': 'Model: MAG250; Link: WiFi',
             'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
-          }
+          },
+          agent: channel.url.startsWith('https') ? httpsAgent : httpAgent
         });
 
         if (createLinkResponse.ok) {
@@ -774,7 +797,6 @@ router.get('/stream/:channelId', async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     // Fetch and proxy the stream
-    const fetch = require('node-fetch');
     const { PassThrough } = require('stream');
 
     // Set headers based on source type
@@ -796,7 +818,8 @@ router.get('/stream/:channelId', async (req, res) => {
     const streamResponse = await fetch(streamUrl, {
       method: 'GET',
       headers: streamHeaders,
-      timeout: 60000
+      timeout: 60000,
+      agent: streamUrl.startsWith('https') ? httpsAgent : httpAgent
     });
 
     if (!streamResponse.ok) {
