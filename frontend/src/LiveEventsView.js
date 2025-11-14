@@ -212,18 +212,31 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     isAdvancingRef.current = false;
   };
 
-  const handleAutoTest = () => {
+  const handleAutoTest = (startingChannel = null) => {
     if (matchingChannels.length === 0) return;
 
     setAutoTesting(true);
     autoTestingRef.current = true;
-    setCurrentTestIndex(0);
-    currentTestIndexRef.current = 0;
     matchingChannelsRef.current = matchingChannels;
     setShowPipPlayer(true);
 
-    // Start with first channel
-    const firstChannel = matchingChannels[0];
+    // Find starting index
+    let startIndex = 0;
+    if (startingChannel) {
+      startIndex = matchingChannels.findIndex(
+        ch => ch.id === startingChannel.id && ch.source_id === startingChannel.source_id
+      );
+      if (startIndex === -1) startIndex = 0;
+      console.log(`[Auto-Test] Starting from channel ${startIndex + 1}: ${startingChannel.name}`);
+    } else {
+      console.log('[Auto-Test] Starting from first channel');
+    }
+
+    setCurrentTestIndex(startIndex);
+    currentTestIndexRef.current = startIndex;
+
+    // Start with selected channel
+    const firstChannel = matchingChannels[startIndex];
     setPipChannel({
       id: firstChannel.id,
       name: firstChannel.name,
@@ -778,6 +791,22 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
                           )}
                         </div>
                         <div className="flex items-center gap-2">
+                          {/* Auto-test from here */}
+                          <button
+                            onClick={() => handleAutoTest(channel)}
+                            disabled={autoTesting}
+                            className={`rounded-lg p-2 transition-colors ${
+                              autoTesting
+                                ? 'text-slate-600 cursor-not-allowed'
+                                : 'text-slate-400 hover:bg-slate-800 hover:text-purple-400'
+                            }`}
+                            title={autoTesting ? 'Auto-test in progress' : 'Auto-test from here'}
+                          >
+                            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                            </svg>
+                          </button>
+
                           <button
                             onClick={() => handlePlayPip(channel)}
                             className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-800 hover:text-purple-400"
