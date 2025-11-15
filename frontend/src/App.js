@@ -3,6 +3,7 @@ import { AppProvider, useAppContext } from './contexts/AppContext';
 import { useAppSession } from './hooks/useAppSession';
 import { useAppEPG } from './hooks/useAppEPG';
 import { useAppChannels } from './hooks/useAppChannels';
+import { usePageTracking } from './hooks/usePageTracking';
 import { AppLayout } from './components/layout/AppLayout';
 import { ToastContainer } from './components/Toast';
 import Configuration from './Configuration';
@@ -13,6 +14,7 @@ import GuideView from './GuideView';
 import IPTVEditor from './IPTVEditor';
 import LiveEventsView from './LiveEventsView';
 import MultiViewPage from './MultiViewPage';
+import DashboardView from './DashboardView';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
 import iptvSourcesService from './services/iptvSourcesService';
@@ -50,6 +52,9 @@ function AppContent() {
 
   // Initialize session (CRITICAL - must be called!)
   useAppSession();
+
+  // Track page views automatically for all tabs
+  usePageTracking(activeTab);
 
   // Initialize hooks with side effects
   const { handleLoad, handleChannelSelect, fetchCategoriesFromApi } = useAppChannels();
@@ -288,6 +293,9 @@ function AppContent() {
 
       case 'multiview':
         return <MultiViewPage sessionId={sessionId} />;
+
+      case 'dashboard':
+        return <DashboardView />;
 
       default:
         setActiveTab('myiptvs');

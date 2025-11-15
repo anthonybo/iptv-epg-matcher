@@ -11,6 +11,7 @@ const http = require('http');
 const https = require('https');
 const logger = require('../config/logger');
 const iptvDatabaseService = require('../services/iptvDatabaseService');
+const metricsService = require('../services/metricsService');
 
 // Connection pooling agents for efficient HTTP/HTTPS requests
 // This prevents opening too many concurrent connections and reuses existing ones
@@ -617,15 +618,35 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
 
     const passThrough = new PassThrough();
 
+    // Track stream start for metrics
+    const streamKey = `xtream_api_${username}_${streamId}_${Date.now()}`;
+    metricsService.trackStreamStart(streamKey, {
+      channel: channel.name,
+      channelId: streamId,
+      source: channel.source_name || channel.source_type || 'XTREAM',
+      sourceId: channel.source_id,
+      user: username,
+      userId: credential?.user_id,
+      ip: req.ip || req.connection.remoteAddress,
+      type: 'xtream_api'
+    });
+
+    // Track bandwidth as data flows
+    passThrough.on('data', (chunk) => {
+      metricsService.trackBandwidth(streamKey, chunk.length, 0);
+    });
+
     // Handle errors on the source stream
     streamResponse.body.on('error', (err) => {
       logger.error(`Source stream error for stream ID ${streamId}: ${err.message}`);
+      metricsService.trackStreamEnd(streamKey);
       passThrough.destroy(err);
     });
 
     // Handle errors on the response stream
     res.on('error', (err) => {
       logger.error(`Response stream error for stream ID ${streamId}: ${err.message}`);
+      metricsService.trackStreamEnd(streamKey);
       streamResponse.body.destroy();
       passThrough.destroy();
     });
@@ -634,6 +655,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     req.on('close', () => {
       try {
         logger.info(`Stream closed for stream ID ${streamId}`);
+        metricsService.trackStreamEnd(streamKey);
         streamResponse.body.destroy();
         passThrough.destroy();
       } catch (err) {
@@ -647,6 +669,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     // Set a timeout on the whole operation
     const streamTimeout = setTimeout(() => {
       logger.warn(`Stream timeout for stream ID ${streamId}`);
+      metricsService.trackStreamEnd(streamKey);
       streamResponse.body.destroy(new Error('Stream timeout'));
       passThrough.destroy(new Error('Stream timeout'));
     }, 300000); // 5 minute timeout
@@ -654,6 +677,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     // Clear timeout when stream ends or errors
     passThrough.on('end', () => {
       logger.info(`Stream completed successfully for stream ID ${streamId}`);
+      metricsService.trackStreamEnd(streamKey);
       clearTimeout(streamTimeout);
     });
 
@@ -833,15 +857,35 @@ router.get('/stream/:channelId', async (req, res) => {
 
     const passThrough = new PassThrough();
 
+    // Track stream start for metrics
+    const streamKey = `xtream_direct_${channelId}_${Date.now()}`;
+    metricsService.trackStreamStart(streamKey, {
+      channel: channel.name,
+      channelId: channelId,
+      source: channel.source_name || channel.source_type || 'XTREAM',
+      sourceId: channel.source_id,
+      user: null,
+      userId: null,
+      ip: req.ip || req.connection.remoteAddress,
+      type: 'xtream_direct'
+    });
+
+    // Track bandwidth as data flows
+    passThrough.on('data', (chunk) => {
+      metricsService.trackBandwidth(streamKey, chunk.length, 0);
+    });
+
     // Handle errors on the source stream
     streamResponse.body.on('error', (err) => {
       logger.error(`Source stream error for channel ${channelId}: ${err.message}`);
+      metricsService.trackStreamEnd(streamKey);
       passThrough.destroy(err);
     });
 
     // Handle errors on the response stream
     res.on('error', (err) => {
       logger.error(`Response stream error for channel ${channelId}: ${err.message}`);
+      metricsService.trackStreamEnd(streamKey);
       streamResponse.body.destroy();
       passThrough.destroy();
     });
@@ -850,6 +894,7 @@ router.get('/stream/:channelId', async (req, res) => {
     req.on('close', () => {
       try {
         logger.info(`Stream closed for channel ${channelId}`);
+        metricsService.trackStreamEnd(streamKey);
         streamResponse.body.destroy();
         passThrough.destroy();
       } catch (err) {
@@ -863,6 +908,7 @@ router.get('/stream/:channelId', async (req, res) => {
     // Set a timeout on the whole operation
     const streamTimeout = setTimeout(() => {
       logger.warn(`Stream timeout for channel ${channelId}`);
+      metricsService.trackStreamEnd(streamKey);
       streamResponse.body.destroy(new Error('Stream timeout'));
       passThrough.destroy(new Error('Stream timeout'));
     }, 300000); // 5 minute timeout
@@ -870,6 +916,7 @@ router.get('/stream/:channelId', async (req, res) => {
     // Clear timeout when stream ends or errors
     passThrough.on('end', () => {
       logger.info(`Stream completed successfully for channel ${channelId}`);
+      metricsService.trackStreamEnd(streamKey);
       clearTimeout(streamTimeout);
     });
 

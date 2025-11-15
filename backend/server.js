@@ -147,7 +147,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   // Log all incoming requests at INFO level so we always see them
   logger.info(`[REQUEST] ${req.method} ${req.originalUrl} from ${req.ip}`);
-  
+
   // Track response for logging
   const originalSend = res.send;
   res.send = function(data) {
@@ -156,7 +156,39 @@ app.use((req, res, next) => {
     });
     return originalSend.apply(this, arguments);
   };
-  
+
+  next();
+});
+
+// Add metrics tracking middleware
+const metricsService = require('./services/metricsService');
+app.use((req, res, next) => {
+  // Track request metrics
+  const originalSend = res.send;
+  const originalJson = res.json;
+  const originalEnd = res.end;
+
+  const trackRequest = () => {
+    const success = res.statusCode < 400;
+    const endpoint = req.route ? req.route.path : req.path;
+    metricsService.trackRequest(endpoint, success);
+  };
+
+  res.send = function(...args) {
+    trackRequest();
+    return originalSend.apply(this, args);
+  };
+
+  res.json = function(...args) {
+    trackRequest();
+    return originalJson.apply(this, args);
+  };
+
+  res.end = function(...args) {
+    trackRequest();
+    return originalEnd.apply(this, args);
+  };
+
   next();
 });
 
@@ -306,6 +338,7 @@ const iptvSourcesRoutes = require('./routes/iptvSources');
 const userEpgSourcesRoutes = require('./routes/userEpgSources');
 const epgRefreshRoutes = require('./routes/epgRefresh');
 const liveEventsRoutes = require('./routes/liveEvents');
+const metricsRoutes = require('./routes/metrics');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -353,6 +386,7 @@ app.use('/api/iptv', iptvSourcesRoutes); // Multi-IPTV source management
 app.use('/api/user-epg-sources', userEpgSourcesRoutes); // User EPG sources management
 app.use('/api/epg-refresh', epgRefreshRoutes); // EPG refresh management
 app.use('/api/live-events', liveEventsRoutes); // Live sports events management
+app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));
@@ -690,13 +724,21 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => logger.info(`Backend running on http://localhost:${PORT}`));
 
 // Handle process termination gracefully
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down server');
+
+  // Flush metrics queue before exit
+  await metricsService.shutdown();
+
   process.exit(0);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down server');
+
+  // Flush metrics queue before exit
+  await metricsService.shutdown();
+
   process.exit(0);
 });
 

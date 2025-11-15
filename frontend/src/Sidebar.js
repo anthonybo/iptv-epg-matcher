@@ -87,6 +87,18 @@ const menuItems = [
     ),
   },
   {
+    id: 'dashboard',
+    label: 'Dashboard',
+    icon: (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 3v6h6" />
+        <path d="M21 21v-6h-6" />
+        <path d="M3 9a9 9 0 0 1 15-6.7" />
+        <path d="M21 15a9 9 0 0 1-15 6.7" />
+      </svg>
+    ),
+  },
+  {
     id: 'editor',
     label: 'IPTV Editor',
     countKey: 'totalMatchesCount',
