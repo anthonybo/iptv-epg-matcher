@@ -489,7 +489,7 @@ router.post('/', async (req, res) => {
     const xmlLines = [
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<!DOCTYPE tv SYSTEM "xmltv.dtd">',
-      '<tv generator-info-name="IPTV EPG Matcher">'
+      '<tv generator-info-name="IPTV Guru">'
     ];
 
     // Add channel definitions
@@ -948,7 +948,7 @@ router.post('/update-all', async (req, res) => {
         const xmlLines = [
           '<?xml version="1.0" encoding="UTF-8"?>',
           '<!DOCTYPE tv SYSTEM "xmltv.dtd">',
-          '<tv generator-info-name="IPTV EPG Matcher">'
+          '<tv generator-info-name="IPTV Guru">'
         ];
 
         const uniqueChannelIds = new Set();

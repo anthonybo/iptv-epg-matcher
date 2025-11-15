@@ -1,5 +1,5 @@
 /**
- * Main server entry point for IPTV EPG Matcher
+ * Main server entry point for IPTV Guru
  */
 require('./readChunkedCache');
 
@@ -1079,7 +1079,7 @@ if (fs.existsSync(frontendBuildPath)) {
         res.status(200).send(`
             <html>
                 <head>
-                    <title>IPTV-EPG-Matcher Backend</title>
+                    <title>IPTV Guru Backend</title>
                     <style>
                         body {
                             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
@@ -1105,7 +1105,7 @@ if (fs.existsSync(frontendBuildPath)) {
                     </style>
                 </head>
                 <body>
-                    <h1>IPTV-EPG-Matcher Backend is running! <span class="success">✓</span></h1>
+                    <h1>IPTV Guru Backend is running! <span class="success">✓</span></h1>
                     <p>The backend server is running correctly, but the frontend build was not found.</p>
                     <p>To build the frontend, run the following commands:</p>
                     <pre>

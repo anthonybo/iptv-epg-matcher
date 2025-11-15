@@ -164,7 +164,7 @@ const FormPage = () => {
   return (
     <Box sx={{ maxWidth: 1200, mx: 'auto', p: 3 }}>
       <Typography variant="h4" component="h1" gutterBottom sx={{ mb: 3 }}>
-        IPTV EPG Matcher
+        IPTV Guru
       </Typography>
       
       {/* Add SSE Monitor for debugging */}

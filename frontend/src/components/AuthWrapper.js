@@ -81,17 +81,17 @@ const UserBadge = ({ user, onOpenSessionDebugger, onOpenServerStatus }) => {
   };
 
   return (
-    <div className="relative">
+    <div className="relative z-[100]">
       <button
         onClick={() => setShowMenu(!showMenu)}
-        className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-slate-100 shadow-lg shadow-slate-950/30 transition-colors hover:bg-slate-800"
+        className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-slate-100 shadow-lg shadow-slate-950/30 transition-colors hover:bg-slate-800"
       >
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500 text-sm font-bold text-white">
+        <div className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[10px] font-bold text-white">
           {user.username.charAt(0).toUpperCase()}
         </div>
-        <span className="text-sm font-medium">{user.username}</span>
+        <span className="text-[11px] font-medium">{user.username}</span>
         <svg
-          className={`h-4 w-4 transition-transform ${showMenu ? 'rotate-180' : ''}`}
+          className={`h-3 w-3 transition-transform ${showMenu ? 'rotate-180' : ''}`}
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
@@ -102,7 +102,7 @@ const UserBadge = ({ user, onOpenSessionDebugger, onOpenServerStatus }) => {
 
       {/* Dropdown Menu */}
       {showMenu && (
-        <div className="absolute right-0 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[100]">
+        <div className="absolute right-0 mt-2 w-56 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[9999]">
           <div className="border-b border-slate-800 px-4 py-3">
             <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Signed in as</p>
             <p className="truncate text-sm font-semibold text-slate-100">{user.email}</p>

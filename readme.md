@@ -1,10 +1,10 @@
-# IPTV EPG Matcher
+# IPTV Guru
 
 A powerful web application for matching IPTV channels with EPG (Electronic Program Guide) data, with live stream playback capability.
 
 ## Overview
 
-IPTV EPG Matcher allows you to:
+IPTV Guru allows you to:
 - Load IPTV channels from various sources (M3U files, URLs, or Xtream API)
 - Auto-match or manually match channels with EPG data
 - Watch live TV streams directly in your browser

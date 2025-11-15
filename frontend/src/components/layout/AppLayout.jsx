@@ -57,15 +57,15 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
       )}
 
       {!isTheatreMode && (
-        <header className="sticky top-0 z-40 flex items-center justify-between gap-4 border-b border-slate-800 bg-slate-900/80 px-6 py-4 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
+        <header className="sticky top-0 z-[60] flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/80 px-3 py-1.5 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={toggleSidebar}
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:ring-offset-2 focus:ring-offset-slate-950"
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-800 hover:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:ring-offset-2 focus:ring-offset-slate-950"
             aria-label="Toggle sidebar"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="3" y1="12" x2="21" y2="12"></line>
               <line x1="3" y1="6" x2="21" y2="6"></line>
               <line x1="3" y1="18" x2="21" y2="18"></line>
@@ -73,7 +73,7 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
           </button>
 
           {sessionId && (
-            <div className="hidden items-center rounded-full border border-blue-400/40 bg-blue-500/15 px-3 py-1 text-[11px] font-semibold text-blue-200 sm:inline-flex">
+            <div className="hidden items-center rounded-full border border-blue-400/40 bg-blue-500/15 px-2 py-0.5 text-[9px] font-semibold text-blue-200 sm:inline-flex">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 width="14"
@@ -84,7 +84,7 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
                 strokeWidth="2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                className="mr-2 h-3.5 w-3.5"
+                className="mr-1 h-2.5 w-2.5"
               >
                 <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
                 <circle cx="12" cy="12" r="3"></circle>
@@ -94,11 +94,11 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
           )}
         </div>
 
-        <div className="flex flex-1 items-center justify-center px-4">
-          <h1 className="text-lg font-semibold text-blue-300 sm:text-xl">IPTV EPG Matcher</h1>
+        <div className="flex flex-1 items-center justify-center px-2">
+          <h1 className="text-xs font-semibold text-blue-300 sm:text-sm">IPTV Guru</h1>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {sessionId && activeTab === 'channels' && (
             <button
               type="button"
@@ -106,15 +106,15 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
                 console.log('[AppLayout] Manually reloading categories');
                 await fetchCategoriesFromApi(sessionId);
               }}
-              className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-500/20"
+              className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-200 transition hover:bg-emerald-500/20"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M23 4v6h-6"></path>
                 <path d="M1 20v-6h6"></path>
                 <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"></path>
                 <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
               </svg>
-              Reload Categories ({categories.length})
+              Reload ({categories.length})
             </button>
           )}
 

@@ -1,6 +1,6 @@
 # Video Player Documentation Index
 
-Complete documentation of the IPTV EPG Matcher video player implementation, error handling, and stream recovery mechanisms.
+Complete documentation of the IPTV Guru video player implementation, error handling, and stream recovery mechanisms.
 
 ## Documents Overview
 

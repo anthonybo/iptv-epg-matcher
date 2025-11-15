@@ -1,4 +1,4 @@
-# IPTV EPG Matcher - Video Player Implementation Analysis
+# IPTV Guru - Video Player Implementation Analysis
 
 ## Overview
 The application uses a sophisticated multi-player approach with **mpegts.js as the primary player** for MPEG-TS streams, supported by fallback mechanisms for different stream formats and browser compatibility.
