@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: iptvguru-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-iptvguru}
+      POSTGRES_USER: ${POSTGRES_USER:-iptvguru}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iptvguru}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iptvguru-network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: iptvguru-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - iptvguru-network
+    restart: unless-stopped
+
+  # IPTV Guru Backend (optional - for full Docker deployment)
+  # Uncomment to run the full application in Docker
+  # app:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: iptvguru-app
+  #   environment:
+  #     NODE_ENV: ${NODE_ENV:-development}
+  #     PORT: ${PORT:-5001}
+  #     POSTGRES_HOST: postgres
+  #     POSTGRES_PORT: 5432
+  #     POSTGRES_DB: ${POSTGRES_DB:-iptvguru}
+  #     POSTGRES_USER: ${POSTGRES_USER:-iptvguru}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+  #     REDIS_HOST: redis
+  #     REDIS_PORT: 6379
+  #     REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  #     JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+  #     SESSION_SECRET: ${SESSION_SECRET:-your-session-secret-change-in-production}
+  #   ports:
+  #     - "${PORT:-5001}:5001"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - iptvguru-network
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./backend:/app/backend
+  #     - ./frontend:/app/frontend
+  #     - /app/node_modules
+  #     - /app/backend/node_modules
+  #     - /app/frontend/node_modules
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  iptvguru-network:
+    driver: bridge
