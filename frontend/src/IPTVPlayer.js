@@ -25,7 +25,8 @@ const IPTVPlayer = ({
   showChannelInfo: externalShowChannelInfo,
   showEpgInfo: externalShowEpgInfo,
   showDebug: externalShowDebug,
-  onQualityDetected
+  onQualityDetected,
+  muted = false
 }) => {
   // Helper to get channel ID from either 'id' or 'tvgId' field
   // CRITICAL: Use 'id' first (IPTV channel ID like xtream_1111) not 'tvgId' (EPG hint like AnimalPlanet.us)
@@ -79,7 +80,7 @@ const IPTVPlayer = ({
   const log = (level, message, data = null) => {
     const timestamp = new Date().toISOString();
     console.log(`[${level.toUpperCase()}] ${message}`, data || '');
-    
+
     setLogs(prev => [
       ...prev,
       {
@@ -91,6 +92,13 @@ const IPTVPlayer = ({
       }
     ].slice(-20));
   };
+
+  // Update video element muted state when muted prop changes
+  useEffect(() => {
+    if (videoElementRef.current) {
+      videoElementRef.current.muted = muted;
+    }
+  }, [muted]);
 
   // Initialize component
   useEffect(() => {
@@ -729,6 +737,7 @@ const IPTVPlayer = ({
       videoEl.style.width = '100%';
       videoEl.style.height = '100%';
       videoEl.controls = !theatreMode; // Hide controls in theatre mode
+      videoEl.muted = muted; // Set muted state
       containerRef.current.appendChild(videoEl);
 
       // Store video element reference for health checks
@@ -1057,6 +1066,7 @@ const IPTVPlayer = ({
     videoEl.style.width = '100%';
     videoEl.style.height = '100%';
     videoEl.controls = !theatreMode; // Hide controls in theatre mode
+    videoEl.muted = muted; // Set muted state
     videoEl.src = testUrl;
     containerRef.current.appendChild(videoEl);
     

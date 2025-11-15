@@ -20,6 +20,7 @@ const MultiViewPage = ({ sessionId }) => {
   const [layout, setLayout] = useState({ columns: 1, rows: 1 });
   const [streamQualities, setStreamQualities] = useState({});
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [mutedStreams, setMutedStreams] = useState(new Set()); // Track which streams are muted
 
   // Load streams from localStorage on mount
   useEffect(() => {
@@ -56,6 +57,22 @@ const MultiViewPage = ({ sessionId }) => {
   const loadStreams = () => {
     const loaded = getMultiviewStreams();
     setStreams(loaded);
+
+    // Mute all streams by default
+    const streamKeys = loaded.map(s => `${s.sourceId}_${s.id}`);
+    setMutedStreams(new Set(streamKeys));
+  };
+
+  const toggleMute = (streamKey) => {
+    setMutedStreams(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(streamKey)) {
+        newSet.delete(streamKey);
+      } else {
+        newSet.add(streamKey);
+      }
+      return newSet;
+    });
   };
 
   const handleRemoveStream = (id, sourceId) => {
@@ -210,15 +227,37 @@ const MultiViewPage = ({ sessionId }) => {
                           )}
                           <VideoQualityBadge quality={streamQualities[streamKey]} size="sm" />
                         </div>
-                        <button
-                          onClick={() => handleRemoveStream(stream.id, stream.sourceId)}
-                          className="flex-shrink-0 p-1 rounded hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors"
-                          title="Remove from multiview"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
+                        <div className="flex items-center gap-1 flex-shrink-0">
+                          {/* Mute/Unmute Button */}
+                          <button
+                            onClick={() => toggleMute(streamKey)}
+                            className="p-1 rounded hover:bg-slate-700/50 text-slate-400 hover:text-slate-200 transition-colors"
+                            title={mutedStreams.has(streamKey) ? 'Unmute' : 'Mute'}
+                          >
+                            {mutedStreams.has(streamKey) ? (
+                              // Muted icon
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                              </svg>
+                            ) : (
+                              // Unmuted icon
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                              </svg>
+                            )}
+                          </button>
+                          {/* Remove Button */}
+                          <button
+                            onClick={() => handleRemoveStream(stream.id, stream.sourceId)}
+                            className="p-1 rounded hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors"
+                            title="Remove from multiview"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -231,6 +270,7 @@ const MultiViewPage = ({ sessionId }) => {
                       playbackMethod="mpegts-player"
                       matchedChannels={{}}
                       theatreMode={true}
+                      muted={mutedStreams.has(streamKey)}
                       onQualityDetected={(quality) => handleQualityDetected(streamKey, quality)}
                     />
                   </div>
