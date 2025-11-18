@@ -7,7 +7,7 @@ const axios = require('axios');
 const logger = require('../utils/logger');
 const parser = require('iptv-playlist-parser');
 const { getSession, updateSession } = require('../utils/storageUtils');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const iptvDatabaseService = require('../services/iptvDatabase');
 
 /**
  * POST /api/iptv/provider

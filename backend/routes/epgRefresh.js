@@ -58,7 +58,7 @@ router.post('/source', async (req, res) => {
     // Get source name from user_epg_sources if it's a user source
     let sourceName = url.split('/').pop(); // Default to filename
     try {
-      const iptvDatabaseService = require('../services/iptvDatabaseService');
+      const iptvDatabaseService = require('../services/iptvDatabase');
       const iptvDb = await iptvDatabaseService.connect();
       const userSource = await new Promise((resolve, reject) => {
         iptvDb.get('SELECT name FROM user_epg_sources WHERE url = ?', [url], (err, row) => {
@@ -158,7 +158,7 @@ router.post('/source', async (req, res) => {
     // Mark user EPG source as verified if it successfully loaded data
     if (channelCount > 0 && userId) {
       try {
-        const iptvDatabaseService = require('../services/iptvDatabaseService');
+        const iptvDatabaseService = require('../services/iptvDatabase');
         const iptvDb = await iptvDatabaseService.connect();
         await new Promise((resolve, reject) => {
           iptvDb.run(

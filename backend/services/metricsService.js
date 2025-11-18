@@ -5,6 +5,7 @@
  */
 
 const logger = require('../config/logger');
+// Metrics continue to use SQLite directly (not migrated to PostgreSQL yet)
 const iptvDatabaseService = require('./iptvDatabaseService');
 
 class MetricsService {

@@ -1,5 +1,5 @@
 // Add imports for iptv database service
-const iptvDbService = require('./iptvDatabaseService');
+const iptvDbService = require('./iptvDatabase');
 // ... existing code ...
 
 /**

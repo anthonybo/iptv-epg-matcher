@@ -5,8 +5,8 @@ const http = require('http');
 const https = require('https');
 const { getSession } = require('../utils/storageUtils');
 const logger = require('../config/logger');
-const sessionStorage = require('../utils/sessionStorage');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const sessionStorage = require('../utils/session');
+const iptvDatabaseService = require('../services/iptvDatabase');
 const { PassThrough } = require('stream');
 const { authMiddleware } = require('../middleware/authMiddleware');
 const { spawn } = require('child_process');
@@ -51,55 +51,109 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
 
         let channels = [];
 
-        // Try to get channels from database first
+        // For streaming, first try to fetch ONLY the specific channel needed
+        // This prevents timeout issues with sources that have 40k+ channels
         try {
-            logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
-            const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
-                page: 1,
-                limit: 999999, // Essentially unlimited - load ALL channels for streaming
-                userId: userId, // Pass userId for authenticated users - enables per-user channel queries
-                sourceId: sourceId // Pass sourceId to filter channels by IPTV source
+            logger.info(`Fetching specific channel ${channelId} from database for source ${sourceId}`);
+            const db = await iptvDatabaseService.connect();
+
+            const channelRow = await new Promise((resolve, reject) => {
+                db.get(`
+                    SELECT
+                        c.channel_id as id,
+                        c.name,
+                        c.stream_url as url,
+                        c.logo_url as logo,
+                        c.group_title,
+                        c.tvg_id,
+                        c.source_type,
+                        c.source_username,
+                        c.source_password,
+                        c.source_url,
+                        c.source_mac
+                    FROM iptv_channels c
+                    JOIN iptv_sources s ON c.source_id = s.id
+                    WHERE c.channel_id = ?
+                    AND s.id = ?
+                    AND (s.session_id = ? OR s.user_id = ?)
+                `, [channelId, sourceId, sessionId, userId], (err, row) => {
+                    if (err) reject(err);
+                    else resolve(row);
+                });
             });
 
-            if (dbResult && dbResult.channels && dbResult.channels.length > 0) {
-                logger.info(`Loaded ${dbResult.channels.length} channels from database for streaming`);
+            if (channelRow) {
+                logger.info(`Found channel ${channelId} directly from database`);
+                channels = [{
+                    id: channelRow.id,
+                    tvgId: channelRow.tvg_id || channelRow.id,
+                    name: channelRow.name,
+                    groupTitle: channelRow.group_title || '',
+                    logo: channelRow.logo || '',
+                    url: channelRow.url,
+                    categories: [],
+                    source_type: channelRow.source_type,
+                    source_username: channelRow.source_username,
+                    source_password: channelRow.source_password,
+                    source_url: channelRow.source_url,
+                    source_mac: channelRow.source_mac
+                }];
+            }
+        } catch (dbError) {
+            logger.warn(`Error loading specific channel: ${dbError.message}`);
+        }
 
-                // Transform channels to match expected format
-                channels = dbResult.channels.map(ch => ({
-                    id: ch.id,
-                    tvgId: ch.tvg?.id || ch.id,
-                    name: ch.name,
-                    groupTitle: ch.group?.title || '',
-                    logo: ch.logo || '',
-                    url: ch.url,
-                    categories: ch.categories || []
-                }));
+        // Fallback: Try to get ALL channels from database if direct lookup failed
+        if (channels.length === 0) {
+            try {
+                logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
+                const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
+                    page: 1,
+                    limit: 999999, // Essentially unlimited - load ALL channels for streaming
+                    userId: userId, // Pass userId for authenticated users - enables per-user channel queries
+                    sourceId: sourceId // Pass sourceId to filter channels by IPTV source
+                });
 
-                // Debug: Log first few channels to see their structure
-                const samples = channels.slice(0, 5).map(ch => ({
-                    id: ch.id,
-                    tvgId: ch.tvgId,
-                    name: ch.name
-                }));
-                logger.info(`Sample channels from database: ${JSON.stringify(samples, null, 2)}`);
+                if (dbResult && dbResult.channels && dbResult.channels.length > 0) {
+                    logger.info(`Loaded ${dbResult.channels.length} channels from database for streaming`);
 
-                // Debug: Find NHL channels if we're looking for one
-                if (channelId.toLowerCase().includes('nhl') || channelId.toLowerCase().includes('699083') || channelId.toLowerCase().includes('xtream')) {
-                    const nhlChannels = channels.filter(ch =>
-                        ch.name.toLowerCase().includes('nhl') ||
-                        ch.id.toLowerCase().includes('nhl') ||
-                        ch.id.includes('699083') ||
-                        ch.id.includes('xtream')
-                    ).slice(0, 10);
-                    logger.info(`Found ${nhlChannels.length} NHL/matching channels: ${JSON.stringify(nhlChannels.map(ch => ({
+                    // Transform channels to match expected format
+                    channels = dbResult.channels.map(ch => ({
+                        id: ch.id,
+                        tvgId: ch.tvg?.id || ch.id,
+                        name: ch.name,
+                        groupTitle: ch.group?.title || '',
+                        logo: ch.logo || '',
+                        url: ch.url,
+                        categories: ch.categories || []
+                    }));
+
+                    // Debug: Log first few channels to see their structure
+                    const samples = channels.slice(0, 5).map(ch => ({
                         id: ch.id,
                         tvgId: ch.tvgId,
                         name: ch.name
-                    })), null, 2)}`);
+                    }));
+                    logger.info(`Sample channels from database: ${JSON.stringify(samples, null, 2)}`);
+
+                    // Debug: Find NHL channels if we're looking for one
+                    if (channelId.toLowerCase().includes('nhl') || channelId.toLowerCase().includes('699083') || channelId.toLowerCase().includes('xtream')) {
+                        const nhlChannels = channels.filter(ch =>
+                            ch.name.toLowerCase().includes('nhl') ||
+                            ch.id.toLowerCase().includes('nhl') ||
+                            ch.id.includes('699083') ||
+                            ch.id.includes('xtream')
+                        ).slice(0, 10);
+                        logger.info(`Found ${nhlChannels.length} NHL/matching channels: ${JSON.stringify(nhlChannels.map(ch => ({
+                            id: ch.id,
+                            tvgId: ch.tvgId,
+                            name: ch.name
+                        })), null, 2)}`);
+                    }
                 }
+            } catch (dbError) {
+                logger.warn(`Error loading channels from database: ${dbError.message}, falling back to in-memory`);
             }
-        } catch (dbError) {
-            logger.warn(`Error loading channels from database: ${dbError.message}, falling back to in-memory`);
         }
 
         // Fall back to in-memory session storage if database didn't have channels
@@ -190,7 +244,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                         SELECT
                             c.channel_id,
                             c.name,
-                            c.url,
+                            c.stream_url as url,
                             s.mac_address as source_mac,
                             s.username as source_username,
                             s.password as source_password

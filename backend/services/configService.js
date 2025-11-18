@@ -138,10 +138,66 @@ async function removeEpgSource(url) {
     }
 }
 
+/**
+ * Get EPG sources from config file AND user-added sources from database
+ * @returns {Promise<Array>} - Array of EPG source objects {url, name}
+ */
+async function getEpgSources() {
+    try {
+        const sources = [];
+
+        // 1. Load system sources from config file
+        const EPG_SOURCES_FILE = path.join(__dirname, '../config/epg_sources.json');
+
+        if (fs.existsSync(EPG_SOURCES_FILE)) {
+            const data = fs.readFileSync(EPG_SOURCES_FILE, 'utf8');
+            const config = JSON.parse(data);
+
+            // Filter for enabled sources and return in format {url, name}
+            const systemSources = (config.sources || [])
+                .filter(source => source.enabled)
+                .map(source => ({
+                    url: source.url,
+                    name: source.name
+                }));
+
+            sources.push(...systemSources);
+            logger.info(`Loaded ${systemSources.length} enabled system EPG sources from config`);
+        } else {
+            logger.warn('EPG sources file not found');
+        }
+
+        // 2. Load user-added sources from PostgreSQL
+        try {
+            const postgresService = require('./postgresService');
+            const result = await postgresService.query(`
+                SELECT url, name
+                FROM user_epg_sources
+                WHERE enabled = true
+                ORDER BY created_at ASC
+            `);
+
+            if (result.rows.length > 0) {
+                sources.push(...result.rows);
+                logger.info(`Loaded ${result.rows.length} enabled user EPG sources from database`);
+            }
+        } catch (dbError) {
+            logger.warn(`Could not load user EPG sources from database: ${dbError.message}`);
+        }
+
+        logger.info(`Total EPG sources: ${sources.length} (system + user)`);
+        return sources;
+    } catch (error) {
+        logger.error(`Error getting EPG sources: ${error.message}`);
+        return [];
+    }
+}
+
 module.exports = {
     getConfig,
     saveConfig,
     updateConfig,
     addEpgSource,
-    removeEpgSource
+    removeEpgSource,
+    getEpgSources
 }; 

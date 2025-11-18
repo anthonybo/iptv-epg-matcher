@@ -10,7 +10,7 @@
 
 const axios = require('axios');
 const logger = require('../config/logger');
-const iptvDatabaseService = require('./iptvDatabaseService');
+const postgresService = require('./postgresService');
 
 // ESPN API configuration (unofficial but reliable, no auth required)
 const ESPN_BASE_URL = 'http://site.api.espn.com/apis/site/v2/sports';
@@ -166,7 +166,6 @@ async function refreshLiveEvents() {
   try {
     logger.info('Starting live events refresh from ESPN API');
 
-    const db = await iptvDatabaseService.connect();
     const today = new Date();
     let totalFetched = 0;
     let totalStored = 0;
@@ -186,30 +185,34 @@ async function refreshLiveEvents() {
             try {
               const parsed = parseESPNEvent(event, sport, name);
 
-              // Insert or replace event
-              await new Promise((resolve, reject) => {
-                db.run(`
-                  INSERT OR REPLACE INTO live_events
-                  (event_id, event_name, sport_type, league_name, home_team, away_team, event_start, event_end, source, updated_at)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                `, [
-                  parsed.event_id,
-                  parsed.event_name,
-                  parsed.sport_type,
-                  parsed.league_name,
-                  parsed.home_team,
-                  parsed.away_team,
-                  parsed.event_start,
-                  parsed.event_end,
-                  parsed.source
-                ], (err) => {
-                  if (err) reject(err);
-                  else {
-                    totalStored++;
-                    resolve();
-                  }
-                });
-              });
+              // Insert or update event in PostgreSQL
+              await postgresService.query(`
+                INSERT INTO live_events
+                (event_id, event_name, sport_type, league_name, home_team, away_team, event_start, event_end, source, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP)
+                ON CONFLICT (event_id) DO UPDATE SET
+                  event_name = EXCLUDED.event_name,
+                  sport_type = EXCLUDED.sport_type,
+                  league_name = EXCLUDED.league_name,
+                  home_team = EXCLUDED.home_team,
+                  away_team = EXCLUDED.away_team,
+                  event_start = EXCLUDED.event_start,
+                  event_end = EXCLUDED.event_end,
+                  source = EXCLUDED.source,
+                  updated_at = CURRENT_TIMESTAMP
+              `, [
+                parsed.event_id,
+                parsed.event_name,
+                parsed.sport_type,
+                parsed.league_name,
+                parsed.home_team,
+                parsed.away_team,
+                parsed.event_start,
+                parsed.event_end,
+                parsed.source
+              ]);
+
+              totalStored++;
             } catch (storeError) {
               logger.error(`Error storing event ${event.id}:`, storeError.message);
               errors++;
@@ -226,12 +229,9 @@ async function refreshLiveEvents() {
 
     // Clean up old events (remove events that ended more than 1 day ago)
     const oneDayAgo = new Date(today.getTime() - (24 * 60 * 60 * 1000)).toISOString();
-    await new Promise((resolve, reject) => {
-      db.run(`DELETE FROM live_events WHERE event_end < ?`, [oneDayAgo], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    await postgresService.query(`
+      DELETE FROM live_events WHERE event_end < $1
+    `, [oneDayAgo]);
 
     logger.info(`Live events refresh complete: fetched=${totalFetched}, stored=${totalStored}, errors=${errors}`);
 
@@ -256,21 +256,15 @@ async function refreshLiveEvents() {
  */
 async function getCurrentlyLiveEvents() {
   try {
-    const db = await iptvDatabaseService.connect();
     const now = new Date().toISOString();
 
-    const events = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT * FROM live_events
-        WHERE event_start <= ? AND event_end >= ?
-        ORDER BY event_start
-      `, [now, now], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    const result = await postgresService.query(`
+      SELECT * FROM live_events
+      WHERE event_start <= $1 AND event_end >= $2
+      ORDER BY event_start
+    `, [now, now]);
 
-    return events;
+    return result.rows || [];
   } catch (error) {
     logger.error('Error getting currently live events:', error);
     return [];
@@ -317,29 +311,22 @@ async function isProgramLive(programTitle) {
  */
 async function getAllEvents() {
   try {
-    const db = await iptvDatabaseService.connect();
+    const result = await postgresService.query(`
+      SELECT
+        event_id,
+        event_name,
+        sport_type,
+        league_name,
+        home_team,
+        away_team,
+        event_start,
+        event_end,
+        source
+      FROM live_events
+      ORDER BY event_start
+    `);
 
-    const events = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT
-          event_id,
-          event_name,
-          sport_type,
-          league_name,
-          home_team,
-          away_team,
-          event_start,
-          event_end,
-          source
-        FROM live_events
-        ORDER BY event_start
-      `, [], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
-
-    return events;
+    return result.rows || [];
   } catch (error) {
     logger.error('Error fetching all events from database:', error);
     return [];

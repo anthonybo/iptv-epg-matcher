@@ -1,6 +1,9 @@
 /**
  * Main server entry point for IPTV Guru
  */
+// Load environment variables from .env file FIRST
+require('dotenv').config();
+
 require('./readChunkedCache');
 
 const express = require('express');
@@ -35,9 +38,9 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// Clear storage on server restart - MOVED HERE AFTER IMPORTS
-logger.info('Clearing in-memory session storage on server restart');
-const sessionStorage = require('./utils/sessionStorage');
+// Session storage - uses abstraction layer (Redis or In-Memory based on USE_REDIS)
+logger.info('Initializing session storage');
+const sessionStorage = require('./utils/session');
 // Clear any existing sessions on server restart
 if (storage) {
   Object.keys(storage).forEach(key => {
@@ -318,6 +321,24 @@ app.use(['/api/channels/:sessionId', '/api/channels/:sessionId/categories'], (re
   
   next();
 });
+
+// Clear require cache for routes in development to ensure fresh code loads
+if (process.env.NODE_ENV === 'development' || process.env.DEBUG === 'true') {
+  const routesToClear = [
+    './routes/generate',
+    './routes/liveEvents',
+    './routes/epg',
+    './routes/xtream'
+  ];
+
+  routesToClear.forEach(route => {
+    const fullPath = require.resolve(route);
+    if (require.cache[fullPath]) {
+      logger.info(`Clearing require cache for ${route}`);
+      delete require.cache[fullPath];
+    }
+  });
+}
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -636,10 +657,14 @@ app.get('/api/events/:sessionId', (req, res) => {
     send: (type, data) => {
       if (!res.writableEnded) {
         try {
+          logger.info(`[SSE SEND] Sending to client ${clientId}: type=${type}, data.type=${data.type}`);
           res.write(`data: ${JSON.stringify(data)}\n\n`);
+          logger.info(`[SSE SEND] Write successful for client ${clientId}`);
         } catch (error) {
           logger.error(`Error sending event to client ${clientId}:`, error);
         }
+      } else {
+        logger.warn(`[SSE SEND] Cannot send to client ${clientId} - connection ended`);
       }
     },
     res
@@ -930,10 +955,10 @@ epgFinder.findAndExposeEpgData();
     const stats = await db.getDatabaseStats();
     logger.info(`Database contains ${stats.channelCount} channels and ${stats.programCount} programs`);
 
-    // Initialize IPTV database
-    const iptvDb = require('./services/iptvDatabaseService');
+    // Initialize IPTV database - uses abstraction layer (PostgreSQL or SQLite based on USE_POSTGRES)
+    const iptvDb = require('./services/iptvDatabase');
     await iptvDb.connect();
-    logger.info('IPTV database initialized successfully');
+    logger.info(`IPTV database initialized successfully (${iptvDb.getDatabaseType()})`);
     
     // If database is empty and EPG sources exist, parse them
     if (stats.channelCount === 0) {
@@ -995,38 +1020,29 @@ epgFinder.findAndExposeEpgData();
 
 // Set up automatic EPG refresh schedule
 const cron = require('node-cron');
-const { exec } = require('child_process');
 const { EPG_AUTO_REFRESH_ENABLED, EPG_AUTO_REFRESH_CRON } = require('./config/constants');
+const epgParserService = require('./services/epgParserService');
+const epgDatabaseService = require('./services/epgDatabaseService');
 
 if (EPG_AUTO_REFRESH_ENABLED) {
   logger.info(`Setting up automatic EPG refresh schedule: ${EPG_AUTO_REFRESH_CRON}`);
 
-  cron.schedule(EPG_AUTO_REFRESH_CRON, () => {
+  cron.schedule(EPG_AUTO_REFRESH_CRON, async () => {
     logger.info('Starting scheduled EPG refresh');
 
-    const pythonPath = 'python3';
-    const scriptPath = path.join(__dirname, 'epg_parser.py');
-    const cmd = `${pythonPath} ${scriptPath} --force --no-menu`;
+    try {
+      const results = await epgParserService.parseAllSources({ force: true });
 
-    logger.info(`Running EPG parser: ${cmd}`);
-
-    exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error) {
-        logger.error(`Scheduled EPG refresh failed: ${error.message}`);
-        logger.error(`Stderr: ${stderr}`);
-        return;
-      }
-
-      logger.info('Scheduled EPG refresh completed successfully');
-      logger.debug(`Stdout: ${stdout}`);
+      const successful = results.summary.successfulSources;
+      const total = results.summary.totalSources;
+      logger.info(`EPG refresh completed: ${successful}/${total} sources successful`);
 
       // Log database stats after refresh
-      db.getDatabaseStats().then(stats => {
-        logger.info(`Database now contains ${stats.sourceCount} sources, ${stats.channelCount} channels, and ${stats.programCount} programs`);
-      }).catch(err => {
-        logger.error(`Error fetching database stats: ${err.message}`);
-      });
-    });
+      const stats = await epgDatabaseService.getStats();
+      logger.info(`Database now contains ${stats.sources} sources, ${stats.channels} channels, and ${stats.programs} programs`);
+    } catch (error) {
+      logger.error(`Scheduled EPG refresh failed: ${error.message}`);
+    }
   });
 
   logger.info('Automatic EPG refresh schedule configured successfully');

@@ -3,7 +3,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs').promises;
 const logger = require('../utils/logger');
-const { getSession, updateSessionData } = require('../utils/sessionStorage');
+const { getSession, updateSessionData } = require('../utils/session');
 const { saveJsonToFile, readJsonFromFile, getSessionStats, cleanupSessions } = require('../utils/storageUtils');
 const epgService = require('../services/epgService');
 const cacheService = require('../services/cacheService');
@@ -254,7 +254,7 @@ router.post('/session/create-and-register', (req, res) => {
     
     // Also register with sessionStorage if available
     try {
-        const { updateSessionData } = require('../utils/sessionStorage');
+        const { updateSessionData } = require('../utils/session');
         updateSessionData(sessionId, {
             created: new Date(),
             lastAccessed: new Date()

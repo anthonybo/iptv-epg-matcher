@@ -10,7 +10,8 @@ const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
 const logger = require('../config/logger');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const iptvDatabaseService = require('../services/iptvDatabase');
+const postgresService = require('../services/postgresService');
 const metricsService = require('../services/metricsService');
 
 // Connection pooling agents for efficient HTTP/HTTPS requests
@@ -38,27 +39,20 @@ logger.info('[XTREAM] HTTP/HTTPS connection pooling enabled (maxSockets: 10, kee
  */
 async function validateCredentials(username, password) {
   try {
-    const db = await iptvDatabaseService.connect();
+    const result = await postgresService.query(`
+      SELECT * FROM credentials
+      WHERE username = $1 AND password = $2
+    `, [username, password]);
 
-    const credential = await new Promise((resolve, reject) => {
-      db.get(`
-        SELECT * FROM generated_credentials
-        WHERE username = ? AND password = ?
-      `, [username, password], (err, row) => {
-        if (err) reject(err);
-        else resolve(row);
-      });
-    });
+    const credential = result.rows[0];
 
     if (credential) {
-      // Update last_accessed timestamp
-      db.run(`
-        UPDATE generated_credentials
-        SET last_accessed = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [credential.id], (err) => {
-        if (err) logger.error('Failed to update last_accessed:', err);
-      });
+      // Update last_used timestamp
+      await postgresService.query(`
+        UPDATE credentials
+        SET last_used = CURRENT_TIMESTAMP
+        WHERE id = $1
+      `, [credential.id]);
     }
 
     return credential;
@@ -125,21 +119,19 @@ router.get('/player_api.php', async (req, res) => {
   }
 
   if (action === 'get_live_streams') {
-    // Return channel list
-    const db = await iptvDatabaseService.connect();
+    // Return channel list from PostgreSQL
     const categoryId = req.query.category_id;
 
     let query = `
       SELECT
         m.iptv_channel_id,
-        m.iptv_channel_name,
         m.epg_channel_id,
         c.name,
-        c.logo,
+        c.logo_url as logo,
         c.group_title
       FROM epg_matches m
       JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
-      WHERE m.user_id = ?
+      WHERE m.user_id = $1
     `;
 
     const params = [credential.user_id];
@@ -149,21 +141,17 @@ router.get('/player_api.php', async (req, res) => {
       query += ` AND c.group_title = (
         SELECT DISTINCT group_title FROM iptv_channels
         JOIN epg_matches ON iptv_channels.channel_id = epg_matches.iptv_channel_id
-        WHERE epg_matches.user_id = ?
+        WHERE epg_matches.user_id = $2
         ORDER BY group_title
-        LIMIT 1 OFFSET ?
+        LIMIT 1 OFFSET $3
       )`;
       params.push(credential.user_id, parseInt(categoryId) - 1);
     }
 
     query += ' ORDER BY c.name';
 
-    const channels = await new Promise((resolve, reject) => {
-      db.all(query, params, (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    });
+    const result = await postgresService.query(query, params);
+    const channels = result.rows;
 
     // Get unique category mapping for category IDs
     const categoryMap = new Map();
@@ -179,7 +167,7 @@ router.get('/player_api.php', async (req, res) => {
     // Format channels for XTREAM API
     const formattedChannels = channels.map((ch, index) => ({
       num: index + 1,
-      name: ch.name || ch.iptv_channel_name,
+      name: ch.name,
       stream_type: "live",
       stream_id: index + 1,
       stream_icon: ch.logo || '',
@@ -463,12 +451,12 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
         SELECT
           m.iptv_channel_id,
           c.name,
-          c.logo,
-          c.url,
-          s.username as source_username,
-          s.password as source_password,
-          s.mac_address as source_mac,
-          s.type as source_type
+          c.logo_url as logo,
+          c.stream_url as url,
+          c.source_username,
+          c.source_password,
+          c.source_mac,
+          c.source_type
         FROM epg_matches m
         JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
         JOIN iptv_sources s ON c.source_id = s.id
@@ -730,13 +718,13 @@ router.get('/stream/:channelId', async (req, res) => {
         SELECT
           c.channel_id,
           c.name,
-          c.logo,
-          c.url,
+          c.logo_url as logo,
+          c.stream_url as url,
           c.group_title,
-          s.username as source_username,
-          s.password as source_password,
-          s.mac_address as source_mac,
-          s.type as source_type,
+          c.source_username,
+          c.source_password,
+          c.source_mac,
+          c.source_type,
           s.user_id
         FROM iptv_channels c
         JOIN iptv_sources s ON c.source_id = s.id

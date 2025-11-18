@@ -3,6 +3,7 @@ import { addAuthToStreamUrl } from './utils/streamAuth';
 import { detectVideoQuality } from './utils/videoQuality';
 import { useCast } from './hooks/useCast';
 import CastButton from './components/CastButton';
+import apiClient from './utils/apiClient';
 
 /**
  * Enhanced IPTVPlayer - Browser-compatible player for IPTV streams
@@ -125,75 +126,111 @@ const IPTVPlayer = ({
   useEffect(() => {
     const channelId = getChannelId();
     if (sessionId && selectedChannel && channelId) {
-      // Only fetch EPG data if the channel has a matched EPG ID
-      if (matchedChannels[channelId]) {
-        const epgId = matchedChannels[channelId];
-        log('info', 'Fetching EPG data for matched channel', {
-          channelId: channelId,
-          matchedEpgId: epgId
-        });
+      console.log('[IPTVPlayer] Fetching EPG data for channel:', channelId);
 
-        // Use the EPG ID for fetching program data
-        fetchEpgData(epgId);
-      } else {
-        // Clear EPG data when there's no match
-        setEpgData(null);
-        log('info', 'No EPG match for channel, clearing EPG data', {
-          channelId: channelId
-        });
-      }
+      // Always try to fetch EPG data - backend checks PostgreSQL for match
+      log('info', 'Fetching EPG data for channel', {
+        iptvChannelId: channelId
+      });
+
+      // IMPORTANT: Pass the IPTV channel ID, NOT the EPG ID!
+      // The backend expects the IPTV channel ID and will look up the match in PostgreSQL
+      fetchEpgData(channelId);
     }
-  }, [sessionId, selectedChannel, matchedChannels]);
-  
-  // Fetch EPG data for the current channel using proper ID
-  const fetchEpgData = async (epgId) => {
-    if (!sessionId || !epgId) return;
+  }, [sessionId, selectedChannel]);
 
-    console.log('[IPTVPlayer] fetchEpgData called with:', epgId);
+  // Listen for EPG match updates and refresh data immediately
+  useEffect(() => {
+    const handleEpgMatchUpdate = (event) => {
+      const { iptvChannelId, epgChannelId } = event.detail || {};
+      const currentChannelId = getChannelId();
+
+      log('info', 'Received epgMatchUpdated event', {
+        iptvChannelId,
+        epgChannelId,
+        currentChannelId,
+        isCurrentChannel: iptvChannelId === currentChannelId
+      });
+
+      // If this match is for the currently displayed channel, refresh EPG data immediately
+      // IMPORTANT: The backend endpoint expects the IPTV channel ID, NOT the EPG ID!
+      if (iptvChannelId === currentChannelId) {
+        log('info', 'Refreshing EPG data for current channel after match using IPTV channel ID');
+
+        // Fetch EPG data by passing the IPTV channel ID
+        // The backend will look up the match and return the EPG programs
+        if (!sessionId || !iptvChannelId) return;
+
+        apiClient.get(`/epg/${sessionId}?channelId=${encodeURIComponent(iptvChannelId)}`)
+          .then(response => {
+            log('info', 'EPG data refreshed after match', {
+              hasCurrentProgram: !!response.data.currentProgram,
+              programCount: response.data.programs?.length || 0
+            });
+            setEpgData(response.data);
+          })
+          .catch(error => {
+            log('error', 'Failed to refresh EPG data after match', { error: error.message });
+          });
+      }
+    };
+
+    window.addEventListener('epgMatchUpdated', handleEpgMatchUpdate);
+
+    return () => {
+      window.removeEventListener('epgMatchUpdated', handleEpgMatchUpdate);
+    };
+  }, [sessionId, selectedChannel]);
+  
+  // Fetch EPG data for the current channel using IPTV channel ID
+  // IMPORTANT: This function expects the IPTV channel ID (e.g., 'stalker_066baa94_45447'),
+  // NOT the EPG channel ID. The backend will look up the match.
+  const fetchEpgData = async (iptvChannelId) => {
+    if (!sessionId || !iptvChannelId) return;
+
+    console.log('[IPTVPlayer] fetchEpgData called with IPTV channel ID:', iptvChannelId);
 
     try {
-      // If epgId is an object, extract the actual ID with multiple fallbacks
+      // If iptvChannelId is an object, extract the actual ID with multiple fallbacks
       let channelIdStr;
-      
-      if (typeof epgId === 'object') {
+
+      if (typeof iptvChannelId === 'object') {
         // Use multiple fallbacks for finding the ID
-        channelIdStr = epgId.epgId || epgId.id || '';
-        
+        channelIdStr = iptvChannelId.id || iptvChannelId.epgId || '';
+
         // If we still don't have an ID but have an object, use a string representation as last resort
         if (!channelIdStr) {
           try {
-            channelIdStr = JSON.stringify(epgId);
-            log('warn', `Had to use JSON representation of epgId: ${channelIdStr}`);
+            channelIdStr = JSON.stringify(iptvChannelId);
+            log('warn', `Had to use JSON representation of iptvChannelId: ${channelIdStr}`);
           } catch (err) {
-            log('error', 'Failed to stringify epgId object', { error: err.message });
+            log('error', 'Failed to stringify iptvChannelId object', { error: err.message });
             return;
           }
         }
       } else {
         // Convert to string if it's a primitive value
-        channelIdStr = String(epgId);
+        channelIdStr = String(iptvChannelId);
       }
-      
+
       if (!channelIdStr) {
-        log('error', 'Invalid EPG ID: empty after extraction', { originalEpgId: epgId });
+        log('error', 'Invalid IPTV channel ID: empty after extraction', { originalId: iptvChannelId });
         return;
       }
-      
-      log('info', `Fetching EPG data for ID: ${channelIdStr}`);
-      
-      const response = await fetch(`http://localhost:5001/api/epg/${sessionId}?channelId=${encodeURIComponent(channelIdStr)}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        log('info', 'EPG data received', { 
-          hasCurrentProgram: !!data.currentProgram,
-          programCount: data.programs?.length || 0,
-          sourceKey: data.sourceKey || 'unknown'
+
+      log('info', `Fetching EPG data for IPTV channel ID: ${channelIdStr}`);
+
+      const response = await apiClient.get(`/epg/${sessionId}?channelId=${encodeURIComponent(channelIdStr)}`);
+
+      if (response.data) {
+        log('info', 'EPG data received', {
+          hasCurrentProgram: !!response.data.currentProgram,
+          programCount: response.data.programs?.length || 0,
+          sourceKey: response.data.sourceKey || 'unknown'
         });
-        setEpgData(data);
+        setEpgData(response.data);
       } else {
-        const errorText = await response.text();
-        log('error', `Failed to load EPG data: ${response.status} ${response.statusText}`, { responseText: errorText });
+        log('error', 'No EPG data returned');
         setEpgData(null);
       }
     } catch (error) {

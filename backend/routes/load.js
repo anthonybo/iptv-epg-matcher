@@ -26,7 +26,7 @@ const {
 const { finalizeProcessing } = require('../services/dataProcessingService');
 const { broadcastSSEUpdate } = require('../utils/sseUtils'); // Import the broadcastSSEUpdate function
 const { processWithDetailedUpdates } = require('../services/detailedProgressService');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const iptvDatabaseService = require('../services/iptvDatabase');
 const { optionalAuth } = require('../middleware/authMiddleware');
 
 // Set up upload middleware

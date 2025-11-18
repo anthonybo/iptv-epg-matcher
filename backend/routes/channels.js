@@ -4,8 +4,8 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../config/logger');
-const sessionStorage = require('../utils/sessionStorage');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const sessionStorage = require('../utils/session');
+const iptvDatabaseService = require('../services/iptvDatabase');
 const { authMiddleware } = require('../middleware/authMiddleware');
 
 /**
@@ -64,12 +64,12 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
         // Transform channels to match expected format
         const transformedChannels = result.channels.map(ch => ({
           id: ch.id,
-          sourceId: ch.sourceId,
-          sourceName: ch.sourceName,
-          sourceType: ch.sourceType,
-          tvgId: ch.tvg?.id || ch.id,
+          sourceId: ch.sourceid || ch.sourceId,
+          sourceName: ch.sourcename || ch.sourceName,
+          sourceType: ch.sourcetype || ch.sourceType,
+          tvgId: ch.tvg_id || ch.id,
           name: ch.name,
-          groupTitle: ch.group?.title || '',
+          groupTitle: ch.group_title || ch.category || '',
           logo: ch.logo || '',
           url: ch.url,
           categories: ch.categories || []

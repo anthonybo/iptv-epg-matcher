@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS iptv_sources (
     username VARCHAR(255),
     password VARCHAR(255),
     mac_address VARCHAR(17),
+    channel_count INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_refreshed TIMESTAMP
@@ -76,7 +77,7 @@ CREATE TRIGGER update_iptv_sources_updated_at
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS iptv_channels (
     id SERIAL PRIMARY KEY,
-    channel_id VARCHAR(255) UNIQUE NOT NULL,  -- e.g., "xtream_12345", "stalker_67890"
+    channel_id VARCHAR(255) NOT NULL,  -- e.g., "xtream_12345", "stalker_67890"
     source_id INTEGER REFERENCES iptv_sources(id) ON DELETE CASCADE,
     name VARCHAR(500) NOT NULL,
     stream_url TEXT,
@@ -91,7 +92,8 @@ CREATE TABLE IF NOT EXISTS iptv_channels (
     source_url TEXT,
     source_mac VARCHAR(17),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (channel_id, source_id)  -- Unique per source, not globally
 );
 
 CREATE INDEX IF NOT EXISTS idx_iptv_channels_source_id ON iptv_channels(source_id);

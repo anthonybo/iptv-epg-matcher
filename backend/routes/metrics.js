@@ -123,7 +123,7 @@ router.get('/timeseries/:type', authMiddleware, requireAuth, (req, res) => {
 router.get('/history/bandwidth', authMiddleware, requireAuth, async (req, res) => {
   try {
     const { from, to, limit = 1000 } = req.query;
-    const db = await require('../services/iptvDatabaseService').connect();
+    const db = await require('../services/iptvDatabase').connect();
 
     let query = 'SELECT * FROM metrics_bandwidth WHERE 1=1';
     const params = [];
@@ -158,7 +158,7 @@ router.get('/history/bandwidth', authMiddleware, requireAuth, async (req, res) =
 router.get('/history/requests', authMiddleware, requireAuth, async (req, res) => {
   try {
     const { from, to, limit = 1000 } = req.query;
-    const db = await require('../services/iptvDatabaseService').connect();
+    const db = await require('../services/iptvDatabase').connect();
 
     let query = 'SELECT * FROM metrics_requests WHERE 1=1';
     const params = [];
@@ -193,7 +193,7 @@ router.get('/history/requests', authMiddleware, requireAuth, async (req, res) =>
 router.get('/history/system', authMiddleware, requireAuth, async (req, res) => {
   try {
     const { from, to, limit = 1000 } = req.query;
-    const db = await require('../services/iptvDatabaseService').connect();
+    const db = await require('../services/iptvDatabase').connect();
 
     let query = 'SELECT * FROM metrics_system WHERE 1=1';
     const params = [];
@@ -228,7 +228,7 @@ router.get('/history/system', authMiddleware, requireAuth, async (req, res) => {
 router.get('/history/streams', authMiddleware, requireAuth, async (req, res) => {
   try {
     const { from, to, limit = 100, type, userId } = req.query;
-    const db = await require('../services/iptvDatabaseService').connect();
+    const db = await require('../services/iptvDatabase').connect();
 
     let query = 'SELECT * FROM metrics_streams WHERE 1=1';
     const params = [];
@@ -273,7 +273,7 @@ router.get('/history/streams', authMiddleware, requireAuth, async (req, res) => 
 router.get('/stats/summary', authMiddleware, requireAuth, async (req, res) => {
   try {
     const { from, to } = req.query;
-    const db = await require('../services/iptvDatabaseService').connect();
+    const db = await require('../services/iptvDatabase').connect();
     const params = [];
 
     // Stream statistics

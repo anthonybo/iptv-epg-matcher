@@ -79,7 +79,7 @@ function getSession(sessionId) {
     
     // Check the sessionStorage if available
     try {
-        const { getSession: getSessionStorageSession } = require('../utils/sessionStorage');
+        const { getSession: getSessionStorageSession } = require('../utils/session');
         const sessionStorageSession = getSessionStorageSession(sessionId);
         
         if (sessionStorageSession) {

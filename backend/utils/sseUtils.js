@@ -83,9 +83,9 @@ function getDebugCallstack() {
  */
 function broadcastSSEUpdate(data, specificSessionId = null) {
   try {
-    // Prevent broadcasting with null session ID
-    if (specificSessionId === null || specificSessionId === 'null' || specificSessionId === 'undefined') {
-      logger.warn(`Attempted to broadcast to invalid session ID: ${JSON.stringify(specificSessionId)}`, {
+    // Prevent broadcasting with invalid string session IDs (but allow null/undefined for "broadcast to all")
+    if (specificSessionId === 'null' || specificSessionId === 'undefined') {
+      logger.warn(`Attempted to broadcast to invalid session ID string: ${JSON.stringify(specificSessionId)}`, {
         dataType: data?.type || 'unknown',
         callstack: getDebugCallstack()
       });
@@ -164,7 +164,7 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
       }
     } else {
       // Broadcast to all connected clients in both systems
-      logger.debug(`Broadcasting to all sessions.`);
+      logger.info(`[SSE Broadcast] Broadcasting to all sessions...`);
       let clientCount = 0;
       
       // First try the new app.locals.sessions system
@@ -181,12 +181,24 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
                   });
                   clientCount++;
                 } else if (client.res && !client.res.writableEnded) {
-                  const dataString = JSON.stringify({
-                    ...data,
-                    sessionId
-                  });
-                  client.res.write(`data: ${dataString}\n\n`);
-                  clientCount++;
+                  try {
+                    const dataString = JSON.stringify({
+                      ...data,
+                      sessionId
+                    });
+
+                    // Write SSE message
+                    const written = client.res.write(`data: ${dataString}\n\n`);
+
+                    // Log if write failed
+                    if (!written) {
+                      logger.warn(`[SSE] Write buffer full for session ${sessionId}`);
+                    }
+
+                    clientCount++;
+                  } catch (writeError) {
+                    logger.error(`[SSE] Error writing to client in session ${sessionId}: ${writeError.message}`);
+                  }
                 }
               } catch (clientError) {
                 logger.error(`Error sending update to client in session ${sessionId}: ${clientError.message}`);
@@ -199,6 +211,8 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
         });
       }
       
+      logger.info(`[SSE Broadcast] Broadcasted to ${clientCount} clients via app.locals.sessions`);
+
       // Also try the legacy sseClients map
       sseClients.forEach((clients, sessionId) => {
         clients.forEach(client => {
@@ -213,8 +227,8 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
           }
         });
       });
-      
-      logger.debug(`Broadcast SSE update to ${clientCount} clients`);
+
+      logger.info(`[SSE Broadcast] Broadcast SSE update to ${clientCount} total clients`);
     }
   } catch (error) {
     logger.error('Error broadcasting SSE update:', error);

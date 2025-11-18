@@ -7,10 +7,11 @@ const path = require('path');
 const fs = require('fs');
 const { exec, spawn } = require('child_process');
 const logger = require('../utils/logger');
-const sessionStorage = require('../utils/sessionStorage');
-const sqlite3 = require('sqlite3').verbose();
+const sessionStorage = require('../utils/session');
 const { authMiddleware } = require('../middleware/authMiddleware');
 const liveEventsService = require('../services/liveEventsService');
+const { broadcastSSEUpdate } = require('../utils/sseUtils');
+const postgresService = require('../services/postgresService');
 
 // Apply optional auth middleware to all routes
 router.use(authMiddleware);
@@ -27,14 +28,10 @@ async function getEnabledEpgSources() {
 
   // Get user-added sources from database
   try {
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
-    const userSources = await new Promise((resolve, reject) => {
-      iptvDb.all('SELECT url FROM user_epg_sources WHERE enabled = 1', [], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    const result = await postgresService.query(
+      'SELECT url FROM user_epg_sources WHERE enabled = true'
+    );
+    const userSources = result.rows || [];
 
     if (userSources && userSources.length > 0) {
       const userUrls = userSources.map(s => s.url);
@@ -60,53 +57,64 @@ let epgRefreshStatus = {
   startedAt: null,
   currentSource: 0,
   totalSources: 0,
-  lastMessage: null
+  lastMessage: null,
+  completedSources: [], // Track which sources completed successfully
+  lastResults: null // Store last refresh results
 };
 
-// Path to the SQLite database created by epg_parser.py
-const DB_PATH = path.join(__dirname, '../data/epg.db');
+// Import EPG database service for PostgreSQL
+const epgDatabaseService = require('../services/epgDatabaseService');
 
-// Initialize database connection
-let db = null;
+// For PostgreSQL, we don't have a file path - use connection string instead
+const DB_PATH = 'PostgreSQL (iptvguru database)';
 
+// No-op function for compatibility (PostgreSQL doesn't need initialization)
 const initDb = async () => {
-  return new Promise((resolve, reject) => {
-    if (db) {
-      return resolve(db);
-    }
-    
-    db = new sqlite3.Database(DB_PATH, sqlite3.OPEN_READONLY, (err) => {
-      if (err) {
-        logger.error(`Failed to open database: ${err.message}`);
-        return reject(err);
-      }
-      
-      logger.info(`Connected to SQLite database at ${DB_PATH}`);
-      resolve(db);
-    });
-  });
+  // PostgreSQL pool is already initialized, nothing to do
+  return Promise.resolve();
 };
 
-// Initialize database on module load
-initDb().catch(err => {
-  logger.error(`Database initialization error: ${err.message}`);
-});
+// Helper to run queries with proper error handling (uses PostgreSQL)
+const runQuery = async (sql, params = []) => {
+  try {
+    const { pool } = require('../services/postgresService');
 
-// Helper to run queries with proper error handling
-const runQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    if (!db) {
-      return reject(new Error('Database not initialized'));
-    }
-    
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        logger.error(`Query error: ${err.message}, SQL: ${sql}, Params: ${JSON.stringify(params)}`);
-        return reject(err);
-      }
-      resolve(rows);
-    });
-  });
+    // Convert SQLite table names to PostgreSQL table names
+    let pgSql = sql;
+
+    pgSql = pgSql.replace(/\bFROM\s+channels\b/gi, 'FROM epg_channels');
+    pgSql = pgSql.replace(/\bJOIN\s+channels\b/gi, 'JOIN epg_channels');
+    pgSql = pgSql.replace(/\bFROM\s+programs\b/gi, 'FROM epg_programs');
+    pgSql = pgSql.replace(/\bJOIN\s+programs\b/gi, 'JOIN epg_programs');
+    pgSql = pgSql.replace(/\bFROM\s+sources\b/gi, 'FROM epg_sources');
+    pgSql = pgSql.replace(/\bJOIN\s+sources\b/gi, 'JOIN epg_sources');
+
+    // Convert SQLite column names to PostgreSQL column names
+    // Use word boundaries and handle prefixed versions first
+    pgSql = pgSql.replace(/\bp\.start\b/g, 'p.start_time');
+    pgSql = pgSql.replace(/\bp\.stop\b/g, 'p.stop_time');
+
+    // Replace start/stop in SELECT, WHERE, ORDER BY contexts - be more aggressive
+    pgSql = pgSql.replace(/\bstart\b/gi, 'start_time');
+    pgSql = pgSql.replace(/\bstop\b/gi, 'stop_time');
+
+    // Convert SQLite strftime to PostgreSQL NOW() + interval
+    pgSql = pgSql.replace(/strftime\('%Y%m%d%H%M%S \+0000',\s*'now',\s*'-(\d+)\s+hours?'\)/gi,
+      (match, hours) => `NOW() - INTERVAL '${hours} hours'`);
+    pgSql = pgSql.replace(/strftime\('%Y%m%d%H%M%S \+0000',\s*'now',\s*'\+(\d+)\s+hours?'\)/gi,
+      (match, hours) => `NOW() + INTERVAL '${hours} hours'`);
+    pgSql = pgSql.replace(/strftime\('%Y%m%d%H%M%S \+0000',\s*'now'\)/gi, 'NOW()');
+
+    // Convert SQLite ? placeholders to PostgreSQL $1, $2, etc.
+    let paramIndex = 1;
+    pgSql = pgSql.replace(/\?/g, () => `$${paramIndex++}`);
+
+    const result = await pool.query(pgSql, params);
+    return result.rows;
+  } catch (err) {
+    logger.error(`Query error: ${err.message}, SQL: ${sql.substring(0, 100)}..., Params: ${JSON.stringify(params)}`);
+    throw err;
+  }
 };
 
 /**
@@ -215,11 +223,21 @@ const getDatabaseStats = async () => {
 
 // Search for channels in the database
 // Helper function to convert EPG timestamp format to ISO string
-// Converts "YYYYMMDDHHMMSS +TZTZ" to ISO format
+// Converts "YYYYMMDDHHMMSS +TZTZ" to ISO format or Date object
 const convertEPGTimestampToISO = (timestamp) => {
   if (!timestamp) return null;
 
   try {
+    // PostgreSQL returns Date objects, SQLite returns strings
+    if (timestamp instanceof Date) {
+      return timestamp.toISOString();
+    }
+
+    // Handle string timestamps (SQLite format)
+    if (typeof timestamp !== 'string') {
+      return timestamp.toString(); // Convert to string if needed
+    }
+
     // Format: "YYYYMMDDHHMMSS +TZTZ" e.g., "20251030103000 +0000"
     const match = timestamp.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{4})$/);
     if (!match) return null;
@@ -448,24 +466,37 @@ const getChannelById = async (channelId) => {
 const getProgramsByChannelId = async (channelId, startTime, endTime) => {
   try {
     await initDb();
-    
+
     // Default time window: from now to 24 hours later
     const now = startTime || new Date();
     const tomorrow = endTime || new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
-    // Format date objects to EPG format for SQLite comparison (YYYYMMDDHHmmss +0000)
-    const formatToEPGDate = (date) => {
-      const year = date.getUTCFullYear();
-      const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-      const day = String(date.getUTCDate()).padStart(2, '0');
-      const hour = String(date.getUTCHours()).padStart(2, '0');
-      const minute = String(date.getUTCMinutes()).padStart(2, '0');
-      const second = String(date.getUTCSeconds()).padStart(2, '0');
-      return `${year}${month}${day}${hour}${minute}${second} +0000`;
-    };
+    // Check if we're using PostgreSQL or SQLite
+    const usePostgres = process.env.USE_POSTGRES === 'true';
 
-    const nowStr = formatToEPGDate(now);
-    const tomorrowStr = formatToEPGDate(tomorrow);
+    let nowParam, tomorrowParam;
+
+    if (usePostgres) {
+      // PostgreSQL: Use ISO format timestamps
+      nowParam = now.toISOString();
+      tomorrowParam = tomorrow.toISOString();
+    } else {
+      // SQLite: Format date objects to EPG format (YYYYMMDDHHmmss +0000)
+      const formatToEPGDate = (date) => {
+        const year = date.getUTCFullYear();
+        const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(date.getUTCDate()).padStart(2, '0');
+        const hour = String(date.getUTCHours()).padStart(2, '0');
+        const minute = String(date.getUTCMinutes()).padStart(2, '0');
+        const second = String(date.getUTCSeconds()).padStart(2, '0');
+        return `${year}${month}${day}${hour}${minute}${second} +0000`;
+      };
+      nowParam = formatToEPGDate(now);
+      tomorrowParam = formatToEPGDate(tomorrow);
+    }
+
+    const nowStr = nowParam;
+    const tomorrowStr = tomorrowParam;
 
     // Log the time window for debugging
     logger.info(`Searching for programs between ${nowStr} and ${tomorrowStr}`);
@@ -647,168 +678,165 @@ const getProgramsByChannelId = async (channelId, startTime, endTime) => {
   }
 };
 
-// Run the Python parser with live progress streaming
+// Import EPG parser service
+const epgParserService = require('../services/epgParserService');
+
+// Run the Node.js EPG parser
 const runEpgParser = async (options = {}) => {
-  return new Promise(async (resolve, reject) => {
-    // Check if already running
-    if (epgRefreshStatus.isRunning) {
-      logger.warn('EPG refresh already in progress, ignoring duplicate request');
-      return reject(new Error('EPG refresh already in progress'));
-    }
+  // Check if already running
+  if (epgRefreshStatus.isRunning) {
+    logger.warn('EPG refresh already in progress, ignoring duplicate request');
+    throw new Error('EPG refresh already in progress');
+  }
 
-    const pythonPath = 'python3';
-    const scriptPath = path.join(__dirname, '../epg_parser.py');
-
-    // Get all enabled sources (config + user sources)
-    const allSources = await getEnabledEpgSources();
-    logger.info(`[EPG Refresh] Found ${allSources.length} total EPG sources (config + user sources)`);
-
-    let args = ['--no-menu']; // Always use non-interactive mode
-
-    if (options.force) {
-      args.push('--force');
-    }
-
-    if (options.source) {
-      args.push(`--source=${options.source}`);
-    } else {
-      // Create a temporary sources file to pass all sources to Python script
-      const tempSourcesPath = path.join(__dirname, '../cache', 'temp_sources.json');
-      try {
-        fs.writeFileSync(tempSourcesPath, JSON.stringify(allSources, null, 2));
-        args.push(`--sources=${tempSourcesPath}`);
-        logger.info(`[EPG Refresh] Created temporary sources file with ${allSources.length} sources`);
-      } catch (err) {
-        logger.error(`[EPG Refresh] Failed to create temporary sources file: ${err.message}`);
-      }
-    }
-
-    logger.info(`Running EPG parser: ${pythonPath} ${scriptPath} ${args.join(' ')}`);
-
-    epgRefreshProcess = spawn(pythonPath, [scriptPath, ...args]);
+  try {
     epgRefreshStatus = {
       isRunning: true,
       startedAt: new Date().toISOString(),
       currentSource: 0,
-      totalSources: allSources.length, // Set to number of enabled sources (including user sources)
-      lastMessage: 'Starting EPG refresh...'
+      totalSources: 0,
+      lastMessage: 'Starting EPG refresh...',
+      completedSources: [],
+      lastResults: null
     };
 
-    let stdout = '';
-    let stderr = '';
+    // Broadcast start
+    broadcastToAllClients('epg-progress', {
+      type: 'epg-progress',
+      message: 'Starting EPG refresh...',
+      timestamp: new Date().toISOString()
+    });
 
-    // Capture stdout line by line and broadcast via SSE
-    epgRefreshProcess.stdout.on('data', (data) => {
-      const output = data.toString();
-      stdout += output;
+    // Parse all sources with progress callback
+    const results = await epgParserService.parseAllSources({
+      force: options.force || false,
+      cache: true,
+      dropIndexes: true,
+      onProgress: (message) => {
+        // Update status
+        epgRefreshStatus.lastMessage = message;
 
-      // Parse output and broadcast progress
-      const lines = output.split('\n');
-      lines.forEach(line => {
-        if (line.trim()) {
-          logger.info(`[EPG Parser] ${line}`);
-
-          // Update global status
-          epgRefreshStatus.lastMessage = line.trim();
-
-          // Extract source progress
-          const sourceMatch = line.match(/Processing source (\d+)\/(\d+):/);
-          if (sourceMatch) {
-            epgRefreshStatus.currentSource = parseInt(sourceMatch[1]);
-            epgRefreshStatus.totalSources = parseInt(sourceMatch[2]);
-          }
-
-          // Broadcast progress to all connected clients
-          if (global.app && global.app.locals && global.app.locals.sessions) {
-            Object.keys(global.app.locals.sessions).forEach(sessionId => {
-              const session = global.app.locals.sessions[sessionId];
-              if (session && session.clients) {
-                session.clients.forEach(client => {
-                  if (client && client.send) {
-                    client.send('epg-progress', {
-                      type: 'epg-progress',
-                      message: line.trim(),
-                      timestamp: new Date().toISOString()
-                    });
-                  }
-                });
-              }
-            });
-          }
+        // Extract source progress from message like "Processing source 2/7: EPG.pw - US"
+        const sourceMatch = message.match(/Processing source (\d+)\/(\d+):/);
+        if (sourceMatch) {
+          epgRefreshStatus.currentSource = parseInt(sourceMatch[1]);
+          epgRefreshStatus.totalSources = parseInt(sourceMatch[2]);
         }
-      });
-    });
 
-    epgRefreshProcess.stderr.on('data', (data) => {
-      const output = data.toString();
-      stderr += output;
-      logger.error(`[EPG Parser Error] ${output}`);
-    });
+        // Extract total sources from message like "Found 7 EPG sources to process"
+        const totalMatch = message.match(/Found (\d+) EPG sources to process/);
+        if (totalMatch) {
+          epgRefreshStatus.totalSources = parseInt(totalMatch[1]);
+        }
 
-    epgRefreshProcess.on('close', (code) => {
-      // Reset status
-      epgRefreshStatus.isRunning = false;
-      epgRefreshProcess = null;
+        // Extract completed source info from message like "✓ Completed EPG Share 01 - All Sources: 15279 channels, 50000 programs"
+        const completedMatch = message.match(/✓ Completed (.+?):\s*(\d+) channels?,\s*(\d+) programs?/);
+        if (completedMatch) {
+          const sourceName = completedMatch[1];
+          const channelCount = parseInt(completedMatch[2]);
+          const programCount = parseInt(completedMatch[3]);
 
-      if (code !== 0) {
-        logger.error(`EPG parser exited with code ${code}`);
-        logger.error(`Stderr: ${stderr}`);
-
-        // Broadcast error
-        if (global.app && global.app.locals && global.app.locals.sessions) {
-          Object.keys(global.app.locals.sessions).forEach(sessionId => {
-            const session = global.app.locals.sessions[sessionId];
-            if (session && session.clients) {
-              session.clients.forEach(client => {
-                if (client && client.send) {
-                  client.send('epg-error', {
-                    type: 'epg-error',
-                    message: `EPG refresh failed with exit code ${code}`,
-                    timestamp: new Date().toISOString()
-                  });
-                }
-              });
-            }
+          epgRefreshStatus.completedSources.push({
+            name: sourceName,
+            channelCount: channelCount,
+            programCount: programCount,
+            status: 'complete'
           });
+
+          logger.info(`[EPG Progress] Marked source as complete: ${sourceName} (${channelCount} channels, ${programCount} programs)`);
         }
 
-        return reject(new Error(`EPG parser failed with exit code ${code}`));
-      }
+        // Extract failed source info from message like "✗ Failed EPG Share 01: error message"
+        const failedMatch = message.match(/✗ Failed (.+?):\s*(.+)$/);
+        if (failedMatch) {
+          const sourceName = failedMatch[1];
+          const errorMessage = failedMatch[2];
 
-      logger.info(`EPG parser completed successfully`);
+          epgRefreshStatus.completedSources.push({
+            name: sourceName,
+            channelCount: 0,
+            programCount: 0,
+            status: 'failed',
+            error: errorMessage
+          });
 
-      // Broadcast completion
-      if (global.app && global.app.locals && global.app.locals.sessions) {
-        Object.keys(global.app.locals.sessions).forEach(sessionId => {
-          const session = global.app.locals.sessions[sessionId];
-          if (session && session.clients) {
-            session.clients.forEach(client => {
-              if (client && client.send) {
-                client.send('epg-complete', {
-                  type: 'epg-complete',
-                  message: 'EPG refresh completed successfully',
-                  timestamp: new Date().toISOString()
-                });
-              }
-            });
-          }
+          logger.info(`[EPG Progress] Marked source as failed: ${sourceName} - ${errorMessage}`);
+        }
+
+        // Debug log
+        logger.info(`[EPG Progress Callback] Broadcasting: ${message}`);
+
+        // Broadcast to frontend
+        broadcastToAllClients('epg-progress', {
+          type: 'epg-progress',
+          message: message,
+          timestamp: new Date().toISOString()
         });
       }
+    });
 
-      resolve({
-        success: true,
-        output: stdout
+    // Store results and reset running status
+    epgRefreshStatus.isRunning = false;
+    epgRefreshStatus.lastResults = results;
+
+    if (!results.success) {
+      const errorMsg = `EPG refresh completed with errors: ${results.summary.failedSources}/${results.summary.totalSources} sources failed`;
+      logger.warn(errorMsg);
+
+      // Broadcast completion with warnings
+      broadcastToAllClients('epg-complete', {
+        type: 'epg-complete',
+        message: errorMsg,
+        summary: results.summary,
+        timestamp: new Date().toISOString()
       });
+
+      return {
+        success: false,
+        message: errorMsg,
+        results: results
+      };
+    }
+
+    const successMsg = `EPG refresh completed: ${results.summary.successfulSources}/${results.summary.totalSources} sources successful, ${results.summary.totalChannels} channels, ${results.summary.totalPrograms} programs`;
+    logger.info(successMsg);
+
+    // Broadcast completion
+    broadcastToAllClients('epg-complete', {
+      type: 'epg-complete',
+      message: successMsg,
+      summary: results.summary,
+      timestamp: new Date().toISOString()
     });
 
-    epgRefreshProcess.on('error', (error) => {
-      epgRefreshStatus.isRunning = false;
-      epgRefreshProcess = null;
-      logger.error(`EPG parser process error: ${error.message}`);
-      reject(error);
+    return {
+      success: true,
+      message: successMsg,
+      results: results
+    };
+  } catch (error) {
+    epgRefreshStatus.isRunning = false;
+    logger.error(`EPG refresh error: ${error.message}`);
+
+    // Broadcast error
+    broadcastToAllClients('epg-error', {
+      type: 'epg-error',
+      message: `EPG refresh failed: ${error.message}`,
+      timestamp: new Date().toISOString()
     });
-  });
+
+    throw error;
+  }
 };
+
+// Helper function to broadcast to all connected clients
+function broadcastToAllClients(eventType, data) {
+  // Debug logging
+  logger.info(`[Broadcast Helper] Calling broadcastSSEUpdate with eventType: ${eventType}, data type: ${data.type}`);
+
+  // Use the existing SSE utility to broadcast to all sessions
+  broadcastSSEUpdate(data, null);
+}
 
 // Get categories for a session
 const getCategories = async (sessionId) => {
@@ -963,7 +991,9 @@ router.get('/refresh-status', (req, res) => {
     startedAt: epgRefreshStatus.startedAt,
     currentSource: epgRefreshStatus.currentSource,
     totalSources: epgRefreshStatus.totalSources,
-    lastMessage: epgRefreshStatus.lastMessage
+    lastMessage: epgRefreshStatus.lastMessage,
+    completedSources: epgRefreshStatus.completedSources || [],
+    lastResults: epgRefreshStatus.lastResults
   });
 });
 
@@ -1025,37 +1055,31 @@ router.get('/matched-channels', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
+    const postgresService = require('../services/postgresService');
 
-    const channels = await new Promise((resolve, reject) => {
-      iptvDb.all(`
-        SELECT
-          m.id as match_id,
-          m.iptv_channel_id,
-          m.iptv_channel_name,
-          m.epg_channel_id,
-          m.epg_channel_name,
-          m.epg_source_name,
-          m.epg_source_id,
-          m.use_dummy_epg,
-          c.id as iptv_channel_table_id,
-          c.source_id,
-          c.name,
-          c.logo,
-          c.url,
-          c.group_title,
-          c.enable_live_prefix,
-          s.name as source_name
-        FROM (SELECT * FROM epg_matches WHERE user_id = ?) m
-        JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
-        JOIN iptv_sources s ON c.source_id = s.id
-        ORDER BY c.name
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    const result = await postgresService.query(`
+      SELECT
+        m.id as match_id,
+        m.iptv_channel_id,
+        c.name as iptv_channel_name,
+        m.epg_channel_id,
+        CASE WHEN m.use_dummy_epg THEN 1 ELSE 0 END as use_dummy_epg,
+        CASE WHEN c.enable_live_prefix THEN 1 ELSE 0 END as enable_live_prefix,
+        c.id as iptv_channel_table_id,
+        c.source_id,
+        c.name,
+        c.logo_url as logo,
+        c.stream_url as url,
+        c.group_title,
+        s.name as source_name
+      FROM epg_matches m
+      JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+      JOIN iptv_sources s ON c.source_id = s.id
+      WHERE m.user_id = $1
+      ORDER BY c.name
+    `, [userId]);
+
+    const channels = result.rows;
 
     res.json({
       channels,
@@ -1082,36 +1106,27 @@ router.get('/matched-channels-with-programs', async (req, res) => {
 
     logger.info(`Getting matched channels with programs for user ${userId}`);
 
-    // Get matched channels from database
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
+    // Get matched channels from PostgreSQL database
+    const postgresService = require('../services/postgresService');
 
     const query = `
       SELECT
         m.iptv_channel_id,
-        m.iptv_channel_name,
+        c.name as iptv_channel_name,
         m.epg_channel_id,
-        m.epg_channel_name,
-        m.epg_source_name,
-        m.epg_source_id,
-        m.iptv_source_id,
         m.use_dummy_epg,
-        c.enable_live_prefix,
+        c.source_id as iptv_source_id,
         s.auto_detect_live
       FROM epg_matches m
-      LEFT JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id AND c.source_id = m.iptv_source_id
-      LEFT JOIN iptv_sources s ON m.iptv_source_id = s.id
-      WHERE m.user_id = ?
-      ORDER BY m.iptv_channel_name
+      LEFT JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+      LEFT JOIN iptv_sources s ON c.source_id = s.id
+      WHERE m.user_id = $1
+      ORDER BY c.name
     `;
     const params = [userId];
 
-    const dbMatches = await new Promise((resolve, reject) => {
-      iptvDb.all(query, params, (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    const result = await postgresService.query(query, params);
+    const dbMatches = result.rows;
 
     if (dbMatches.length === 0) {
       return res.json({
@@ -1133,7 +1148,6 @@ router.get('/matched-channels-with-programs', async (req, res) => {
         const epgChannelId = match.epg_channel_id;
         const iptvChannelId = match.iptv_channel_id;
         const iptvChannelName = match.iptv_channel_name;
-        const epgSourceName = match.epg_source_name;
 
         if (!epgChannelId) {
           logger.warn(`No EPG ID found for channel ${iptvChannelId}`);
@@ -1146,55 +1160,47 @@ router.get('/matched-channels-with-programs', async (req, res) => {
         try {
           logger.info(`Looking for IPTV channel with ID: ${iptvChannelId}`);
 
-          const iptvChannel = await new Promise((resolve, reject) => {
-            iptvDb.all(`
-              SELECT c.channel_id, c.name, c.logo, c.url, c.group_title, c.epg_channel_id, c.source_id,
-                     CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
-                     s.url as source_url,
-                     s.type as source_type
-              FROM iptv_channels c
-              LEFT JOIN iptv_sources s ON c.source_id = s.id
-              WHERE c.channel_id = ?
-            `, [iptvChannelId], (err, rows) => {
-              if (err) reject(err);
-              else resolve(rows && rows.length > 0 ? rows[0] : null);
-            });
-          });
-          iptvChannelData = iptvChannel;
+          const iptvChannelResult = await postgresService.query(`
+            SELECT c.channel_id, c.name, c.logo_url as logo, c.stream_url as url, c.group_title, c.tvg_id as epg_channel_id, c.source_id,
+                   CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
+                   s.url as source_url,
+                   s.type as source_type
+            FROM iptv_channels c
+            LEFT JOIN iptv_sources s ON c.source_id = s.id
+            WHERE c.channel_id = $1
+            LIMIT 1
+          `, [iptvChannelId]);
+          iptvChannelData = iptvChannelResult.rows[0];
 
           // If no channel found by channel_id, try matching by epg_channel_id (case-insensitive)
           if (!iptvChannelData) {
             logger.warn(`No IPTV channel found for ID: ${iptvChannelId}, trying epg_channel_id match`);
 
-            const iptvChannelByEpg = await new Promise((resolve, reject) => {
-              // Build query with optional user filtering
-              let query = `
-                SELECT c.channel_id, c.name, c.logo, c.url, c.group_title, c.epg_channel_id, c.source_id,
-                       CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
-                       s.url as source_url,
-                       s.type as source_type
-                FROM iptv_channels c
-                LEFT JOIN iptv_sources s ON c.source_id = s.id
-                WHERE LOWER(c.epg_channel_id) = LOWER(?)
-              `;
-              const params = [iptvChannelId];
+            // Build query with optional user filtering
+            let query = `
+              SELECT c.channel_id, c.name, c.logo_url as logo, c.stream_url as url, c.group_title, c.tvg_id as epg_channel_id, c.source_id,
+                     CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
+                     s.url as source_url,
+                     s.type as source_type
+              FROM iptv_channels c
+              LEFT JOIN iptv_sources s ON c.source_id = s.id
+              WHERE LOWER(c.tvg_id) = LOWER($1)
+            `;
+            const params = [iptvChannelId];
 
-              // Filter by user's sources if authenticated
-              if (userId) {
-                query += ` AND EXISTS (
-                  SELECT 1 FROM user_iptv_preferences p
-                  WHERE p.user_id = ? AND p.source_id = c.source_id
-                )`;
-                params.push(userId);
-              }
+            // Filter by user's sources if authenticated
+            if (userId) {
+              query += ` AND EXISTS (
+                SELECT 1 FROM user_iptv_preferences p
+                WHERE p.user_id = $2 AND p.source_id = c.source_id
+              )`;
+              params.push(userId);
+            }
 
-              query += ` LIMIT 1`;
+            query += ` LIMIT 1`;
 
-              iptvDb.all(query, params, (err, rows) => {
-                if (err) reject(err);
-                else resolve(rows && rows.length > 0 ? rows[0] : null);
-              });
-            });
+            const iptvChannelByEpgResult = await postgresService.query(query, params);
+            const iptvChannelByEpg = iptvChannelByEpgResult.rows[0];
 
             if (iptvChannelByEpg) {
               logger.info(`Found IPTV channel by EPG ID match: ${iptvChannelByEpg.name} (${iptvChannelByEpg.channel_id})`);
@@ -1209,32 +1215,24 @@ router.get('/matched-channels-with-programs', async (req, res) => {
             if (match.iptv_source_id) {
               logger.info(`Using stored source_id ${match.iptv_source_id} from match`);
 
-              const sourceInfo = await new Promise((resolve, reject) => {
-                iptvDb.get(`
-                  SELECT id,
-                         CASE WHEN name LIKE 'Legacy IPTV Source%' THEN url ELSE name END as name,
-                         url,
-                         type
-                  FROM iptv_sources
-                  WHERE id = ?
-                `, [match.iptv_source_id], (err, row) => {
-                  if (err) reject(err);
-                  else resolve(row);
-                });
-              });
+              const sourceInfoResult = await postgresService.query(`
+                SELECT id,
+                       CASE WHEN name LIKE 'Legacy IPTV Source%' THEN url ELSE name END as name,
+                       url,
+                       type
+                FROM iptv_sources
+                WHERE id = $1
+              `, [match.iptv_source_id]);
+              const sourceInfo = sourceInfoResult.rows[0];
 
               if (sourceInfo) {
                 // Get user's nickname if authenticated
                 if (userId) {
-                  const sourcePrefs = await new Promise((resolve, reject) => {
-                    iptvDb.get(`
-                      SELECT nickname FROM user_iptv_preferences
-                      WHERE user_id = ? AND source_id = ?
-                    `, [userId, sourceInfo.id], (err, row) => {
-                      if (err) reject(err);
-                      else resolve(row);
-                    });
-                  });
+                  const sourcePrefsResult = await postgresService.query(`
+                    SELECT nickname FROM user_iptv_preferences
+                    WHERE user_id = $1 AND source_id = $2
+                  `, [userId, sourceInfo.id]);
+                  const sourcePrefs = sourcePrefsResult.rows[0];
 
                   // Determine display name with fallback logic
                   let displayName = sourcePrefs?.nickname || sourceInfo.name;
@@ -1268,15 +1266,11 @@ router.get('/matched-channels-with-programs', async (req, res) => {
 
           // Get user's nickname for this source if available
           if (iptvChannelData && iptvChannelData.source_id && userId) {
-            const sourcePrefs = await new Promise((resolve, reject) => {
-              iptvDb.get(`
-                SELECT nickname FROM user_iptv_preferences
-                WHERE user_id = ? AND source_id = ?
-              `, [userId, iptvChannelData.source_id], (err, row) => {
-                if (err) reject(err);
-                else resolve(row);
-              });
-            });
+            const sourcePrefsResult = await postgresService.query(`
+              SELECT nickname FROM user_iptv_preferences
+              WHERE user_id = $1 AND source_id = $2
+            `, [userId, iptvChannelData.source_id]);
+            const sourcePrefs = sourcePrefsResult.rows[0];
 
             // Determine display name with fallback logic
             let displayName = sourcePrefs?.nickname || iptvChannelData.source_name;
@@ -1387,25 +1381,19 @@ router.get('/matched-channels-with-programs', async (req, res) => {
           }
 
           // Get programs for this channel (12 hours in the past to 48 hours in the future for guide view)
-          const programsSql = `
-            SELECT id, title, description, start, stop, channel_id
-            FROM programs
-            WHERE channel_id = ?
-              AND start IS NOT NULL
-              AND stop IS NOT NULL
-              AND stop > strftime('%Y%m%d%H%M%S +0000', 'now', '-12 hours')
-              AND start < strftime('%Y%m%d%H%M%S +0000', 'now', '+48 hours')
-            ORDER BY start
-            LIMIT 100
-          `;
+          // Using PostgreSQL epg_programs table via epgDatabaseService
+          const now = new Date();
+          const startTime = new Date(now.getTime() - 12 * 60 * 60 * 1000); // 12 hours ago
+          const endTime = new Date(now.getTime() + 48 * 60 * 60 * 1000);   // 48 hours from now
 
-          const programs = await runQuery(programsSql, [epgChannelId]);
+          const programs = await epgDatabaseService.getProgramsByChannelId(epgChannelId, startTime, endTime);
 
-          // Convert program timestamps to ISO format and add LIVE prefix if applicable
+          // PostgreSQL returns ISO timestamps already, no conversion needed
           const nowTimestamp = Date.now();
           formattedPrograms = await Promise.all(programs.map(async (p) => {
-            const startISO = convertEPGTimestampToISO(p.start);
-            const stopISO = convertEPGTimestampToISO(p.stop);
+            // Programs from PostgreSQL already have ISO format timestamps
+            const startISO = p.start;
+            const stopISO = p.stop;
 
             // Check if program is currently airing
             const startTime = new Date(startISO).getTime();
@@ -1448,7 +1436,7 @@ router.get('/matched-channels-with-programs', async (req, res) => {
             id: iptvChannelData?.epg_channel_id || epgChannelId
           },
           epgId: epgChannelId,
-          epgSource: epgSourceName || channelInfo?.source_name || (match.use_dummy_epg === 1 ? 'Dummy EPG' : 'Unknown'),
+          epgSource: channelInfo?.source_name || (match.use_dummy_epg === 1 ? 'Dummy EPG' : 'Unknown'),
           iptvSource: iptvSourceInfo,
           programs: formattedPrograms,
           enableLivePrefix: match.enable_live_prefix,
@@ -1461,6 +1449,13 @@ router.get('/matched-channels-with-programs', async (req, res) => {
 
     // Sort channels by name
     channelsWithEpg.sort((a, b) => a.name.localeCompare(b.name));
+
+    // Disable caching for this endpoint to ensure fresh data after matches
+    res.set({
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
 
     return res.json({
       success: true,
@@ -1491,23 +1486,15 @@ router.put('/matched-channels/:channelId', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
-
     // Update the channel in iptv_channels table
-    await new Promise((resolve, reject) => {
-      iptvDb.run(`
-        UPDATE iptv_channels
-        SET name = ?, logo = ?, group_title = ?
-        WHERE channel_id = ?
-        AND source_id IN (
-          SELECT s.id FROM iptv_sources s WHERE s.user_id = ?
-        )
-      `, [name, logo, group_title, channelId, userId], function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
-      });
-    });
+    await postgresService.query(`
+      UPDATE iptv_channels
+      SET name = $1, logo = $2, group_title = $3
+      WHERE channel_id = $4
+      AND source_id IN (
+        SELECT s.id FROM iptv_sources s WHERE s.user_id = $5
+      )
+    `, [name, logo, group_title, channelId, userId]);
 
     logger.info(`Updated channel ${channelId} for user ${userId}`);
 
@@ -1535,21 +1522,13 @@ router.delete('/matched-channels/:matchId', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
-
     // Delete the specific match by ID (ensure it belongs to this user)
-    const result = await new Promise((resolve, reject) => {
-      iptvDb.run(`
-        DELETE FROM epg_matches
-        WHERE id = ? AND user_id = ?
-      `, [matchId, userId], function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
-      });
-    });
+    const result = await postgresService.query(`
+      DELETE FROM epg_matches
+      WHERE id = $1 AND user_id = $2
+    `, [matchId, userId]);
 
-    if (result === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Match not found' });
     }
 
@@ -1584,22 +1563,14 @@ router.put('/matched-channels/:matchId/dummy-epg', async (req, res) => {
       return res.status(400).json({ error: 'useDummyEpg must be a boolean' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
-
     // Update the dummy EPG flag for this match
-    const result = await new Promise((resolve, reject) => {
-      iptvDb.run(`
-        UPDATE epg_matches
-        SET use_dummy_epg = ?
-        WHERE id = ? AND user_id = ?
-      `, [useDummyEpg ? 1 : 0, matchId, userId], function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
-      });
-    });
+    const result = await postgresService.query(`
+      UPDATE epg_matches
+      SET use_dummy_epg = $1
+      WHERE id = $2 AND user_id = $3
+    `, [useDummyEpg ? 1 : 0, matchId, userId]);
 
-    if (result === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Match not found' });
     }
 
@@ -1628,30 +1599,22 @@ router.get('/channel-programs/:channelId', async (req, res) => {
       return res.status(400).json({ error: 'Channel ID is required' });
     }
 
-    const path = require('path');
-    const sqlite3 = require('sqlite3').verbose();
-    const epgDbPath = path.join(__dirname, '../data/epg.db');
-    const epgDb = new sqlite3.Database(epgDbPath);
+    const result = await postgresService.query(`
+      SELECT
+        channel_id,
+        title,
+        start_time as start,
+        stop_time as stop,
+        description,
+        categories as category
+      FROM epg_programs
+      WHERE channel_id = $1
+      AND stop_time >= NOW() - INTERVAL '2 hours'
+      ORDER BY start_time
+      LIMIT 50
+    `, [channelId]);
 
-    const programs = await new Promise((resolve, reject) => {
-      epgDb.all(`
-        SELECT channel_id, title, start, stop, description, category
-        FROM programs
-        WHERE channel_id = ?
-        AND substr(stop, 1, 14) >= strftime('%Y%m%d%H%M%S', 'now', '-2 hours')
-        ORDER BY start
-        LIMIT 50
-      `, [channelId], (err, rows) => {
-        if (err) {
-          logger.warn(`Error fetching EPG programs: ${err.message}`);
-          resolve([]);
-        } else {
-          resolve(rows || []);
-        }
-      });
-    });
-
-    epgDb.close();
+    const programs = result.rows || [];
 
     res.json({
       programs,
@@ -1681,29 +1644,21 @@ router.post('/matched-channels/batch-update-category', async (req, res) => {
       return res.status(400).json({ error: 'Old and new category names required' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
-
     // Update all channels in the category for this user
-    const result = await new Promise((resolve, reject) => {
-      iptvDb.run(`
-        UPDATE iptv_channels
-        SET group_title = ?
-        WHERE group_title = ?
-        AND source_id IN (
-          SELECT s.id FROM iptv_sources s WHERE s.user_id = ?
-        )
-      `, [newCategory, oldCategory, userId], function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
-      });
-    });
+    const result = await postgresService.query(`
+      UPDATE iptv_channels
+      SET group_title = $1
+      WHERE group_title = $2
+      AND source_id IN (
+        SELECT s.id FROM iptv_sources s WHERE s.user_id = $3
+      )
+    `, [newCategory, oldCategory, userId]);
 
-    logger.info(`Renamed category "${oldCategory}" to "${newCategory}" for user ${userId}, ${result} channels updated`);
+    logger.info(`Renamed category "${oldCategory}" to "${newCategory}" for user ${userId}, ${result.rowCount} channels updated`);
 
     res.json({
       success: true,
-      message: `Category renamed, ${result} channels updated`
+      message: `Category renamed, ${result.rowCount} channels updated`
     });
   } catch (error) {
     logger.error('Error batch updating category:', error);
@@ -1815,20 +1770,13 @@ router.get('/published-channels-with-programs', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    // Get user's published credentials
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
+    // Get user's published credentials from PostgreSQL
+    const credResult = await postgresService.query(
+      'SELECT * FROM credentials WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [userId]
+    );
 
-    const credential = await new Promise((resolve, reject) => {
-      iptvDb.get(
-        'SELECT * FROM generated_credentials WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
-        [userId],
-        (err, row) => {
-          if (err) reject(err);
-          else resolve(row);
-        }
-      );
-    });
+    const credential = credResult.rows[0];
 
     if (!credential) {
       return res.status(404).json({
@@ -1869,27 +1817,24 @@ router.get('/published-channels-with-programs', async (req, res) => {
       });
     });
 
-    // Get matched channels from database
-    const matchedChannels = await new Promise((resolve, reject) => {
-      iptvDb.all(`
-        SELECT DISTINCT
-          c.channel_id as id,
-          c.name as iptv_channel_name,
-          c.logo,
-          c.url,
-          c.group_title,
-          m.epg_channel_id,
-          m.use_dummy_epg
-        FROM iptv_channels c
-        JOIN epg_matches m ON c.channel_id = m.iptv_channel_id
-        JOIN iptv_sources s ON c.source_id = s.id
-        WHERE s.user_id = ?
-        ORDER BY c.name
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    // Get matched channels from PostgreSQL
+    const channelsResult = await postgresService.query(`
+      SELECT DISTINCT
+        c.channel_id as id,
+        c.name as iptv_channel_name,
+        c.logo_url as logo,
+        c.stream_url as url,
+        c.group_title,
+        m.epg_channel_id,
+        m.use_dummy_epg
+      FROM iptv_channels c
+      JOIN epg_matches m ON c.channel_id = m.iptv_channel_id
+      JOIN iptv_sources s ON c.source_id = s.id
+      WHERE m.user_id = $1
+      ORDER BY c.name
+    `, [userId]);
+
+    const matchedChannels = channelsResult.rows;
 
     // Build response with programs from parsed XMLTV
     const channelsWithPrograms = matchedChannels.map(channel => {
@@ -1953,16 +1898,47 @@ router.get('/:sessionId', async (req, res) => {
     }
     
     logger.info(`Getting EPG data for channel: ${channelId}`);
-    
+
     // Initialize database
     await initDb();
-    
+
     try {
-      // Get channel info
-      const channelInfo = await getChannelById(channelId);
+      // First, check if this IPTV channel has a match in the epg_matches table (PostgreSQL)
+      const postgresService = require('../services/postgresService');
+      const userId = req.user?.id;
+
+      let epgChannelId = null;
+
+      // Look up the match from PostgreSQL
+      let query = `SELECT epg_channel_id FROM epg_matches WHERE iptv_channel_id = $1`;
+      const params = [channelId];
+
+      // Filter by user if authenticated
+      if (userId) {
+        query += ` AND user_id = $2`;
+        params.push(userId);
+      } else {
+        query += ` AND session_id = $2`;
+        params.push(sessionId);
+      }
+
+      query += ` LIMIT 1`;
+
+      const result = await postgresService.query(query, params);
+      const match = result.rows[0];
+
+      if (match) {
+        epgChannelId = match.epg_channel_id;
+        logger.info(`Found EPG match: ${channelId} -> ${epgChannelId}`);
+      } else {
+        logger.info(`No match found for IPTV channel ${channelId}`);
+      }
+
+      // Get channel info using the EPG channel ID
+      const channelInfo = epgChannelId ? await getChannelById(epgChannelId) : null;
 
       if (!channelInfo) {
-        logger.info(`No EPG channel match found for ${channelId}, returning empty EPG data`);
+        logger.info(`No EPG channel data found for ${channelId}, returning empty EPG data`);
         return res.json({
           success: true,
           channelId,
@@ -1975,60 +1951,16 @@ router.get('/:sessionId', async (req, res) => {
       // Get time window: from now to 7 days later (extended from 24 hours)
       const now = new Date();
       const endDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-      
+
       // Log the time window for debugging
       logger.info(`Searching for programs between ${now.toISOString()} and ${endDate.toISOString()} (7-day window)`);
+
+      // Get programs for this channel using the EPG channel ID
+      // Using PostgreSQL epg_programs table via epgDatabaseService
+      let programs = await epgDatabaseService.getProgramsByChannelId(epgChannelId, now, endDate);
       
-      // Get programs for this channel
-      let programs = await getProgramsByChannelId(channelId, now, endDate);
-      
-      // Format the dates properly for the frontend
-      programs = programs.map(program => {
-        // Handle EPG date format like "20250412100000 +0000"
-        try {
-          if (program.start && typeof program.start === 'string') {
-            // Parse date format YYYYMMDDHHMMSS +ZZZZ
-            const dateStr = program.start;
-            if (dateStr.match(/^\d{14}\s+[\+\-]\d{4}$/)) {
-              const year = dateStr.substring(0, 4);
-              const month = dateStr.substring(4, 6);
-              const day = dateStr.substring(6, 8);
-              const hour = dateStr.substring(8, 10);
-              const minute = dateStr.substring(10, 12);
-              const second = dateStr.substring(12, 14);
-              const tzOffset = dateStr.substring(15);
-              
-              // Create ISO format date 
-              const isoDate = `${year}-${month}-${day}T${hour}:${minute}:${second}${tzOffset.replace(/(\+|\-)(\d{2})(\d{2})/, '$1$2:$3')}`;
-              program.start = isoDate;
-              logger.debug(`Converted program start date from ${dateStr} to ${isoDate}`);
-            }
-          }
-          
-          if (program.stop && typeof program.stop === 'string') {
-            // Parse date format YYYYMMDDHHMMSS +ZZZZ
-            const dateStr = program.stop;
-            if (dateStr.match(/^\d{14}\s+[\+\-]\d{4}$/)) {
-              const year = dateStr.substring(0, 4);
-              const month = dateStr.substring(4, 6);
-              const day = dateStr.substring(6, 8);
-              const hour = dateStr.substring(8, 10);
-              const minute = dateStr.substring(10, 12);
-              const second = dateStr.substring(12, 14);
-              const tzOffset = dateStr.substring(15);
-              
-              // Create ISO format date 
-              const isoDate = `${year}-${month}-${day}T${hour}:${minute}:${second}${tzOffset.replace(/(\+|\-)(\d{2})(\d{2})/, '$1$2:$3')}`;
-              program.stop = isoDate;
-              logger.debug(`Converted program stop date from ${dateStr} to ${isoDate}`);
-            }
-          }
-        } catch (error) {
-          logger.error(`Error formatting program dates: ${error.message}`, { program });
-        }
-        
-        return program;
-      });
+      // PostgreSQL returns ISO timestamps already, no conversion needed
+      // Programs already have the correct format from epgDatabaseService
       
       // Find current program
       const currentProgram = programs.find(p => {
@@ -2044,7 +1976,14 @@ router.get('/:sessionId', async (req, res) => {
       
       // Get sources list for context
       const sourcesList = await runQuery('SELECT id, name FROM sources ORDER BY name');
-      
+
+      // Disable caching to ensure fresh EPG data
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      });
+
       return res.json({
         success: true,
         channelId,
@@ -2092,11 +2031,13 @@ router.get('/:sessionId/sources', async (req, res) => {
     // Initialize database
     await initDb();
 
-    // Get sources from the database
-    const dbSources = await runQuery(`
+    // Get sources from the database (PostgreSQL)
+    const { pool } = require('../services/postgresService');
+    const result = await pool.query(`
       SELECT id, name, url, last_updated, channel_count, program_count
-      FROM sources
+      FROM epg_sources
     `);
+    const dbSources = result.rows;
 
     // Create a map of database sources by URL for quick lookup
     const dbSourceMap = {};
@@ -2130,21 +2071,15 @@ router.get('/:sessionId/sources', async (req, res) => {
 
     // Add user EPG sources if authenticated
     if (userId) {
-      const iptvDatabaseService = require('../services/iptvDatabaseService');
-      const iptvDb = await iptvDatabaseService.connect();
       const cacheService = require('../services/cacheService');
 
-      const userSources = await new Promise((resolve, reject) => {
-        iptvDb.all(`
-          SELECT id, url, name, enabled, verified, notes, created_at, updated_at
-          FROM user_epg_sources
-          WHERE user_id = ?
-          ORDER BY created_at DESC
-        `, [userId], (err, rows) => {
-          if (err) reject(err);
-          else resolve(rows || []);
-        });
-      });
+      const result = await postgresService.query(`
+        SELECT id, url, name, enabled, created_at, updated_at
+        FROM user_epg_sources
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+      `, [userId]);
+      const userSources = result.rows || [];
 
       // Add user sources to the list
       userSources.forEach(userSource => {
@@ -2173,8 +2108,8 @@ router.get('/:sessionId/sources', async (req, res) => {
           name: userSource.name,
           url: userSource.url,
           enabled: Boolean(userSource.enabled),
-          verified: Boolean(userSource.verified),
-          notes: userSource.notes || 'User-added source',
+          verified: false,
+          notes: 'User-added source',
           last_updated: lastUpdated,
           channel_count: channelCount,
           program_count: programCount,
@@ -2237,6 +2172,11 @@ router.post('/:sessionId/match', async (req, res) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
+    // Initialize session.data if not exists
+    if (!session.data) {
+      session.data = {};
+    }
+
     // Initialize matched channels array if not exists
     if (!session.data.matches) {
       session.data.matches = [];
@@ -2262,22 +2202,15 @@ router.post('/:sessionId/match', async (req, res) => {
 
     // Save match to database for persistence
     try {
-      const iptvDatabaseService = require('../services/iptvDatabaseService');
-      const iptvDb = await iptvDatabaseService.connect();
       const userId = req.user?.id; // Get user ID if authenticated
 
       // If user is authenticated, delete all old matches for this channel for this user
       // (regardless of session_id) to prevent duplicates
       if (userId) {
-        await new Promise((resolve, reject) => {
-          iptvDb.run(`
-            DELETE FROM epg_matches
-            WHERE user_id = ? AND iptv_channel_id = ?
-          `, [userId, m3uChannel.id], (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        });
+        await postgresService.query(`
+          DELETE FROM epg_matches
+          WHERE user_id = $1 AND iptv_channel_id = $2
+        `, [userId, m3uChannel.id]);
         logger.info(`Deleted old matches for user ${userId}, channel ${m3uChannel.id}`);
       }
 
@@ -2285,15 +2218,10 @@ router.post('/:sessionId/match', async (req, res) => {
       let iptvSourceId = null;
       if (m3uChannel.id) {
         try {
-          const sourceResult = await new Promise((resolve, reject) => {
-            iptvDb.get(`
-              SELECT source_id FROM iptv_channels WHERE channel_id = ?
-            `, [m3uChannel.id], (err, row) => {
-              if (err) reject(err);
-              else resolve(row);
-            });
-          });
-          iptvSourceId = sourceResult?.source_id || null;
+          const sourceResult = await postgresService.query(`
+            SELECT source_id FROM iptv_channels WHERE channel_id = $1
+          `, [m3uChannel.id]);
+          iptvSourceId = sourceResult.rows[0]?.source_id || null;
           if (iptvSourceId) {
             logger.info(`Found source_id ${iptvSourceId} for channel ${m3uChannel.id}`);
           }
@@ -2302,27 +2230,23 @@ router.post('/:sessionId/match', async (req, res) => {
         }
       }
 
-      await new Promise((resolve, reject) => {
-        iptvDb.run(`
-          INSERT OR REPLACE INTO epg_matches
-          (session_id, user_id, iptv_channel_id, iptv_channel_name, epg_channel_id, epg_channel_name, epg_source_name, epg_source_id, iptv_source_id, use_dummy_epg, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        `, [
-          sessionId,
-          userId || null,
-          m3uChannel.id,
-          m3uChannel.name,
-          epgChannel.id,
-          epgChannel.name,
-          epgChannel.source_name || 'Unknown',
-          epgChannel.source_id || '',
-          iptvSourceId,
-          useDummyEpg ? 1 : 0
-        ], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
+      // Insert or update match in PostgreSQL
+      await postgresService.query(`
+        INSERT INTO epg_matches
+        (session_id, user_id, iptv_channel_id, epg_channel_id, use_dummy_epg, updated_at)
+        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+        ON CONFLICT (session_id, iptv_channel_id) DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          epg_channel_id = EXCLUDED.epg_channel_id,
+          use_dummy_epg = EXCLUDED.use_dummy_epg,
+          updated_at = CURRENT_TIMESTAMP
+      `, [
+        sessionId,
+        userId || null,
+        m3uChannel.id,
+        epgChannel.id,
+        useDummyEpg ? 1 : 0
+      ]);
 
       logger.info(`Saved match to database: ${m3uChannel.name} -> ${epgChannel.name}${userId ? ` (user ${userId})` : ''}`);
     } catch (dbError) {
@@ -2357,26 +2281,18 @@ router.delete('/:sessionId/match/:iptvChannelId', async (req, res) => {
     logger.info(`Deleting match for channel ${iptvChannelId} in session ${sessionId}${userId ? ` (user ${userId})` : ''}`);
 
     // Delete from database
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
-    const iptvDb = await iptvDatabaseService.connect();
-
     let query, params;
     if (userId) {
       // Delete for authenticated user (across all sessions)
-      query = 'DELETE FROM epg_matches WHERE user_id = ? AND iptv_channel_id = ?';
+      query = 'DELETE FROM epg_matches WHERE user_id = $1 AND iptv_channel_id = $2';
       params = [userId, iptvChannelId];
     } else {
       // Delete for session only
-      query = 'DELETE FROM epg_matches WHERE session_id = ? AND iptv_channel_id = ?';
+      query = 'DELETE FROM epg_matches WHERE session_id = $1 AND iptv_channel_id = $2';
       params = [sessionId, iptvChannelId];
     }
 
-    await new Promise((resolve, reject) => {
-      iptvDb.run(query, params, function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
-      });
-    });
+    await postgresService.query(query, params);
 
     logger.info(`Deleted match for channel ${iptvChannelId}${userId ? ` (user ${userId})` : ''}`);
 

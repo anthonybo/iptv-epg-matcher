@@ -382,24 +382,25 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         generateEpgIdSuggestions(channelName);
 
         // Check if we already have a match for this channel
-        // Try both tvgId and id as the channel identifier
-        const channelIdentifier = selectedChannel.tvgId || selectedChannel.id;
-        const matchedEpgId = channelIdentifier ? matchedChannels[channelIdentifier] : null;
+        // CRITICAL: Always pass the IPTV channel ID to fetchEpgData, NOT the EPG ID
+        // The backend expects the IPTV channel ID and will look up the match in PostgreSQL
+        const iptvChannelId = selectedChannel.id;
 
         console.log('[EPGMatcher] Channel changed:', {
             selectedChannel: selectedChannel,
-            channelId: selectedChannel.id,
+            iptvChannelId: iptvChannelId,
             channelTvgId: selectedChannel.tvgId,
-            channelIdentifier: channelIdentifier,
-            matchedEpgId: matchedEpgId,
-            matchedChannels: matchedChannels,
+            channelTvgIdNested: selectedChannel.tvg?.id,
+            channelEpgId: selectedChannel.epgId,
+            hasEpgId: !!(selectedChannel.epgId || selectedChannel.tvg?.id),
             hasSession: !!session
         });
 
-        if (session && matchedEpgId) {
-            fetchEpgData(matchedEpgId);
-        } else if (channelIdentifier) {
-            fetchEpgData(channelIdentifier);
+        // Always fetch EPG data using the IPTV channel ID
+        // The backend will check if there's a match in epg_matches table
+        if (session && iptvChannelId) {
+            console.log('[EPGMatcher] Fetching EPG data for IPTV channel ID:', iptvChannelId);
+            fetchEpgData(iptvChannelId);
         }
     }, [session, selectedChannel, matchedChannels]);
 
@@ -602,12 +603,12 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         }
         
         console.log(`Fetching EPG data for ID: ${channelId}`);
-        
+
         try {
-            const url = `http://localhost:5001/api/epg/${session}/?channelId=${encodeURIComponent(channelId)}`;
+            const url = `/epg/${session}?channelId=${encodeURIComponent(channelId)}`;
             console.log(`Making EPG data request to: ${url}`);
-            
-            const response = await axios.get(url);
+
+            const response = await apiClient.get(url);
             
             console.log('EPG Data response status:', response.status);
             console.log('EPG Data response headers:', response.headers);
@@ -733,6 +734,15 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
 
             // Trigger a refresh of matched channels in App.js
             window.dispatchEvent(new CustomEvent('refreshMatchedChannels'));
+
+            // Also trigger EPG data refresh for the player view
+            // This ensures IPTVPlayer re-fetches EPG data with the new match
+            window.dispatchEvent(new CustomEvent('epgMatchUpdated', {
+                detail: {
+                    iptvChannelId: channelId,
+                    epgChannelId: 'dummy'  // Dummy EPG uses a special ID
+                }
+            }));
 
             // DON'T call onEpgMatch callback - it would trigger a duplicate match
             // The channel is already saved to the database, just update UI state if needed
@@ -870,6 +880,15 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     // Trigger a refresh of matched channels in App.js
                     // Dispatch custom event so App.js can refresh its matchedChannels state
                     window.dispatchEvent(new CustomEvent('refreshMatchedChannels'));
+
+                    // Also trigger EPG data refresh for the player view
+                    // This ensures IPTVPlayer re-fetches EPG data with the new match
+                    window.dispatchEvent(new CustomEvent('epgMatchUpdated', {
+                        detail: {
+                            iptvChannelId: m3uChannel.id,
+                            epgChannelId: epgChannel.id
+                        }
+                    }));
                 })
                 .catch(error => {
                     console.error('Error saving match:', error.response || error);

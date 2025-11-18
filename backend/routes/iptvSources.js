@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const iptvDatabaseService = require('../services/iptvDatabase');
 const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
 const epgService = require('../services/epgService');
 const logger = require('../config/logger');
+const postgresService = require('../services/postgresService');
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -316,8 +317,9 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         let cacheKey;
         if (source.type === 'xtream' && source.url && source.username && source.password) {
             cacheKey = `${source.url}:${source.username}:${source.password}`.replace(/[\/\\:]/g, '_');
-        } else if (source.type === 'stalker' && source.url && source.mac_address) {
-            cacheKey = `${source.url}:${source.mac_address}`.replace(/[\/\\:]/g, '_');
+        } else if (source.type === 'stalker' && source.url && (source.mac_address || source.mac)) {
+            const macAddress = source.mac_address || source.mac;
+            cacheKey = `${source.url}:${macAddress}`.replace(/[\/\\:]/g, '_');
         }
 
         if (cacheKey) {
@@ -338,6 +340,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         logger.info(`[REFRESH DEBUG] Source type: ${source.type}`);
         logger.info(`[REFRESH DEBUG] Source URL: ${source.url}`);
         logger.info(`[REFRESH DEBUG] Source mac_address: ${source.mac_address}`);
+        logger.info(`[REFRESH DEBUG] Source mac: ${source.mac}`);
 
         if (source.type === 'xtream') {
             if (!source.url || !source.username || !source.password) {
@@ -348,12 +351,18 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 });
             }
         } else if (source.type === 'stalker') {
-            if (!source.url || !source.mac_address) {
-                logger.error(`[REFRESH DEBUG] Stalker source validation failed - url: ${!!source.url}, mac_address: ${!!source.mac_address}`);
+            // Check both mac_address and mac columns (PostgreSQL has both)
+            const macAddress = source.mac_address || source.mac;
+            if (!source.url || !macAddress) {
+                logger.error(`[REFRESH DEBUG] Stalker source validation failed - url: ${!!source.url}, mac_address: ${!!source.mac_address}, mac: ${!!source.mac}`);
                 return res.status(400).json({
                     success: false,
                     error: 'Stalker source missing required credentials'
                 });
+            }
+            // Normalize to mac_address for consistency
+            if (!source.mac_address && source.mac) {
+                source.mac_address = source.mac;
             }
         } else {
             logger.error(`[REFRESH DEBUG] Unknown source type: ${source.type}`);
@@ -468,28 +477,70 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         logger.info(`Saved ${categories.length} categories for source ${sourceId}`);
 
         // 5. Transform and save channels
-        const dbChannels = channelsResult.channels.map(ch => ({
-            id: ch.id || ch.name,
-            name: ch.name,
-            logo: ch.logo || '',
-            url: ch.url,
-            group: { title: ch.groupTitle || ch.group || 'Uncategorized' },
-            tvg: { id: ch.epgChannelId || '' },
-            categories: []
-        }));
+        const groupTitle = ch => ch.groupTitle || ch.group || 'Uncategorized';
+        const dbChannels = channelsResult.channels
+            .filter(ch => ch.name && ch.name.trim() !== '') // Filter out channels with null/empty names
+            .map(ch => ({
+                id: ch.id || ch.name,
+                name: ch.name,
+                logo: ch.logo || '',
+                url: ch.url,
+                group_title: groupTitle(ch),
+                category: groupTitle(ch),
+                tvg_id: ch.epgChannelId || '',
+                tvg_name: ch.name,
+                source_type: source.type,
+                source_username: source.username || null,
+                source_password: source.password || null,
+                source_url: source.url,
+                source_mac: source.mac_address || null
+            }));
+
+        const filteredCount = channelsResult.channels.length - dbChannels.length;
+        if (filteredCount > 0) {
+            logger.warn(`Filtered out ${filteredCount} channels with null/empty names`);
+        }
 
         await iptvDatabaseService.saveChannels(sourceId, dbChannels);
         logger.info(`Saved ${dbChannels.length} channels for source ${sourceId}`);
+
+        // Update refresh status to success
+        await iptvDatabaseService.pool.query(`
+            UPDATE iptv_sources
+            SET last_refresh_status = 'success',
+                last_refresh_error = NULL,
+                last_refresh_attempt = CURRENT_TIMESTAMP
+            WHERE id = $1
+        `, [sourceId]);
+
+        // Get the updated source with channel count
+        const updatedSource = await iptvDatabaseService.getUserSources(userId, null);
+        const refreshedSource = updatedSource.find(s => s.id === parseInt(sourceId));
 
         res.json({
             success: true,
             message: 'Channels and account information refreshed successfully',
             channelCount: dbChannels.length,
             categoryCount: categories.length,
-            accountInfo
+            accountInfo,
+            source: refreshedSource // Include updated source with channel count
         });
     } catch (error) {
         logger.error(`Error refreshing source data: ${error.message}`);
+
+        // Update refresh status to error with error message
+        try {
+            await iptvDatabaseService.pool.query(`
+                UPDATE iptv_sources
+                SET last_refresh_status = 'error',
+                    last_refresh_error = $1,
+                    last_refresh_attempt = CURRENT_TIMESTAMP
+                WHERE id = $2
+            `, [error.message, sourceId]);
+        } catch (updateError) {
+            logger.error(`Failed to update refresh status: ${updateError.message}`);
+        }
+
         res.status(500).json({
             success: false,
             error: 'Failed to refresh source data: ' + error.message
@@ -583,7 +634,15 @@ router.patch('/channels/:channelId/live-prefix', requireAuth, async (req, res) =
             });
         }
 
-        await iptvDatabaseService.updateChannelLivePrefix(userId, channelId, enableLivePrefix);
+        // Update channel live prefix in PostgreSQL
+        await postgresService.query(`
+            UPDATE iptv_channels
+            SET enable_live_prefix = $1
+            WHERE channel_id = $2
+            AND source_id IN (
+                SELECT id FROM iptv_sources WHERE user_id = $3
+            )
+        `, [enableLivePrefix, channelId, userId]);
 
         res.json({
             success: true,

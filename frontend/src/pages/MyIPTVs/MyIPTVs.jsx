@@ -198,6 +198,51 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
           </div>
         )}
 
+        {/* Last Refresh Status Section */}
+        {source.last_refresh_attempt && (
+          <div className="border-t border-slate-700/50 pt-3 mt-3 space-y-2">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Last Refresh</div>
+
+            {source.last_refresh_attempt && (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-slate-500">Time:</span>
+                <span className="font-medium text-slate-300">
+                  {new Date(source.last_refresh_attempt).toLocaleString()}
+                </span>
+              </div>
+            )}
+
+            {source.last_refresh_status && (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-slate-500">Status:</span>
+                <span className={`font-medium ${source.last_refresh_status === 'success' ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {source.last_refresh_status === 'success' ? 'Success' : 'Failed'}
+                </span>
+              </div>
+            )}
+
+            {source.last_refresh_error && (
+              <div className="flex items-start gap-2 text-sm text-slate-400">
+                <svg className="w-4 h-4 mt-0.5 flex-shrink-0 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div className="flex-1">
+                  <span className="text-slate-500">Error:</span>
+                  <p className="text-red-400 font-medium mt-1 text-xs leading-relaxed break-words">
+                    {source.last_refresh_error}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Account Info Section */}
         {(source.exp_date || source.max_connections || source.account_status) && (
           <div className="border-t border-slate-700/50 pt-3 mt-3 space-y-2">
@@ -474,9 +519,14 @@ const MyIPTVs = ({
           message: `Successfully refreshed! Loaded ${result.channelCount} channels and ${result.categoryCount} categories.`
         });
         setTimeout(() => setNotification(null), 5000);
+
+        // Update the source in local state with fresh data from backend
+        if (result.source) {
+          setSources(prev => prev.map(s => s.id === sourceId ? result.source : s));
+        }
       }
 
-      // Reload sources to get updated data
+      // Also reload all sources to be safe
       await loadSources();
       if (onSourcesUpdated) onSourcesUpdated();
     } catch (err) {
@@ -558,7 +608,16 @@ const MyIPTVs = ({
     });
     setTimeout(() => {
       setNotification(null);
-      setSourceRefreshStatus({}); // Clear status indicators
+      // Only clear success status, keep error status visible
+      setSourceRefreshStatus(prev => {
+        const newStatus = {};
+        Object.keys(prev).forEach(key => {
+          if (prev[key] === 'error') {
+            newStatus[key] = prev[key]; // Keep error status
+          }
+        });
+        return newStatus;
+      });
     }, 8000);
   };
 
@@ -592,7 +651,7 @@ const MyIPTVs = ({
     <div className="space-y-6">
       {/* Notification Toast */}
       {notification && (
-        <div className={`fixed top-4 right-4 z-50 rounded-lg border px-4 py-3 shadow-lg max-w-md ${
+        <div className={`fixed top-4 right-4 z-[70] rounded-lg border px-4 py-3 shadow-lg max-w-md ${
           notification.type === 'success'
             ? 'bg-green-900/90 border-green-700 text-green-100'
             : 'bg-red-900/90 border-red-700 text-red-100'

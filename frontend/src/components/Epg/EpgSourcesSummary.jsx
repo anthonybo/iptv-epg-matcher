@@ -60,6 +60,7 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
     sources: [],
     currentSource: 0,
     totalSources: 0,
+    currentSourceName: null,
     error: null
   });
   const [eventSourceRef, setEventSourceRef] = useState(null);
@@ -81,6 +82,7 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
             setRefreshing(true);
             setShowRefreshModal(true);
 
+            // Include ALL sources (both system and user-added)
             // Initialize sources with proper status based on current progress
             const initialSources = sources.map((s, idx) => {
               // Disabled sources should stay disabled
@@ -102,9 +104,26 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
               const sourceNum = idx + 1;
               const currentSourceNum = status.currentSource || 0;
 
+              // Check if this source is in the completedSources array from backend
+              const completedSource = (status.completedSources || []).find(
+                cs => cs.name === s.name
+              );
+
               let sourceStatus = 'pending';
-              if (sourceNum < currentSourceNum) {
+              let channels = null;
+              let programs = null;
+              let error = null;
+
+              if (completedSource) {
+                // Use status from backend's completedSources array
+                sourceStatus = completedSource.status; // 'complete' or 'failed'
+                channels = completedSource.channelCount;
+                programs = completedSource.programCount;
+                error = completedSource.error || null;
+              } else if (sourceNum < currentSourceNum) {
                 sourceStatus = 'complete';
+                channels = s.channel_count || s.channelCount;
+                programs = s.program_count || s.programCount;
               } else if (sourceNum === currentSourceNum) {
                 sourceStatus = 'refreshing';
               }
@@ -117,9 +136,9 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
                 verified: s.verified,
                 notes: s.notes,
                 status: sourceStatus,
-                channels: sourceStatus === 'complete' ? (s.channel_count || s.channelCount) : null,
-                programs: sourceStatus === 'complete' ? (s.program_count || s.programCount) : null,
-                error: null
+                channels: channels,
+                programs: programs,
+                error: error
               };
             });
 
@@ -146,10 +165,134 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
     checkRefreshStatus();
   }, []);
 
+  const handleViewRefreshDetails = async () => {
+    // Load the latest refresh status before showing the modal
+    try {
+      const response = await fetch('/api/epg/refresh-status');
+      if (response.ok) {
+        const status = await response.json();
+        if (status.completedSources && status.completedSources.length > 0) {
+          // Include ALL sources (both system and user-added)
+          const completedSourcesWithStatus = sources.map(source => {
+            const completedSource = status.completedSources.find(cs => cs.name === source.name);
+            if (completedSource) {
+              return {
+                ...source,
+                status: completedSource.status,
+                channels: completedSource.channelCount,
+                programs: completedSource.programCount,
+                error: completedSource.error || null
+              };
+            }
+            return {
+              ...source,
+              status: 'pending',
+              channels: null,
+              programs: null,
+              error: null
+            };
+          });
+
+          setRefreshProgress({
+            status: 'complete',
+            sources: completedSourcesWithStatus,
+            currentSource: status.totalSources,
+            totalSources: status.totalSources,
+            currentMessage: status.lastMessage,
+            error: null
+          });
+        }
+      }
+    } catch (error) {
+      console.error('[EPG REFRESH] Error loading refresh status:', error);
+    }
+
+    setShowRefreshModal(true);
+  };
+
   const connectToSSE = () => {
-    const sessionId = SessionManager.getSessionId();
-    const eventSource = new EventSource(`/api/events/${sessionId}`);
-    setEventSourceRef(eventSource);
+    return new Promise((resolve) => {
+      const sessionId = SessionManager.getSessionId();
+      const eventSource = new EventSource(`/api/events/${sessionId}`);
+      setEventSourceRef(eventSource);
+
+      // Resolve promise when connection opens
+      eventSource.onopen = () => {
+        console.log('[EPG REFRESH] SSE connection established');
+        resolve();
+      };
+
+      // Listen for epg-complete event (custom event type)
+      eventSource.addEventListener('epg-complete', async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log('[EPG REFRESH] epg-complete event received:', data);
+          eventSource.close();
+
+          // Load final results from refresh-status endpoint
+          setTimeout(async () => {
+            const statusResponse = await fetch(`/api/epg/refresh-status?_t=${Date.now()}`);
+            if (statusResponse.ok) {
+              const status = await statusResponse.json();
+
+              // Use completedSources from backend if available
+              if (status.completedSources && status.completedSources.length > 0) {
+                console.log('[EPG REFRESH] completedSources from backend:', status.completedSources);
+
+                // Update progress state with completion data
+                setRefreshProgress(prev => {
+                  console.log('[EPG REFRESH] Current sources before mapping:', prev.sources);
+
+                  const updatedSources = prev.sources.map(source => {
+                    // Find matching completed source from backend
+                    const completedSource = status.completedSources.find(
+                      cs => cs.name === source.name
+                    );
+
+                    if (completedSource) {
+                      console.log('[EPG REFRESH] Matched completed source:', source.name, '→', completedSource.status);
+                      return {
+                        ...source,
+                        status: completedSource.status,
+                        channels: completedSource.channelCount,
+                        programs: completedSource.programCount,
+                        error: completedSource.error || null
+                      };
+                    }
+
+                    console.log('[EPG REFRESH] No match for source:', source.name);
+                    return source;
+                  });
+
+                  console.log('[EPG REFRESH] Updated sources after mapping:', updatedSources);
+
+                  return {
+                    status: 'complete',
+                    sources: updatedSources,
+                    currentSource: status.totalSources,
+                    totalSources: status.totalSources,
+                    currentMessage: status.lastMessage,
+                    error: null
+                  };
+                });
+
+                setRefreshing(false);
+
+                // Fetch updated sources for the parent component
+                const sourcesResponse = await fetch(`/api/epg/${sessionId}/sources?_t=${Date.now()}`);
+                if (sourcesResponse.ok && onSourcesUpdated) {
+                  const sourceData = await sourcesResponse.json();
+                  if (sourceData.sources) {
+                    onSourcesUpdated(sourceData.sources);
+                  }
+                }
+              }
+            }
+          }, 500);
+        } catch (error) {
+          console.error('[EPG REFRESH] Error handling epg-complete event:', error);
+        }
+      });
 
       eventSource.onmessage = (event) => {
         try {
@@ -163,14 +306,15 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
             let currentSource = null;
             let totalSources = null;
             let progressInfo = null;
-            let currentSourceUrl = null;
+            let currentSourceName = null;
 
-            // Extract "Processing source X/Y: URL"
+            // Extract "Processing source X/Y: Source Name"
             const sourceMatch = message.match(/Processing source (\d+)\/(\d+): (.+)/);
             if (sourceMatch) {
               currentSource = parseInt(sourceMatch[1]);
               totalSources = parseInt(sourceMatch[2]);
-              currentSourceUrl = sourceMatch[3].trim();
+              currentSourceName = sourceMatch[3].trim();
+              console.log('[EPG REFRESH] Extracted currentSourceName:', currentSourceName, 'from message:', message);
             }
 
             // Extract progress numbers like "Processed 65000 programs"
@@ -186,31 +330,84 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
             }
 
             // Update progress with real-time message from Python script
+            console.log('[EPG REFRESH] Updating progress with message:', message);
             setRefreshProgress(prev => {
+              console.log('[EPG REFRESH] Previous state:', prev);
               let updatedSources = prev.sources;
 
-              // If we detected a new source being processed, update source statuses
-              if (currentSourceUrl && prev.sources.length > 0) {
-                // Build a list of enabled source URLs in order
-                const enabledSources = prev.sources.filter(s => s.enabled !== false);
-                const currentSourceIndex = enabledSources.findIndex(s => s.url === currentSourceUrl);
+              // Check for completed source in message like "✓ Completed EPG Share 01 - All Sources: 15279 channels, 50000 programs"
+              const completedMatch = message.match(/✓ Completed (.+?):\s*(\d+) channels?,\s*(\d+) programs?/);
+              if (completedMatch) {
+                const completedSourceName = completedMatch[1];
+                const channelCount = parseInt(completedMatch[2]);
+                const programCount = parseInt(completedMatch[3]);
 
-                updatedSources = prev.sources.map((source) => {
+                console.log(`[EPG REFRESH] ✓ Completed match found: "${completedSourceName}" (${channelCount} channels, ${programCount} programs)`);
+                console.log('[EPG REFRESH] Current sources:', prev.sources.map(s => s.name));
+
+                // Find and update the completed source
+                updatedSources = prev.sources.map(source => {
+                  if (source.name === completedSourceName) {
+                    console.log(`[EPG REFRESH] ✓ Matched source: ${source.name} → status: complete`);
+                    return {
+                      ...source,
+                      status: 'complete',
+                      channels: channelCount,
+                      programs: programCount
+                    };
+                  }
+                  return source;
+                });
+              }
+
+              // Check for failed source in message like "✗ Failed EPG Share 01: error message"
+              const failedMatch = message.match(/✗ Failed (.+?):\s*(.+)$/);
+              if (failedMatch) {
+                const failedSourceName = failedMatch[1];
+                const errorMessage = failedMatch[2];
+
+                console.log(`[EPG REFRESH] ✗ Failed match found: "${failedSourceName}" (${errorMessage})`);
+
+                // Find and update the failed source
+                updatedSources = prev.sources.map(source => {
+                  if (source.name === failedSourceName) {
+                    return {
+                      ...source,
+                      status: 'failed',
+                      error: errorMessage
+                    };
+                  }
+                  return source;
+                });
+              }
+
+              // If we detected a new source being processed, update source statuses
+              if (currentSourceName && prev.sources.length > 0) {
+                // Build a list of enabled sources in order
+                const enabledSources = prev.sources.filter(s => s.enabled !== false);
+                const currentSourceIndex = enabledSources.findIndex(s => s.name === currentSourceName);
+
+                updatedSources = updatedSources.map((source) => {
                   // Skip disabled sources
                   if (source.enabled === false) {
+                    return source;
+                  }
+
+                  // Don't override already completed/failed sources
+                  if (source.status === 'complete' || source.status === 'failed') {
                     return source;
                   }
 
                   // Find this source's position in the enabled list
                   const thisSourceIndex = enabledSources.findIndex(s => s.url === source.url);
 
-                  // Mark sources before current as complete
+                  // Mark sources before current as complete (if not already marked)
                   if (currentSourceIndex !== -1 && thisSourceIndex < currentSourceIndex) {
                     return { ...source, status: 'complete' };
                   }
 
                   // Mark current source as refreshing
-                  if (source.url === currentSourceUrl) {
+                  if (source.name === currentSourceName) {
                     return { ...source, status: 'refreshing' };
                   }
 
@@ -223,54 +420,21 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
                 });
               }
 
-              return {
+              const newState = {
                 ...prev,
                 status: 'refreshing',
                 currentMessage: message,
                 currentSource: currentSource || prev.currentSource,
                 totalSources: totalSources || prev.totalSources,
+                currentSourceName: currentSourceName || prev.currentSourceName,
                 progressInfo: progressInfo || prev.progressInfo,
                 sources: updatedSources
               };
+              console.log('[EPG REFRESH] New state - currentSourceName:', newState.currentSourceName, 'extracted:', currentSourceName, 'prev:', prev.currentSourceName);
+              return newState;
             });
-          } else if (data.type === 'epg-complete') {
-            // Refresh is complete
-            console.log('[EPG REFRESH] Completion event received');
-            eventSource.close();
-
-            // Load final results
-            setTimeout(async () => {
-              const sourcesResponse = await fetch(`/api/epg/${sessionId}/sources?_t=${Date.now()}`);
-              if (sourcesResponse.ok) {
-                const sourceData = await sourcesResponse.json();
-                if (sourceData.sources) {
-                  const updatedSources = sourceData.sources.map(source => ({
-                    id: source.id,
-                    name: source.name || 'Unknown',
-                    url: source.url,
-                    status: 'complete',
-                    channels: source.channel_count || source.channelCount,
-                    programs: source.program_count || source.programCount,
-                    error: null
-                  }));
-
-                  setRefreshProgress({
-                    status: 'complete',
-                    sources: updatedSources,
-                    currentSource: updatedSources.length,
-                    totalSources: updatedSources.length,
-                    error: null
-                  });
-
-                  setRefreshing(false);
-
-                  if (onSourcesUpdated) {
-                    onSourcesUpdated(sourceData.sources);
-                  }
-                }
-              }
-            }, 1000);
           }
+          // Note: epg-complete is handled by addEventListener('epg-complete') above
         } catch (err) {
           console.error('[EPG REFRESH] Error parsing SSE event:', err);
         }
@@ -281,28 +445,27 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
         eventSource.close();
         setEventSourceRef(null);
       };
-
-      return eventSource;
+    });
   };
 
   const refreshEpgData = async () => {
     setRefreshing(true);
     setShowRefreshModal(true);
 
-    // Initialize progress with current sources as pending
-    // Only enabled sources will be processed
-    const initialSources = sources.map(source => ({
-      id: source.id,
-      name: source.name || 'Unknown',
-      url: source.url,
-      enabled: source.enabled,
-      verified: source.verified,
-      notes: source.notes,
-      status: source.enabled === false ? 'disabled' : 'pending',
-      channels: null,
-      programs: null,
-      error: null
-    }));
+    // Include ALL EPG sources (both system and user-added)
+    const initialSources = sources
+      .map(source => ({
+        id: source.id,
+        name: source.name || 'Unknown',
+        url: source.url,
+        enabled: source.enabled,
+        verified: source.verified,
+        notes: source.notes,
+        status: source.enabled === false ? 'disabled' : 'pending',
+        channels: null,
+        programs: null,
+        error: null
+      }));
 
     const enabledCount = initialSources.filter(s => s.enabled !== false).length;
 
@@ -310,15 +473,13 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
       status: 'starting',
       sources: initialSources,
       currentSource: 0,
-      totalSources: enabledCount, // Only count enabled sources
-      error: null
+      totalSources: enabledCount,
+      error: null,
+      currentMessage: 'Initializing EPG refresh...'
     });
 
     try {
       console.log('[EPG REFRESH] Triggering EPG data refresh from remote sources');
-
-      // Connect to SSE for real-time progress updates
-      connectToSSE();
 
       const response = await fetch('/api/epg/parse', {
         method: 'POST',
@@ -337,11 +498,86 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
 
       setRefreshProgress(prev => ({
         ...prev,
-        status: 'refreshing'
+        status: 'refreshing',
+        currentMessage: 'EPG refresh started, polling for updates...'
       }));
 
-      // SSE will handle all progress updates and completion
-      // No polling needed - the epg-complete event will trigger when done
+      // Start polling for progress updates every 500ms for real-time updates
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusResponse = await fetch('/api/epg/refresh-status');
+          if (!statusResponse.ok) {
+            console.error('[EPG REFRESH] Failed to fetch status');
+            return;
+          }
+
+          const status = await statusResponse.json();
+          console.log('[EPG REFRESH] Status update:', status);
+
+          if (!status.isRunning) {
+            // Refresh is complete
+            clearInterval(pollInterval);
+            console.log('[EPG REFRESH] Refresh complete, loading final results...');
+
+            // Load completedSources from backend and update modal to show checkmarks
+            if (status.completedSources && status.completedSources.length > 0) {
+              // Include ALL sources (both system and user-added)
+              const completedSourcesWithStatus = sources.map(source => {
+                const completedSource = status.completedSources.find(cs => cs.name === source.name);
+                if (completedSource) {
+                  return {
+                    ...source,
+                    status: completedSource.status,
+                    channels: completedSource.channelCount,
+                    programs: completedSource.programCount,
+                    error: completedSource.error || null
+                  };
+                }
+                return {
+                  ...source,
+                  status: 'pending',
+                  channels: null,
+                  programs: null,
+                  error: null
+                };
+              });
+
+              setRefreshProgress({
+                status: 'complete',
+                sources: completedSourcesWithStatus,
+                currentSource: status.totalSources,
+                totalSources: status.totalSources,
+                currentMessage: 'EPG sources refreshed successfully!',
+                error: null
+              });
+            } else {
+              setRefreshProgress(prev => ({
+                ...prev,
+                status: 'complete',
+                currentMessage: 'EPG refresh complete!'
+              }));
+            }
+
+            // Reload sources but keep modal open to show results
+            await loadSources();
+            setRefreshing(false);
+            // Don't close modal - let user see the results and click Close
+          } else {
+            // Update progress
+            setRefreshProgress(prev => ({
+              ...prev,
+              currentMessage: status.lastMessage || 'Processing EPG data...',
+              currentSource: status.currentSource || prev.currentSource,
+              totalSources: status.totalSources || prev.totalSources
+            }));
+          }
+        } catch (pollError) {
+          console.error('[EPG REFRESH] Error polling status:', pollError);
+        }
+      }, 500);
+
+      // Store interval ID so we can clear it if component unmounts
+      window.epgPollInterval = pollInterval
 
     } catch (error) {
       console.error('[EPG REFRESH] Error refreshing EPG data:', error);
@@ -376,6 +612,11 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
     return () => {
       if (eventSourceRef) {
         eventSourceRef.close();
+      }
+      // Clear polling interval if active
+      if (window.epgPollInterval) {
+        clearInterval(window.epgPollInterval);
+        window.epgPollInterval = null;
       }
     };
   }, [eventSourceRef]);

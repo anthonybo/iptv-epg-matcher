@@ -3,11 +3,11 @@
  * Manages detailed step-by-step progress updates with session management
  */
 const logger = require('../config/logger');
-const sessionStorage = require('../utils/sessionStorage');
+const sessionStorage = require('../utils/session');
 const { broadcastSSEUpdate } = require('../utils/sseUtils');
 const { fetchURL } = require('../utils/fetchUtils');
 const m3uService = require('../services/m3uService');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const iptvDatabaseService = require('../services/iptvDatabase');
 const epgService = require('../services/epgService');
 const path = require('path');
 const fs = require('fs');

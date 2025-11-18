@@ -185,6 +185,10 @@ async function getStalkerChannels(baseUrl, macAddress, token, categories = [], o
   try {
     const normalizedMac = normalizeMacAddress(macAddress);
 
+    // Create unique source identifier from baseUrl to prevent channel ID conflicts
+    const crypto = require('crypto');
+    const sourceHash = crypto.createHash('md5').update(baseUrl).digest('hex').substring(0, 8);
+
     // Create category lookup map
     const categoryMap = {};
     categories.forEach(cat => {
@@ -195,22 +199,146 @@ async function getStalkerChannels(baseUrl, macAddress, token, categories = [], o
     logger.info('Fetching ALL Stalker channels in one request using get_all_channels...');
     const url = `${baseUrl}portal.php?type=itv&action=get_all_channels&JsHttpRequest=1-xml`;
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
-        'X-User-Agent': 'Model: MAG250; Link: WiFi',
-        'Cookie': `mac=${normalizedMac}; stb_lang=en; timezone=America/New_York`,
-        'Authorization': `Bearer ${token}`
-      }
-    });
+    // Retry logic for handling transient errors and corrupted responses
+    const maxRetries = 3;
+    let lastError = null;
+    let data = null;
 
-    if (!response.ok) {
-      throw new Error(`Failed to get Stalker channels: ${response.status}`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 1) {
+          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Exponential backoff: 2s, 4s, 8s
+          logger.info(`Retry attempt ${attempt}/${maxRetries} after ${delayMs}ms delay...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        // Create an AbortController for timeout handling
+        const controller = new AbortController();
+        const timeout = setTimeout(() => {
+          controller.abort();
+        }, 120000); // 120 second timeout for large responses (up to 50k channels)
+
+        let response;
+        try {
+          logger.info(`Attempt ${attempt}: Requesting channel data from Stalker portal...`);
+          response = await fetch(url, {
+            method: 'GET',
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+              'X-User-Agent': 'Model: MAG250; Link: WiFi',
+              'Cookie': `mac=${normalizedMac}; stb_lang=en; timezone=America/New_York`,
+              'Authorization': `Bearer ${token}`
+            },
+            signal: controller.signal
+          });
+        } catch (fetchError) {
+          clearTimeout(timeout);
+          if (fetchError.name === 'AbortError') {
+            throw new Error('Request timeout - portal took longer than 120 seconds to respond');
+          }
+          throw fetchError;
+        } finally {
+          clearTimeout(timeout);
+        }
+
+        if (!response.ok) {
+          throw new Error(`Failed to get Stalker channels: ${response.status}`);
+        }
+
+        // Download response and parse with streaming parser for memory efficiency
+        logger.info(`Downloading channel data from Stalker portal...`);
+        const responseText = await response.text();
+        const responseSize = (responseText.length / 1024 / 1024).toFixed(2);
+        logger.info(`Downloaded ${responseSize} MB of channel data, parsing with streaming parser...`);
+
+        try {
+          const { JSONParser } = require('@streamparser/json');
+
+          // Configure parser to extract the data array
+          const parser = new JSONParser({
+            paths: ['$.js.data.*'], // Only emit individual channel objects from data array
+            keepStack: false // Don't keep full stack for memory efficiency
+          });
+
+          let channelCount = 0;
+          const parsedChannels = [];
+
+          // Set up value handler to collect channels
+          // Note: In streamparser-json v0.11+, callbacks use individual arguments, not object destructuring
+          parser.onValue = (value, key, parent, stack) => {
+            // Only process values from the data array (not the full object)
+            if (value && typeof value === 'object') {
+              parsedChannels.push(value);
+              channelCount++;
+
+              // Progress logging every 5000 channels
+              if (channelCount % 5000 === 0) {
+                logger.info(`Parsing progress: ${channelCount} channels processed`);
+
+                // Call progress callback if provided
+                if (onProgress) {
+                  onProgress({
+                    message: `Parsed ${channelCount} channels...`,
+                    progress: 0
+                  });
+                }
+              }
+            }
+          };
+
+          // Set up error handler
+          parser.onError = (err) => {
+            logger.error(`Parser error: ${err.message}`);
+          };
+
+          // Parse in chunks to avoid blocking event loop
+          const chunkSize = 1024 * 100; // 100KB chunks
+          for (let i = 0; i < responseText.length; i += chunkSize) {
+            const chunk = responseText.slice(i, i + chunkSize);
+            parser.write(chunk);
+          }
+
+          // Signal end of parsing
+          parser.end();
+
+          logger.info(`Successfully parsed ${channelCount} channels from ${responseSize} MB response`);
+
+          // Reconstruct data object structure
+          data = {
+            js: {
+              data: parsedChannels,
+              total_items: channelCount
+            }
+          };
+
+          break; // Success! Exit retry loop
+
+        } catch (parseError) {
+          const errorMessage = parseError.message || 'Unknown parsing error';
+          logger.error(`JSON parsing error: ${errorMessage}`);
+          throw new Error(`Failed to parse JSON: ${errorMessage}`);
+        }
+
+      } catch (attemptError) {
+        lastError = attemptError;
+        logger.warn(`Attempt ${attempt}/${maxRetries} failed: ${attemptError.message}`);
+
+        // Don't retry on certain errors
+        if (attemptError.message.includes('401') || attemptError.message.includes('403')) {
+          logger.error('Authentication error - not retrying');
+          break;
+        }
+
+        if (attempt === maxRetries) {
+          logger.error(`All ${maxRetries} attempts failed`);
+          throw new Error(`Failed to fetch Stalker channels after ${maxRetries} attempts: ${lastError.message}`);
+        }
+      }
     }
 
-    const data = await response.json();
-    logger.info(`get_all_channels response received, parsing...`);
+    if (!data) {
+      throw new Error(`Failed to fetch valid data: ${lastError?.message || 'Unknown error'}`);
+    }
 
     if (!data || !data.js) {
       logger.warn('No channel data in response');
@@ -231,23 +359,44 @@ async function getStalkerChannels(baseUrl, macAddress, token, categories = [], o
 
     logger.info(`Successfully loaded ${allChannels.length} channels in one request!`);
 
-    // Transform to standard channel format
-    const channels = allChannels.map(channel => {
-      const categoryName = categoryMap[channel.tv_genre_id] || 'Uncategorized';
+    // Transform to standard channel format, filtering out channels with invalid data
+    const channels = allChannels
+      .filter(channel => {
+        // Unwrap if channel is wrapped in {value: ...} object
+        const ch = channel.value || channel;
 
-      return {
-        id: `stalker_${channel.id}`,
-        name: channel.name,
-        logo: channel.logo || '',
-        groupTitle: categoryName,  // Use groupTitle instead of group for consistency
-        url: buildStalkerStreamUrl(baseUrl, channel.id, channel.cmd, normalizedMac),
-        epgChannelId: channel.xmltv_id || channel.epg_id || '',
-        number: channel.number || 0,
-        cmd: channel.cmd || ''
-      };
-    });
+        // Filter out channels with no name or no cmd (stream command)
+        if (!ch.name || ch.name.trim() === '') {
+          return false;
+        }
+        if (!ch.cmd || ch.cmd.trim() === '') {
+          return false;
+        }
+        return true;
+      })
+      .map(channel => {
+        // Unwrap if channel is wrapped in {value: ...} object
+        const ch = channel.value || channel;
+        const categoryName = categoryMap[ch.tv_genre_id] || 'Uncategorized';
 
-    logger.info(`Successfully loaded ${channels.length} channels from Stalker portal`);
+        return {
+          id: `stalker_${sourceHash}_${ch.id}`,
+          name: ch.name,
+          logo: ch.logo || '',
+          groupTitle: categoryName,  // Use groupTitle instead of group for consistency
+          url: buildStalkerStreamUrl(baseUrl, ch.id, ch.cmd, normalizedMac),
+          epgChannelId: ch.xmltv_id || ch.epg_id || '',
+          number: ch.number || 0,
+          cmd: ch.cmd || ''
+        };
+      });
+
+    const filteredCount = allChannels.length - channels.length;
+    if (filteredCount > 0) {
+      logger.warn(`Filtered out ${filteredCount} invalid Stalker channels (empty name or cmd)`);
+    }
+
+    logger.info(`Successfully loaded ${channels.length} valid channels from Stalker portal`);
     return channels;
   } catch (error) {
     logger.error(`Error getting Stalker channels: ${error.message}`);

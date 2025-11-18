@@ -5,7 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../config/logger');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const postgresService = require('../services/postgresService');
 const { authMiddleware } = require('../middleware/authMiddleware');
 
 // All routes require authentication
@@ -23,23 +23,16 @@ router.get('/', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const db = await iptvDatabaseService.connect();
-
-    const sources = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT id, url, name, enabled, verified, notes, created_at, updated_at
-        FROM user_epg_sources
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    const result = await postgresService.query(`
+      SELECT id, url, name, enabled, verified, notes, created_at, updated_at
+      FROM user_epg_sources
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+    `, [userId]);
 
     res.json({
       success: true,
-      sources
+      sources: result.rows
     });
   } catch (error) {
     logger.error(`Error fetching user EPG sources: ${error.message}`);
@@ -71,38 +64,26 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL format' });
     }
 
-    const db = await iptvDatabaseService.connect();
-
     // Insert new source
-    const result = await new Promise((resolve, reject) => {
-      db.run(`
-        INSERT INTO user_epg_sources (user_id, url, name, enabled, verified, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `, [userId, url, name, enabled ? 1 : 0, verified ? 1 : 0, notes], function(err) {
-        if (err) {
-          if (err.message.includes('UNIQUE constraint failed')) {
-            reject(new Error('This EPG source URL already exists'));
-          } else {
-            reject(err);
-          }
-        } else {
-          resolve({ id: this.lastID });
-        }
-      });
-    });
+    const result = await postgresService.query(`
+      INSERT INTO user_epg_sources (user_id, url, name, enabled, verified, notes)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+    `, [userId, url, name, enabled, verified, notes]);
 
     logger.info(`Added EPG source for user ${userId}: ${name} (${url})`);
 
     res.json({
       success: true,
       message: 'EPG source added successfully',
-      id: result.id
+      id: result.rows[0].id
     });
   } catch (error) {
     logger.error(`Error adding user EPG source: ${error.message}`);
 
-    if (error.message.includes('already exists')) {
-      res.status(409).json({ error: error.message });
+    // PostgreSQL unique constraint violation error code
+    if (error.code === '23505') {
+      res.status(409).json({ error: 'This EPG source URL already exists for your account' });
     } else {
       res.status(500).json({ error: 'Failed to add EPG source' });
     }
@@ -123,16 +104,15 @@ router.put('/:id', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const db = await iptvDatabaseService.connect();
-
     // Build update query dynamically based on provided fields
     const updates = [];
     const values = [];
+    let paramIndex = 1;
 
     if (url !== undefined) {
       try {
         new URL(url);
-        updates.push('url = ?');
+        updates.push(`url = $${paramIndex++}`);
         values.push(url);
       } catch (urlError) {
         return res.status(400).json({ error: 'Invalid URL format' });
@@ -140,22 +120,22 @@ router.put('/:id', async (req, res) => {
     }
 
     if (name !== undefined) {
-      updates.push('name = ?');
+      updates.push(`name = $${paramIndex++}`);
       values.push(name);
     }
 
     if (enabled !== undefined) {
-      updates.push('enabled = ?');
-      values.push(enabled ? 1 : 0);
+      updates.push(`enabled = $${paramIndex++}`);
+      values.push(enabled);
     }
 
     if (verified !== undefined) {
-      updates.push('verified = ?');
-      values.push(verified ? 1 : 0);
+      updates.push(`verified = $${paramIndex++}`);
+      values.push(verified);
     }
 
     if (notes !== undefined) {
-      updates.push('notes = ?');
+      updates.push(`notes = $${paramIndex++}`);
       values.push(notes);
     }
 
@@ -166,17 +146,15 @@ router.put('/:id', async (req, res) => {
     updates.push('updated_at = CURRENT_TIMESTAMP');
     values.push(userId, id);
 
-    await new Promise((resolve, reject) => {
-      db.run(`
-        UPDATE user_epg_sources
-        SET ${updates.join(', ')}
-        WHERE user_id = ? AND id = ?
-      `, values, function(err) {
-        if (err) reject(err);
-        else if (this.changes === 0) reject(new Error('EPG source not found'));
-        else resolve();
-      });
-    });
+    const result = await postgresService.query(`
+      UPDATE user_epg_sources
+      SET ${updates.join(', ')}
+      WHERE user_id = $${paramIndex++} AND id = $${paramIndex}
+    `, values);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'EPG source not found' });
+    }
 
     logger.info(`Updated EPG source ${id} for user ${userId}`);
 
@@ -186,12 +164,7 @@ router.put('/:id', async (req, res) => {
     });
   } catch (error) {
     logger.error(`Error updating user EPG source: ${error.message}`);
-
-    if (error.message.includes('not found')) {
-      res.status(404).json({ error: error.message });
-    } else {
-      res.status(500).json({ error: 'Failed to update EPG source' });
-    }
+    res.status(500).json({ error: 'Failed to update EPG source' });
   }
 });
 
@@ -208,18 +181,14 @@ router.delete('/:id', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const db = await iptvDatabaseService.connect();
+    const result = await postgresService.query(`
+      DELETE FROM user_epg_sources
+      WHERE user_id = $1 AND id = $2
+    `, [userId, id]);
 
-    await new Promise((resolve, reject) => {
-      db.run(`
-        DELETE FROM user_epg_sources
-        WHERE user_id = ? AND id = ?
-      `, [userId, id], function(err) {
-        if (err) reject(err);
-        else if (this.changes === 0) reject(new Error('EPG source not found'));
-        else resolve();
-      });
-    });
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'EPG source not found' });
+    }
 
     logger.info(`Deleted EPG source ${id} for user ${userId}`);
 
@@ -229,12 +198,7 @@ router.delete('/:id', async (req, res) => {
     });
   } catch (error) {
     logger.error(`Error deleting user EPG source: ${error.message}`);
-
-    if (error.message.includes('not found')) {
-      res.status(404).json({ error: error.message });
-    } else {
-      res.status(500).json({ error: 'Failed to delete EPG source' });
-    }
+    res.status(500).json({ error: 'Failed to delete EPG source' });
   }
 });
 

@@ -1399,7 +1399,7 @@ async function loadAllExternalEPGs(session = null, options = {}) {
 
     // Also load user-added EPG sources from database
     try {
-        const iptvDatabaseService = require('./iptvDatabaseService');
+        const iptvDatabaseService = require('./iptvDatabase');
         const iptvDb = await iptvDatabaseService.connect();
         const userSources = await new Promise((resolve, reject) => {
             iptvDb.all('SELECT url FROM user_epg_sources WHERE enabled = 1', [], (err, rows) => {
@@ -1479,7 +1479,7 @@ async function loadAllExternalEPGsEnhanced(session = null, options = {}) {
 
     // Also load user-added EPG sources from database
     try {
-        const iptvDatabaseService = require('./iptvDatabaseService');
+        const iptvDatabaseService = require('./iptvDatabase');
         const iptvDb = await iptvDatabaseService.connect();
         const userSources = await new Promise((resolve, reject) => {
             iptvDb.all('SELECT url FROM user_epg_sources WHERE enabled = 1', [], (err, rows) => {

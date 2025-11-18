@@ -1,71 +1,20 @@
-const mongoose = require('mongoose');
+/**
+ * EPG Database Service - PostgreSQL Implementation
+ * Replaces MongoDB-based epgDatabaseService.js
+ * Uses COPY for 10-100x faster bulk inserts
+ */
+
 const logger = require('../config/logger');
-
-// Define schemas
-const EpgSourceSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  name: { type: String, required: true },
-  url: String,
-  filePath: String,
-  channelCount: { type: Number, default: 0 },
-  programCount: { type: Number, default: 0 },
-  lastUpdated: { type: Date, default: Date.now }
-});
-
-const EpgChannelSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  sourceId: { type: String, required: true },
-  name: { type: String, required: true },
-  icon: String,
-  languageCode: String,
-  categoriesCSV: String,
-  lastUpdated: { type: Date, default: Date.now }
-});
-
-// Index for faster searching
-EpgChannelSchema.index({ name: 'text' });
-EpgChannelSchema.index({ sourceId: 1 });
-
-const EpgProgramSchema = new mongoose.Schema({
-  id: { type: String, required: true, unique: true },
-  channelId: { type: String, required: true },
-  sourceId: { type: String, required: true },
-  title: { type: String, required: true },
-  description: String,
-  start: { type: Date, required: true },
-  stop: { type: Date, required: true },
-  categories: [String],
-  lastUpdated: { type: Date, default: Date.now }
-});
-
-// Indexes for faster querying
-EpgProgramSchema.index({ channelId: 1, start: 1, stop: 1 });
-EpgProgramSchema.index({ sourceId: 1 });
-
-// Create models
-const EpgSource = mongoose.model('EpgSource', EpgSourceSchema);
-const EpgChannel = mongoose.model('EpgChannel', EpgChannelSchema);
-const EpgProgram = mongoose.model('EpgProgram', EpgProgramSchema);
+const { pool } = require('./postgresService');
+const copyFrom = require('pg-copy-streams').from;
+const { Readable } = require('stream');
 
 const epgDatabaseService = {
   /**
-   * Initialize database connection
+   * Initialize database connection (no-op for PostgreSQL, pool already initialized)
    */
   async init() {
-    // Check if already connected
-    if (mongoose.connection.readyState === 1) {
-      logger.info('MongoDB already connected');
-      return;
-    }
-
-    try {
-      const connectionString = process.env.MONGODB_URI || 'mongodb://localhost:27017/iptv-epg-matcher';
-      await mongoose.connect(connectionString);
-      logger.info('Connected to MongoDB for EPG data');
-    } catch (error) {
-      logger.error(`MongoDB connection error: ${error.message}`);
-      throw error;
-    }
+    logger.info('PostgreSQL EPG service initialized (using shared pool)');
   },
 
   /**
@@ -73,28 +22,30 @@ const epgDatabaseService = {
    */
   async saveSource(source) {
     try {
-      await this.init();
-      
-      const existingSource = await EpgSource.findOne({ id: source.id });
-      
-      if (existingSource) {
-        // Update existing source
-        return await EpgSource.findOneAndUpdate(
-          { id: source.id },
-          { 
-            ...source, 
-            lastUpdated: Date.now()
-          },
-          { new: true }
-        );
-      } else {
-        // Create new source
-        const newSource = new EpgSource({
-          ...source,
-          lastUpdated: Date.now()
-        });
-        return await newSource.save();
-      }
+      const query = `
+        INSERT INTO epg_sources (id, name, url, file_path, channel_count, program_count, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          url = EXCLUDED.url,
+          file_path = EXCLUDED.file_path,
+          channel_count = EXCLUDED.channel_count,
+          program_count = EXCLUDED.program_count,
+          last_updated = CURRENT_TIMESTAMP
+        RETURNING *
+      `;
+
+      const values = [
+        source.id,
+        source.name,
+        source.url || null,
+        source.filePath || null,
+        source.channelCount || 0,
+        source.programCount || 0
+      ];
+
+      const result = await pool.query(query, values);
+      return result.rows[0];
     } catch (error) {
       logger.error(`Error saving EPG source: ${error.message}`);
       throw error;
@@ -106,28 +57,30 @@ const epgDatabaseService = {
    */
   async saveChannel(channel) {
     try {
-      await this.init();
-      
-      const existingChannel = await EpgChannel.findOne({ id: channel.id });
-      
-      if (existingChannel) {
-        // Update existing channel
-        return await EpgChannel.findOneAndUpdate(
-          { id: channel.id },
-          { 
-            ...channel, 
-            lastUpdated: Date.now()
-          },
-          { new: true }
-        );
-      } else {
-        // Create new channel
-        const newChannel = new EpgChannel({
-          ...channel,
-          lastUpdated: Date.now()
-        });
-        return await newChannel.save();
-      }
+      const query = `
+        INSERT INTO epg_channels (id, source_id, name, icon, language_code, categories_csv, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        ON CONFLICT (id) DO UPDATE SET
+          source_id = EXCLUDED.source_id,
+          name = EXCLUDED.name,
+          icon = EXCLUDED.icon,
+          language_code = EXCLUDED.language_code,
+          categories_csv = EXCLUDED.categories_csv,
+          last_updated = CURRENT_TIMESTAMP
+        RETURNING *
+      `;
+
+      const values = [
+        channel.id,
+        channel.sourceId,
+        channel.name,
+        channel.icon || null,
+        channel.languageCode || null,
+        channel.categoriesCSV || null
+      ];
+
+      const result = await pool.query(query, values);
+      return result.rows[0];
     } catch (error) {
       logger.error(`Error saving EPG channel: ${error.message}`);
       throw error;
@@ -139,28 +92,34 @@ const epgDatabaseService = {
    */
   async saveProgram(program) {
     try {
-      await this.init();
-      
-      const existingProgram = await EpgProgram.findOne({ id: program.id });
-      
-      if (existingProgram) {
-        // Update existing program
-        return await EpgProgram.findOneAndUpdate(
-          { id: program.id },
-          { 
-            ...program, 
-            lastUpdated: Date.now()
-          },
-          { new: true }
-        );
-      } else {
-        // Create new program
-        const newProgram = new EpgProgram({
-          ...program,
-          lastUpdated: Date.now()
-        });
-        return await newProgram.save();
-      }
+      const query = `
+        INSERT INTO epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+        ON CONFLICT (id) DO UPDATE SET
+          channel_id = EXCLUDED.channel_id,
+          source_id = EXCLUDED.source_id,
+          title = EXCLUDED.title,
+          description = EXCLUDED.description,
+          start_time = EXCLUDED.start_time,
+          stop_time = EXCLUDED.stop_time,
+          categories = EXCLUDED.categories,
+          last_updated = CURRENT_TIMESTAMP
+        RETURNING *
+      `;
+
+      const values = [
+        program.id,
+        program.channelId,
+        program.sourceId,
+        program.title,
+        program.description || null,
+        program.start,
+        program.stop,
+        program.categories || []
+      ];
+
+      const result = await pool.query(query, values);
+      return result.rows[0];
     } catch (error) {
       logger.error(`Error saving EPG program: ${error.message}`);
       throw error;
@@ -168,60 +127,215 @@ const epgDatabaseService = {
   },
 
   /**
-   * Save multiple channels in bulk
+   * Save multiple channels in bulk (ultra-fast COPY method)
    */
   async saveChannels(channels) {
-    try {
-      await this.init();
-      
-      // Use bulk operations for better performance
-      const bulkOps = channels.map(channel => ({
-        updateOne: {
-          filter: { id: channel.id },
-          update: { 
-            ...channel,
-            lastUpdated: Date.now()
-          },
-          upsert: true
-        }
-      }));
-      
-      if (bulkOps.length > 0) {
-        return await EpgChannel.bulkWrite(bulkOps);
-      }
+    if (!channels || channels.length === 0) {
       return { acknowledged: true, modifiedCount: 0 };
+    }
+
+    const client = await pool.connect();
+
+    try {
+      // Use COPY for 10-100x faster bulk insert
+      // First create temp table, COPY into it, then upsert to main table
+      await client.query('BEGIN');
+
+      // Create temporary table
+      await client.query(`
+        CREATE TEMP TABLE temp_epg_channels (LIKE epg_channels INCLUDING DEFAULTS)
+        ON COMMIT DROP
+      `);
+
+      // Prepare CSV data for COPY
+      const csvLines = channels.map(channel => {
+        const values = [
+          channel.id || '',
+          channel.sourceId || '',
+          channel.name || '',
+          channel.icon || '',
+          channel.languageCode || '',
+          channel.categoriesCSV || ''
+        ];
+        // Escape values and create tab-separated line
+        return values.map(v => String(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n')).join('\t');
+      });
+
+      // Create readable stream from CSV data
+      const stream = Readable.from(csvLines.join('\n'));
+
+      // Use COPY to load data into temp table (super fast!)
+      const copyStream = client.query(copyFrom(`
+        COPY temp_epg_channels (id, source_id, name, icon, language_code, categories_csv)
+        FROM STDIN
+      `));
+
+      // Pipe data to PostgreSQL
+      await new Promise((resolve, reject) => {
+        stream.pipe(copyStream)
+          .on('finish', resolve)
+          .on('error', reject);
+      });
+
+      // First, deduplicate the temp table itself (keep first occurrence based on ctid)
+      // Using PostgreSQL-documented approach with CTE and window function
+      await client.query(`
+        WITH duplicates AS (
+          SELECT ctid,
+                 ROW_NUMBER() OVER (PARTITION BY id ORDER BY ctid) AS rn
+          FROM temp_epg_channels
+        )
+        DELETE FROM temp_epg_channels
+        WHERE ctid IN (
+          SELECT ctid FROM duplicates WHERE rn > 1
+        )
+      `);
+
+      // Now insert from deduplicated temp table to main table
+      const result = await client.query(`
+        INSERT INTO epg_channels (id, source_id, name, icon, language_code, categories_csv, last_updated)
+        SELECT id, source_id, name, icon, language_code, categories_csv, CURRENT_TIMESTAMP
+        FROM temp_epg_channels
+        ON CONFLICT (id) DO UPDATE SET
+          source_id = EXCLUDED.source_id,
+          name = EXCLUDED.name,
+          icon = EXCLUDED.icon,
+          language_code = EXCLUDED.language_code,
+          categories_csv = EXCLUDED.categories_csv,
+          last_updated = CURRENT_TIMESTAMP
+      `);
+
+      await client.query('COMMIT');
+
+      logger.info(`Bulk saved ${channels.length} EPG channels using COPY (ultra-fast)`);
+
+      return {
+        acknowledged: true,
+        modifiedCount: result.rowCount,
+        upsertedCount: result.rowCount
+      };
     } catch (error) {
+      await client.query('ROLLBACK');
       logger.error(`Error bulk saving EPG channels: ${error.message}`);
       throw error;
+    } finally {
+      client.release();
     }
   },
 
   /**
-   * Save multiple programs in bulk
+   * Save multiple programs in bulk (ultra-fast COPY method)
    */
   async savePrograms(programs) {
-    try {
-      await this.init();
-      
-      // Use bulk operations for better performance
-      const bulkOps = programs.map(program => ({
-        updateOne: {
-          filter: { id: program.id },
-          update: { 
-            ...program,
-            lastUpdated: Date.now()
-          },
-          upsert: true
-        }
-      }));
-      
-      if (bulkOps.length > 0) {
-        return await EpgProgram.bulkWrite(bulkOps);
-      }
+    if (!programs || programs.length === 0) {
       return { acknowledged: true, modifiedCount: 0 };
+    }
+
+    const client = await pool.connect();
+
+    try {
+      // Use COPY for 10-100x faster bulk insert
+      await client.query('BEGIN');
+
+      // Create temporary table
+      await client.query(`
+        CREATE TEMP TABLE temp_epg_programs (LIKE epg_programs INCLUDING DEFAULTS)
+        ON COMMIT DROP
+      `);
+
+      // Prepare CSV data for COPY - stream line-by-line to avoid string length limits
+      // Format: id, channel_id, source_id, title, description, start_time, stop_time, categories
+      function* generateCSVLines() {
+        for (const program of programs) {
+          // Build PostgreSQL array - strip HTML and problematic characters from categories
+          let categoriesValue = '{}';
+          if (program.categories && program.categories.length > 0) {
+            const cleanedCategories = program.categories.map(c => {
+              // Strip HTML tags and clean the string
+              return String(c)
+                .replace(/<[^>]*>/g, '')  // Remove HTML tags
+                .replace(/&[^;]+;/g, '')  // Remove HTML entities
+                .trim();
+            }).filter(c => c.length > 0);  // Remove empty strings
+
+            if (cleanedCategories.length > 0) {
+              // Build array with proper escaping: only escape backslashes and quotes
+              const escapedCats = cleanedCategories.map(c =>
+                `"${c.replace(/\\/g, '\\\\\\\\').replace(/"/g, '\\\\"')}"`
+              );
+              categoriesValue = `{${escapedCats.join(',')}}`;
+            }
+          }
+
+          const values = [
+            program.id || '',
+            program.channelId || '',
+            program.sourceId || '',
+            program.title || '',
+            (program.description || '').substring(0, 10000), // Limit description to 10K chars
+            program.start ? new Date(program.start).toISOString() : '',
+            program.stop ? new Date(program.stop).toISOString() : '',
+            categoriesValue
+          ];
+
+          // Escape values for COPY format (but NOT categories - already done)
+          const escapedValues = values.map((v, idx) => {
+            if (idx === 7) return v;  // Categories already escaped
+            return String(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+          });
+
+          yield escapedValues.join('\t') + '\n';
+        }
+      }
+
+      // Create readable stream from CSV data (no string concatenation!)
+      const stream = Readable.from(generateCSVLines());
+
+      // Use COPY to load data into temp table (super fast!)
+      const copyStream = client.query(copyFrom(`
+        COPY temp_epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories)
+        FROM STDIN
+      `));
+
+      // Pipe data to PostgreSQL
+      await new Promise((resolve, reject) => {
+        stream.pipe(copyStream)
+          .on('finish', resolve)
+          .on('error', reject);
+      });
+
+      // Upsert from temp table to main table
+      // Use DISTINCT ON to handle duplicate program IDs in source data
+      const result = await client.query(`
+        INSERT INTO epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories, last_updated)
+        SELECT DISTINCT ON (id) id, channel_id, source_id, title, description, start_time, stop_time, categories, CURRENT_TIMESTAMP
+        FROM temp_epg_programs
+        ON CONFLICT (id) DO UPDATE SET
+          channel_id = EXCLUDED.channel_id,
+          source_id = EXCLUDED.source_id,
+          title = EXCLUDED.title,
+          description = EXCLUDED.description,
+          start_time = EXCLUDED.start_time,
+          stop_time = EXCLUDED.stop_time,
+          categories = EXCLUDED.categories,
+          last_updated = CURRENT_TIMESTAMP
+      `);
+
+      await client.query('COMMIT');
+
+      logger.info(`Bulk saved ${programs.length} EPG programs using COPY (ultra-fast)`);
+
+      return {
+        acknowledged: true,
+        modifiedCount: result.rowCount,
+        upsertedCount: result.rowCount
+      };
     } catch (error) {
+      await client.query('ROLLBACK');
       logger.error(`Error bulk saving EPG programs: ${error.message}`);
       throw error;
+    } finally {
+      client.release();
     }
   },
 
@@ -230,8 +344,9 @@ const epgDatabaseService = {
    */
   async getSources() {
     try {
-      await this.init();
-      return await EpgSource.find();
+      const query = 'SELECT * FROM epg_sources ORDER BY name';
+      const result = await pool.query(query);
+      return result.rows;
     } catch (error) {
       logger.error(`Error getting EPG sources: ${error.message}`);
       throw error;
@@ -243,8 +358,9 @@ const epgDatabaseService = {
    */
   async getChannelsBySourceId(sourceId) {
     try {
-      await this.init();
-      return await EpgChannel.find({ sourceId });
+      const query = 'SELECT * FROM epg_channels WHERE source_id = $1 ORDER BY name';
+      const result = await pool.query(query, [sourceId]);
+      return result.rows;
     } catch (error) {
       logger.error(`Error getting EPG channels for source ${sourceId}: ${error.message}`);
       throw error;
@@ -256,8 +372,9 @@ const epgDatabaseService = {
    */
   async getAllChannels() {
     try {
-      await this.init();
-      return await EpgChannel.find();
+      const query = 'SELECT * FROM epg_channels ORDER BY name';
+      const result = await pool.query(query);
+      return result.rows;
     } catch (error) {
       logger.error(`Error getting all EPG channels: ${error.message}`);
       throw error;
@@ -269,53 +386,61 @@ const epgDatabaseService = {
    */
   async getChannelById(channelId) {
     try {
-      await this.init();
-      const channel = await EpgChannel.findOne({ id: channelId });
-      
-      if (!channel) {
+      const query = `
+        SELECT c.*, s.name as source_name
+        FROM epg_channels c
+        LEFT JOIN epg_sources s ON c.source_id = s.id
+        WHERE c.id = $1
+      `;
+
+      const result = await pool.query(query, [channelId]);
+
+      if (result.rows.length === 0) {
         return null;
       }
-      
-      // Also get the source information
-      const source = await EpgSource.findOne({ id: channel.sourceId });
-      
+
+      const row = result.rows[0];
       return {
-        id: channel.id,
-        sourceId: channel.sourceId,
-        name: channel.name,
-        icon: channel.icon,
-        source_name: source ? source.name : 'Unknown Source'
+        id: row.id,
+        sourceId: row.source_id,
+        name: row.name,
+        icon: row.icon,
+        source_name: row.source_name || 'Unknown Source'
       };
     } catch (error) {
       logger.error(`Error getting EPG channel by ID ${channelId}: ${error.message}`);
       throw error;
     }
   },
-  
+
   /**
    * Get programs for a channel within a time window
    */
   async getProgramsByChannelId(channelId, startTime, endTime) {
     try {
-      await this.init();
-      
       // Default time window if not provided: next 24 hours
       const now = startTime || new Date();
       const tomorrow = endTime || new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      
-      const programs = await EpgProgram.find({
-        channelId: channelId,
-        start: { $lte: tomorrow },
-        stop: { $gte: now }
-      }).sort({ start: 1 }).limit(100);
-      
-      return programs.map(program => ({
+
+      const query = `
+        SELECT id, channel_id, title, description, start_time, stop_time, categories
+        FROM epg_programs
+        WHERE channel_id = $1
+          AND start_time <= $3
+          AND stop_time >= $2
+        ORDER BY start_time ASC
+        LIMIT 100
+      `;
+
+      const result = await pool.query(query, [channelId, now, tomorrow]);
+
+      return result.rows.map(program => ({
         id: program.id,
-        channelId: program.channelId,
+        channelId: program.channel_id,
         title: program.title,
         description: program.description,
-        start: program.start,
-        stop: program.stop,
+        start: program.start_time,
+        stop: program.stop_time,
         categories: program.categories
       }));
     } catch (error) {
@@ -323,68 +448,67 @@ const epgDatabaseService = {
       throw error;
     }
   },
-  
+
   /**
    * Get total channel count
    */
   async getChannelCount() {
     try {
-      await this.init();
-      return await EpgChannel.countDocuments();
+      const query = 'SELECT COUNT(*) as count FROM epg_channels';
+      const result = await pool.query(query);
+      return parseInt(result.rows[0].count);
     } catch (error) {
       logger.error(`Error getting channel count: ${error.message}`);
       throw error;
     }
   },
-  
+
   /**
    * Get total program count
    */
   async getProgramCount() {
     try {
-      await this.init();
-      return await EpgProgram.countDocuments();
+      const query = 'SELECT COUNT(*) as count FROM epg_programs';
+      const result = await pool.query(query);
+      return parseInt(result.rows[0].count);
     } catch (error) {
       logger.error(`Error getting program count: ${error.message}`);
       throw error;
     }
   },
-  
+
   /**
-   * Search channels by query
+   * Search channels by query (optimized with pg_trgm)
    */
   async searchChannels(query) {
     try {
-      await this.init();
-      
-      // Normalize the search term
       const searchTerm = query.toLowerCase().trim();
-      
-      // Create a regex for partial matching
-      const searchRegex = new RegExp(searchTerm, 'i');
-      
-      // Use MongoDB text search with fallback to regex
-      const channels = await EpgChannel.find({
-        $or: [
-          { name: searchRegex },
-          { id: searchRegex }
-        ]
-      }).limit(100);
-      
-      // Get source information for each channel
-      const result = [];
-      for (const channel of channels) {
-        const source = await EpgSource.findOne({ id: channel.sourceId });
-        result.push({
-          id: channel.id,
-          sourceId: channel.sourceId,
-          name: channel.name,
-          icon: channel.icon,
-          source_name: source ? source.name : 'Unknown Source'
-        });
-      }
-      
-      return result;
+
+      // Use trigram index for fast fuzzy search
+      // First try exact prefix match (fastest), then fuzzy match
+      const sql = `
+        SELECT c.id, c.source_id, c.name, c.icon, s.name as source_name,
+               CASE
+                 WHEN LOWER(c.name) = $2 THEN 1
+                 WHEN LOWER(c.name) LIKE $3 THEN 2
+                 ELSE 3
+               END as match_priority
+        FROM epg_channels c
+        LEFT JOIN epg_sources s ON c.source_id = s.id
+        WHERE c.name % $2 OR LOWER(c.name) LIKE $1
+        ORDER BY match_priority, c.name
+        LIMIT 100
+      `;
+
+      const result = await pool.query(sql, [`%${searchTerm}%`, searchTerm, `${searchTerm}%`]);
+
+      return result.rows.map(row => ({
+        id: row.id,
+        sourceId: row.source_id,
+        name: row.name,
+        icon: row.icon,
+        source_name: row.source_name || 'Unknown Source'
+      }));
     } catch (error) {
       logger.error(`Error searching EPG channels with query "${query}": ${error.message}`);
       throw error;
@@ -396,16 +520,18 @@ const epgDatabaseService = {
    */
   async getStats() {
     try {
-      await this.init();
-      
-      const sourceCount = await EpgSource.countDocuments();
-      const channelCount = await EpgChannel.countDocuments();
-      const programCount = await EpgProgram.countDocuments();
-      
+      const queries = [
+        pool.query('SELECT COUNT(*) as count FROM epg_sources'),
+        pool.query('SELECT COUNT(*) as count FROM epg_channels'),
+        pool.query('SELECT COUNT(*) as count FROM epg_programs')
+      ];
+
+      const [sourcesResult, channelsResult, programsResult] = await Promise.all(queries);
+
       return {
-        sources: sourceCount,
-        channels: channelCount,
-        programs: programCount
+        sources: parseInt(sourcesResult.rows[0].count),
+        channels: parseInt(channelsResult.rows[0].count),
+        programs: parseInt(programsResult.rows[0].count)
       };
     } catch (error) {
       logger.error(`Error getting EPG stats: ${error.message}`);
@@ -414,29 +540,49 @@ const epgDatabaseService = {
   },
 
   /**
-   * Clear all EPG data for a source
+   * TRUNCATE all EPG data (fast, for full refresh)
+   * This is 100x faster than DELETE for large datasets
+   */
+  async truncateAllEpgData() {
+    try {
+      logger.info('Truncating all EPG data...');
+
+      // TRUNCATE is much faster than DELETE - it doesn't scan rows
+      // CASCADE will also clear epg_programs since it has FK to epg_channels
+      await pool.query('TRUNCATE TABLE epg_programs RESTART IDENTITY CASCADE');
+      await pool.query('TRUNCATE TABLE epg_channels RESTART IDENTITY CASCADE');
+      await pool.query('TRUNCATE TABLE epg_sources RESTART IDENTITY CASCADE');
+
+      logger.info('All EPG data truncated successfully');
+    } catch (error) {
+      logger.error(`Error truncating EPG data: ${error.message}`);
+      throw error;
+    }
+  },
+
+  /**
+   * Clear all EPG data for a source (slower, for single source refresh)
    */
   async clearSourceData(sourceId) {
     try {
-      await this.init();
-      
-      // First get all channelIds for this source
-      const channels = await EpgChannel.find({ sourceId }, { id: 1 });
-      const channelIds = channels.map(channel => channel.id);
-      
-      // Delete programs for these channels
-      await EpgProgram.deleteMany({ channelId: { $in: channelIds } });
-      
-      // Delete channels
-      await EpgChannel.deleteMany({ sourceId });
-      
-      // Delete source
-      await EpgSource.deleteOne({ id: sourceId });
-      
+      // Get counts first for the response
+      const countQueries = [
+        pool.query('SELECT COUNT(*) as count FROM epg_channels WHERE source_id = $1', [sourceId]),
+        pool.query('SELECT COUNT(*) as count FROM epg_programs WHERE source_id = $1', [sourceId])
+      ];
+
+      const [channelsResult, programsResult] = await Promise.all(countQueries);
+      const channelCount = parseInt(channelsResult.rows[0].count);
+      const programCount = parseInt(programsResult.rows[0].count);
+
+      // Delete ONLY channels and programs, KEEP the source for foreign key integrity
+      await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+      await pool.query('DELETE FROM epg_channels WHERE source_id = $1', [sourceId]);
+
       return {
         deletedSource: sourceId,
-        deletedChannels: channels.length,
-        deletedPrograms: channelIds.length > 0 ? 'multiple' : 0
+        deletedChannels: channelCount,
+        deletedPrograms: programCount
       };
     } catch (error) {
       logger.error(`Error clearing data for source ${sourceId}: ${error.message}`);
@@ -449,18 +595,192 @@ const epgDatabaseService = {
    */
   async clearAllData() {
     try {
-      await this.init();
-      
-      await EpgProgram.deleteMany({});
-      await EpgChannel.deleteMany({});
-      await EpgSource.deleteMany({});
-      
+      // Delete in order: programs, channels, sources
+      await pool.query('DELETE FROM epg_programs');
+      await pool.query('DELETE FROM epg_channels');
+      await pool.query('DELETE FROM epg_sources');
+
       return { success: true, message: 'All EPG data cleared' };
     } catch (error) {
       logger.error(`Error clearing all EPG data: ${error.message}`);
       throw error;
     }
+  },
+
+  /**
+   * Optimize database for bulk loading
+   */
+  async optimizeForBulkLoad() {
+    try {
+      logger.info('Optimizing database for bulk load...');
+
+      // Increase work_mem for better sort performance
+      await pool.query('SET work_mem = \'256MB\'');
+
+      // Increase maintenance_work_mem for index creation
+      await pool.query('SET maintenance_work_mem = \'512MB\'');
+
+      // Disable autovacuum during bulk load
+      await pool.query('ALTER TABLE epg_channels SET (autovacuum_enabled = false)');
+      await pool.query('ALTER TABLE epg_programs SET (autovacuum_enabled = false)');
+
+      // Disable WAL for these tables (UNLOGGED) - WARNING: data loss on crash
+      // await pool.query('ALTER TABLE epg_channels SET UNLOGGED');
+      // await pool.query('ALTER TABLE epg_programs SET UNLOGGED');
+
+      logger.info('Database optimized for bulk load');
+    } catch (error) {
+      logger.error(`Error optimizing for bulk load: ${error.message}`);
+      // Don't throw - continue even if optimization fails
+    }
+  },
+
+  /**
+   * Restore database settings after bulk loading
+   */
+  async restoreAfterBulkLoad() {
+    try {
+      logger.info('Restoring database settings after bulk load...');
+
+      // Re-enable autovacuum
+      await pool.query('ALTER TABLE epg_channels SET (autovacuum_enabled = true)');
+      await pool.query('ALTER TABLE epg_programs SET (autovacuum_enabled = true)');
+
+      // Restore WAL if we disabled it
+      // await pool.query('ALTER TABLE epg_channels SET LOGGED');
+      // await pool.query('ALTER TABLE epg_programs SET LOGGED');
+
+      // Run ANALYZE to update statistics
+      await pool.query('ANALYZE epg_channels');
+      await pool.query('ANALYZE epg_programs');
+
+      logger.info('Database settings restored');
+    } catch (error) {
+      logger.error(`Error restoring database settings: ${error.message}`);
+      // Don't throw - continue even if restoration fails
+    }
+  },
+
+  /**
+   * Drop indexes for bulk loading performance
+   */
+  async dropIndexes() {
+    try {
+      logger.info('Dropping EPG indexes for bulk load...');
+
+      // Optimize database settings first
+      await this.optimizeForBulkLoad();
+
+      // Drop all non-primary key indexes
+      const dropQueries = [
+        // EPG Sources indexes
+        'DROP INDEX IF EXISTS idx_epg_sources_name',
+
+        // EPG Channels indexes
+        'DROP INDEX IF EXISTS idx_epg_channels_source_id',
+        'DROP INDEX IF EXISTS idx_epg_channels_name',
+        'DROP INDEX IF EXISTS idx_epg_channels_name_lower',
+        'DROP INDEX IF EXISTS idx_epg_channels_name_trgm',
+
+        // EPG Programs indexes
+        'DROP INDEX IF EXISTS idx_epg_programs_channel_id',
+        'DROP INDEX IF EXISTS idx_epg_programs_source_id',
+        'DROP INDEX IF EXISTS idx_epg_programs_time_range',
+        'DROP INDEX IF EXISTS idx_epg_programs_start_time',
+        'DROP INDEX IF EXISTS idx_epg_programs_stop_time',
+        'DROP INDEX IF EXISTS idx_epg_programs_channel_time'
+      ];
+
+      for (const query of dropQueries) {
+        await pool.query(query);
+      }
+
+      logger.info('EPG indexes dropped successfully');
+    } catch (error) {
+      logger.error(`Error dropping EPG indexes: ${error.message}`);
+      throw error;
+    }
+  },
+
+  /**
+   * Recreate indexes after bulk loading
+   */
+  async recreateIndexes() {
+    try {
+      logger.info('Recreating EPG indexes...');
+
+      // Recreate all indexes (same as in migration)
+      const createQueries = [
+        // EPG Sources
+        'CREATE INDEX IF NOT EXISTS idx_epg_sources_name ON epg_sources(name)',
+
+        // EPG Channels
+        'CREATE INDEX IF NOT EXISTS idx_epg_channels_source_id ON epg_channels(source_id)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_channels_name ON epg_channels(name)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_channels_name_lower ON epg_channels(LOWER(name))',
+        'CREATE INDEX IF NOT EXISTS idx_epg_channels_name_trgm ON epg_channels USING gin (name gin_trgm_ops)',
+
+        // EPG Programs
+        'CREATE INDEX IF NOT EXISTS idx_epg_programs_channel_id ON epg_programs(channel_id)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_programs_source_id ON epg_programs(source_id)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_programs_time_range ON epg_programs(channel_id, start_time, stop_time)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_programs_start_time ON epg_programs(start_time)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_programs_stop_time ON epg_programs(stop_time)',
+        'CREATE INDEX IF NOT EXISTS idx_epg_programs_channel_time ON epg_programs(channel_id, start_time DESC, stop_time DESC)'
+      ];
+
+      for (const query of createQueries) {
+        await pool.query(query);
+      }
+
+      // Analyze tables for query optimization (done in restoreAfterBulkLoad)
+      logger.info('EPG indexes recreated successfully');
+
+      // Restore database settings after bulk load
+      await this.restoreAfterBulkLoad();
+    } catch (error) {
+      logger.error(`Error recreating EPG indexes: ${error.message}`);
+      throw error;
+    }
+  },
+
+  /**
+   * Update source statistics
+   */
+  async updateSourceStats(sourceId, channelCount, programCount) {
+    try {
+      const query = `
+        UPDATE epg_sources
+        SET channel_count = $1,
+            program_count = $2,
+            last_updated = CURRENT_TIMESTAMP
+        WHERE id = $3
+      `;
+
+      await pool.query(query, [channelCount, programCount, sourceId]);
+
+      logger.info(`Updated source ${sourceId} stats: ${channelCount} channels, ${programCount} programs`);
+    } catch (error) {
+      logger.error(`Error updating source stats: ${error.message}`);
+      throw error;
+    }
+  },
+
+  /**
+   * Get all channel IDs for a source (as a Set for fast lookup)
+   */
+  async getChannelIdsBySource(sourceId) {
+    try {
+      const result = await pool.query(
+        'SELECT id FROM epg_channels WHERE source_id = $1',
+        [sourceId]
+      );
+      return new Set(result.rows.map(row => row.id));
+    } catch (error) {
+      logger.error(`Error getting channel IDs: ${error.message}`);
+      throw error;
+    }
   }
 };
 
-module.exports = epgDatabaseService; 
+module.exports = epgDatabaseService;

@@ -677,9 +677,9 @@ const getChannelsForSession = (sessionId, options = {}) => {
         let query, countQuery, params;
 
         if (userId) {
-            // For authenticated users, query directly from iptv_sources using user_id
-            // No need for session mappings - sources are owned by the user
-            let whereClause = 's.user_id = ?';
+            // For authenticated users, use a subquery for better performance with large datasets
+            // This forces PostgreSQL to use the index on source_id instead of sequential scan
+            let whereClause = 'c.source_id IN (SELECT id FROM iptv_sources WHERE user_id = ?)';
             params = [userId];
 
             if (categoryId) {
@@ -714,7 +714,6 @@ const getChannelsForSession = (sessionId, options = {}) => {
                    LIMIT ? OFFSET ?`;
 
             countQuery = `SELECT COUNT(DISTINCT c.channel_id) as total FROM iptv_channels c
-                         JOIN iptv_sources s ON c.source_id = s.id
                          WHERE ${whereClause}`;
 
             // Add userId for the LEFT JOIN in query
@@ -1113,6 +1112,9 @@ const getUserIPTVSources = (userId) => {
                 s.account_created_at,
                 s.last_updated,
                 s.auto_detect_live,
+                s.last_refresh_status,
+                s.last_refresh_error,
+                s.last_refresh_attempt,
                 COALESCE(p.priority, 999) as priority,
                 COALESCE(p.is_active, 1) as is_active,
                 p.nickname,
@@ -1150,7 +1152,10 @@ const getUserIPTVSources = (userId) => {
                     is_active: row.is_active,
                     channel_count: row.channel_count,
                     last_updated: row.last_updated,
-                    added_at: row.preference_created_at
+                    added_at: row.preference_created_at,
+                    last_refresh_status: row.last_refresh_status,
+                    last_refresh_error: row.last_refresh_error,
+                    last_refresh_attempt: row.last_refresh_attempt
                 })));
             }
         );

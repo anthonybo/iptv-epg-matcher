@@ -95,7 +95,7 @@ router.get('/upcoming', async (req, res) => {
     }
 
     const hoursAhead = parseInt(req.query.hours) || 24;
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDatabaseService = require('../services/iptvDatabase');
     const db = await iptvDatabaseService.connect();
 
     const now = new Date().toISOString();
@@ -141,7 +141,7 @@ router.get('/:eventId/channels', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabaseService');
+    const iptvDatabaseService = require('../services/iptvDatabase');
     const db = await iptvDatabaseService.connect();
 
     // Get the event details
@@ -208,9 +208,9 @@ router.get('/:eventId/channels', async (req, res) => {
         SELECT DISTINCT
           c.channel_id as id,
           c.name,
-          c.logo,
-          c.url,
-          c.epg_channel_id,
+          c.logo_url as logo,
+          c.stream_url as url,
+          c.tvg_id as epg_channel_id,
           c.group_title as category,
           s.id as source_id,
           s.name as source_name,

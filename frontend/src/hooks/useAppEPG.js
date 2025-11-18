@@ -49,6 +49,7 @@ export function useAppEPG() {
         }, {});
 
         console.log(`[useEPG] Loaded ${response.data.channels.length} matched channels`);
+        console.log('[useEPG] Matches map:', matchesMap);
         setMatchedChannels(matchesMap);
         saveMatchedChannels(matchesMap);
         return matchesMap;

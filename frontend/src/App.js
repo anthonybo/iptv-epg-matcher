@@ -92,8 +92,9 @@ function AppContent() {
         await fetchMatchedChannels();
       }
 
-      if (activeTab === 'player' && now - lastMatchesFetch > MATCHES_CACHE_LIFETIME) {
-        console.log('[App] Refreshing matched channels for player view (cache expired)');
+      if (activeTab === 'player') {
+        // Always fetch matched channels for player view to ensure EPG data is available
+        console.log('[App] Refreshing matched channels for player view');
         window.lastMatchesFetchTime = now;
         await fetchMatchedChannels();
       }

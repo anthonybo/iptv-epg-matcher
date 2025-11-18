@@ -13,11 +13,11 @@ const pool = new Pool({
     database: process.env.POSTGRES_DB || 'iptvguru',
     user: process.env.POSTGRES_USER || 'iptvguru',
     password: process.env.POSTGRES_PASSWORD,
-    max: parseInt(process.env.POSTGRES_MAX_CONNECTIONS) || 20,
+    max: parseInt(process.env.POSTGRES_MAX_CONNECTIONS) || 50,
     min: 5,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-    statement_timeout: 30000, // 30 second query timeout
+    connectionTimeoutMillis: 10000,
+    statement_timeout: 600000, // 10 minute query timeout for bulk operations
     ssl: process.env.NODE_ENV === 'production' ? {
         rejectUnauthorized: false
     } : false
@@ -49,7 +49,11 @@ async function queryWithRetry(query, params = [], retries = 3) {
         const result = await pool.query(query, params);
         const duration = Date.now() - start;
 
-        if (duration > 1000) {
+        // Don't warn about slow bulk INSERT/DELETE operations - they're expected during channel refresh
+        const isBulkOperation = query.trim().toUpperCase().startsWith('INSERT') ||
+                                 query.trim().toUpperCase().startsWith('DELETE');
+
+        if (duration > 1000 && !isBulkOperation) {
             logger.warn('Slow query detected', { duration, query: query.substring(0, 100) });
         }
 
@@ -155,7 +159,10 @@ async function updateLastLogin(userId) {
 // ============================================================================
 
 async function saveSource(sourceData) {
-    const { user_id, session_id, name, type, url, username, password, mac_address } = sourceData;
+    const {
+        user_id, session_id, name, type, url, username, password, mac_address,
+        exp_date, max_connections, active_connections, account_status, is_trial, account_created_at
+    } = sourceData;
 
     // Check for existing source
     let checkQuery;
@@ -184,24 +191,39 @@ async function saveSource(sourceData) {
     const existing = await queryWithRetry(checkQuery, checkParams);
 
     if (existing.rows.length > 0) {
-        // Update existing source
+        // Update existing source with account info
         const updateQuery = `
             UPDATE iptv_sources
-            SET name = $1, last_refreshed = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $2
+            SET name = $1,
+                exp_date = $2,
+                max_connections = $3,
+                active_connections = $4,
+                account_status = $5,
+                is_trial = $6,
+                account_created_at = $7,
+                last_refreshed = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $8
             RETURNING *
         `;
-        const result = await queryWithRetry(updateQuery, [name, existing.rows[0].id]);
+        const result = await queryWithRetry(updateQuery, [
+            name, exp_date, max_connections, active_connections,
+            account_status, is_trial, account_created_at, existing.rows[0].id
+        ]);
         return result.rows[0];
     } else {
         // Insert new source
         const insertQuery = `
-            INSERT INTO iptv_sources (user_id, session_id, name, type, url, username, password, mac_address)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO iptv_sources (
+                user_id, session_id, name, type, url, username, password, mac_address,
+                exp_date, max_connections, active_connections, account_status, is_trial, account_created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
         `;
         const result = await queryWithRetry(insertQuery, [
-            user_id, session_id, name, type, url, username, password, mac_address
+            user_id, session_id, name, type, url, username, password, mac_address,
+            exp_date, max_connections, active_connections, account_status, is_trial, account_created_at
         ]);
         return result.rows[0];
     }
@@ -209,9 +231,10 @@ async function saveSource(sourceData) {
 
 async function getUserSources(userId, sessionId) {
     const query = `
-        SELECT * FROM iptv_sources
-        WHERE user_id = $1 OR session_id = $2
-        ORDER BY created_at DESC
+        SELECT s.*
+        FROM iptv_sources s
+        WHERE s.user_id = $1 OR s.session_id = $2
+        ORDER BY s.created_at DESC
     `;
     const result = await queryWithRetry(query, [userId, sessionId]);
     return result.rows;
@@ -232,28 +255,45 @@ async function saveChannels(channels, sourceId) {
         return { saved: 0 };
     }
 
-    return transaction(async (client) => {
-        let savedCount = 0;
+    // Deduplicate channels by ID (in case source API returns duplicates)
+    const uniqueChannels = [];
+    const seenIds = new Set();
+    for (const channel of channels) {
+        if (!seenIds.has(channel.id)) {
+            seenIds.add(channel.id);
+            uniqueChannels.push(channel);
+        }
+    }
 
-        // Batch insert with ON CONFLICT
-        for (const channel of channels) {
-            const query = `
-                INSERT INTO iptv_channels (
-                    channel_id, source_id, name, stream_url, logo_url, category,
-                    tvg_id, tvg_name, group_title, source_type, source_username,
-                    source_password, source_url, source_mac
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                ON CONFLICT (channel_id)
-                DO UPDATE SET
-                    name = EXCLUDED.name,
-                    stream_url = EXCLUDED.stream_url,
-                    logo_url = EXCLUDED.logo_url,
-                    category = EXCLUDED.category,
-                    updated_at = CURRENT_TIMESTAMP
-            `;
+    if (uniqueChannels.length < channels.length) {
+        logger.warn(`Removed ${channels.length - uniqueChannels.length} duplicate channels for source ${sourceId}`);
+    }
 
-            await client.query(query, [
+    // Delete all existing channels for this source first
+    // This is much faster than ON CONFLICT for large datasets
+    await queryWithRetry(
+        'DELETE FROM iptv_channels WHERE source_id = $1',
+        [sourceId]
+    );
+
+    logger.info(`Deleted old channels for source ${sourceId}, inserting ${uniqueChannels.length} new channels`);
+
+    // Batch insert in chunks of 500 to avoid parameter limits
+    const batchSize = 500;
+    let savedCount = 0;
+
+    for (let i = 0; i < uniqueChannels.length; i += batchSize) {
+        const batch = uniqueChannels.slice(i, i + batchSize);
+
+        // Build values array: ($1,$2,$3...), ($15,$16,$17...), ...
+        const values = [];
+        const params = [];
+
+        batch.forEach((channel, idx) => {
+            const offset = idx * 14;
+            values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14})`);
+
+            params.push(
                 channel.id,
                 sourceId,
                 channel.name,
@@ -268,55 +308,124 @@ async function saveChannels(channels, sourceId) {
                 channel.source_password,
                 channel.source_url,
                 channel.source_mac
-            ]);
+            );
+        });
 
-            savedCount++;
-        }
+        const query = `
+            INSERT INTO iptv_channels (
+                channel_id, source_id, name, stream_url, logo_url, category,
+                tvg_id, tvg_name, group_title, source_type, source_username,
+                source_password, source_url, source_mac
+            )
+            VALUES ${values.join(', ')}
+            ON CONFLICT (channel_id, source_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                stream_url = EXCLUDED.stream_url,
+                logo_url = EXCLUDED.logo_url,
+                category = EXCLUDED.category,
+                tvg_id = EXCLUDED.tvg_id,
+                tvg_name = EXCLUDED.tvg_name,
+                group_title = EXCLUDED.group_title,
+                updated_at = CURRENT_TIMESTAMP
+        `;
 
-        return { saved: savedCount };
-    });
+        await queryWithRetry(query, params);
+        savedCount += batch.length;
+    }
+
+    // Update the channel count on the source
+    await queryWithRetry(
+        'UPDATE iptv_sources SET channel_count = $1 WHERE id = $2',
+        [savedCount, sourceId]
+    );
+
+    logger.info(`Saved ${savedCount} channels for source ${sourceId}`);
+    return { saved: savedCount };
 }
 
-async function getChannelsForSession(sessionId, page = 1, pageSize = 50, search = '', category = '') {
+async function getChannelsForSession(sessionId, options = {}) {
+    // Extract options with defaults
+    const page = parseInt(options.page) || 1;
+    const limit = parseInt(options.limit) || 50;
+    const search = options.search || '';
+    const categoryId = options.categoryId || '';
+    const sourceId = options.sourceId ? parseInt(options.sourceId) : null;
+    const userId = options.userId || null;
+
+    // Use subquery for better query planning performance with large datasets
+    // This forces PostgreSQL to use indexes instead of sequential scans
     let query = `
-        SELECT c.*
+        SELECT c.channel_id as id, c.name, c.logo_url as logo, c.stream_url as url,
+               c.group_title, c.category, c.tvg_id, c.source_id as "sourceId",
+               s.name as "sourceName", s.type as "sourceType",
+               c.source_type, c.source_username, c.source_password, c.source_url, c.source_mac
         FROM iptv_channels c
         JOIN iptv_sources s ON c.source_id = s.id
-        WHERE s.session_id = $1
+        WHERE c.source_id IN (SELECT id FROM iptv_sources WHERE session_id = $1 OR user_id = $2)
     `;
 
-    const params = [sessionId];
-    let paramIndex = 2;
+    const params = [sessionId, userId];
+    let paramIndex = 3;
 
+    // Filter by source_id if provided
+    if (sourceId) {
+        query += ` AND c.source_id = $${paramIndex}`;
+        params.push(sourceId);
+        paramIndex++;
+    }
+
+    // Filter by search term if provided
     if (search) {
         query += ` AND c.name ILIKE $${paramIndex}`;
         params.push(`%${search}%`);
         paramIndex++;
     }
 
-    if (category) {
+    // Filter by category if provided
+    if (categoryId) {
         query += ` AND c.category = $${paramIndex}`;
-        params.push(category);
+        params.push(categoryId);
         paramIndex++;
     }
 
-    // Count total
-    const countQuery = query.replace('SELECT c.*', 'SELECT COUNT(*) as total');
-    const countResult = await queryWithRetry(countQuery, params);
-    const total = parseInt(countResult.rows[0].total);
+    // Count total - use fast estimate for large result sets
+    // For pagination, an approximate count is acceptable and MUCH faster
+    let total = 0;
+    try {
+        // Try exact count with a short timeout for small result sets
+        const countQuery = query.replace(/SELECT c\.channel_id as id.*?\n.*?FROM/s, 'SELECT COUNT(*) as total FROM');
+        const countResult = await Promise.race([
+            queryWithRetry(countQuery, params),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Count timeout')), 2000))
+        ]);
+        total = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].total) : 0;
+    } catch (err) {
+        // If count times out, estimate based on limit
+        // This is acceptable for pagination UX - users don't need exact totals
+        logger.debug('Using estimated count for pagination');
+        total = limit * 100; // Estimate: assume up to 100 pages worth of data
+    }
 
     // Get paginated results
-    query += ` ORDER BY c.name LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-    params.push(pageSize, (page - 1) * pageSize);
+    // Skip ORDER BY when searching for better performance with large datasets
+    // Users care more about finding matching results quickly than alphabetical order
+    if (!search) {
+        query += ` ORDER BY c.name`;
+    }
+    query += ` LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    const offset = (page - 1) * limit;
+    params.push(limit, offset);
 
     const result = await queryWithRetry(query, params);
 
     return {
         channels: result.rows,
-        total,
-        page,
-        pageSize,
-        totalPages: Math.ceil(total / pageSize)
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit)
+        }
     };
 }
 

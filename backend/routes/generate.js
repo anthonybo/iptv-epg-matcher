@@ -11,8 +11,12 @@ const logger = require('../config/logger');
 const { generateCredentials } = require('../utils/storageUtils');
 const { UPLOADS_DIR } = require('../config/constants');
 const { authMiddleware } = require('../middleware/authMiddleware');
-const iptvDatabaseService = require('../services/iptvDatabaseService');
+const postgresService = require('../services/postgresService');
 const liveEventsService = require('../services/liveEventsService');
+
+// Module loaded timestamp - this executes IMMEDIATELY when module is required
+const MODULE_LOAD_TIME = new Date().toISOString();
+logger.info(`!!! GENERATE.JS MODULE LOADED AT ${MODULE_LOAD_TIME} !!!`);
 
 /**
  * Get the local network IP address of the server
@@ -115,27 +119,20 @@ router.get('/', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const db = await iptvDatabaseService.connect();
+    // Get all credentials for this user from PostgreSQL
+    const result = await postgresService.query(`
+      SELECT
+        id,
+        username,
+        password,
+        created_at,
+        last_used as last_accessed
+      FROM credentials
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+    `, [userId]);
 
-    // Get all credentials for this user
-    const credentials = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT
-          id,
-          username,
-          password,
-          credential_id,
-          channel_count,
-          created_at,
-          last_accessed
-        FROM generated_credentials
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    });
+    const credentials = result.rows || [];
 
     // Add URLs to each credential
     const serverIp = getServerIpAddress();
@@ -144,6 +141,7 @@ router.get('/', async (req, res) => {
 
     const credentialsWithUrls = credentials.map(cred => ({
       ...cred,
+      credential_id: cred.username,  // For backwards compatibility with frontend
       xtreamUrl: `${baseUrl}/api/xtream`,
       xtreamEpgUrl: `${baseUrl}/api/xtream/xmltv.php?username=${cred.username}&password=${cred.password}`,
       m3uUrl: `${baseUrl}/api/xtream/get.php?username=${cred.username}&password=${cred.password}&type=m3u_plus&output=ts`
@@ -173,20 +171,14 @@ router.delete('/:credentialId', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const db = await iptvDatabaseService.connect();
+    // Delete the credential from PostgreSQL (only if it belongs to this user)
+    // Note: PostgreSQL credentials table uses 'username' as unique key, not 'credential_id'
+    const result = await postgresService.query(`
+      DELETE FROM credentials
+      WHERE username = $1 AND user_id = $2
+    `, [credentialId, userId]);
 
-    // Delete the credential (only if it belongs to this user)
-    const result = await new Promise((resolve, reject) => {
-      db.run(`
-        DELETE FROM generated_credentials
-        WHERE credential_id = ? AND user_id = ?
-      `, [credentialId, userId], function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
-      });
-    });
-
-    if (result === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Credential not found or access denied' });
     }
 
@@ -217,42 +209,38 @@ router.post('/', async (req, res) => {
 
     logger.info(`Generating XTREAM credentials for user ${userId}`);
 
-    // Connect to database
-    const db = await iptvDatabaseService.connect();
+    // Get all matched channels for this user from PostgreSQL
+    const result = await postgresService.query(`
+      SELECT
+        m.iptv_channel_id,
+        m.epg_channel_id,
+        CASE WHEN m.use_dummy_epg THEN 1 ELSE 0 END as use_dummy_epg,
+        c.name,
+        c.logo_url as logo,
+        c.stream_url as url,
+        c.group_title,
+        CASE WHEN c.enable_live_prefix THEN 1 ELSE 0 END as enable_live_prefix,
+        s.id as source_id,
+        s.name as source_name,
+        s.url as source_url,
+        s.username as source_username,
+        s.password as source_password,
+        s.type as source_type,
+        CASE WHEN s.auto_detect_live THEN 1 ELSE 0 END as auto_detect_live
+      FROM epg_matches m
+      JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+      JOIN iptv_sources s ON c.source_id = s.id
+      WHERE m.user_id = $1
+      ORDER BY c.name
+    `, [userId]);
 
-    // Get all matched channels for this user from the database
-    const matchedChannels = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT
-          m.iptv_channel_id,
-          m.iptv_channel_name,
-          m.epg_channel_id,
-          m.epg_channel_name,
-          m.epg_source_name,
-          m.epg_source_id,
-          m.use_dummy_epg,
-          c.name,
-          c.logo,
-          c.url,
-          c.group_title,
-          c.enable_live_prefix,
-          s.id as source_id,
-          s.name as source_name,
-          s.url as source_url,
-          s.username as source_username,
-          s.password as source_password,
-          s.type as source_type,
-          s.auto_detect_live
-        FROM epg_matches m
-        JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
-        JOIN iptv_sources s ON c.source_id = s.id
-        WHERE m.user_id = ?
-        ORDER BY c.name
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    });
+    const matchedChannels = result.rows;
+
+    // DEBUG: Check what type use_dummy_epg actually is from PostgreSQL
+    const nhlCh = matchedChannels.find(ch => ch.name && ch.name.includes('NHL 11'));
+    if (nhlCh) {
+      logger.info(`[PG TYPE DEBUG] NHL 11: use_dummy_epg=${nhlCh.use_dummy_epg}, type=${typeof nhlCh.use_dummy_epg}, strict===1: ${nhlCh.use_dummy_epg === 1}, loose==1: ${nhlCh.use_dummy_epg == 1}`);
+    }
 
     if (!matchedChannels || matchedChannels.length === 0) {
       logger.warn(`No matched channels found for user ${userId}`);
@@ -308,7 +296,10 @@ router.post('/', async (req, res) => {
 
     // Robust token-based matching for live events
     const matchesLiveEvent = (programTitle, channelName, programStartTime, programStopTime) => {
-      if (liveEvents.length === 0) return false;
+
+      if (liveEvents.length === 0) {
+        return false;
+      }
 
       const titleTokens = tokenize(programTitle);
       const channelTokens = tokenize(channelName);
@@ -320,9 +311,11 @@ router.post('/', async (req, res) => {
         const eventStart = new Date(event.event_start).getTime();
         const eventEnd = new Date(event.event_end).getTime();
 
+
         // MUST have true time overlap (not just touching at a boundary)
         const programOverlapsEvent = programStartTime && programStopTime &&
           (programStartTime < eventEnd && programStopTime > eventStart);
+
 
         if (!programOverlapsEvent) {
           continue; // Skip if program doesn't air when event is live
@@ -332,12 +325,14 @@ router.post('/', async (req, res) => {
         const homeTokens = tokenize(homeTeam);
         const awayTokens = tokenize(awayTeam);
 
+
         // METHOD 1: Token-based title matching
         // Check if significant words from BOTH teams appear in the title
         if (titleTokens.length > 0 && homeTokens.length > 0 && awayTokens.length > 0) {
           // Count how many tokens from each team appear in the title
           const homeMatches = homeTokens.filter(token => titleTokens.includes(token)).length;
           const awayMatches = awayTokens.filter(token => titleTokens.includes(token)).length;
+
 
           // Smart threshold: require at least 1 token match, or 50% of tokens for multi-word teams
           // This prevents false matches while still handling variations
@@ -349,6 +344,7 @@ router.post('/', async (req, res) => {
           const homeThreshold = Math.max(1, Math.ceil(homeTokens.length * 0.5));
           const awayThreshold = Math.max(1, Math.ceil(awayTokens.length * 0.5));
 
+
           if (homeMatches >= homeThreshold && awayMatches >= awayThreshold) {
             return true;
           }
@@ -359,15 +355,18 @@ router.post('/', async (req, res) => {
         // (e.g., "FOX PHOENIX" shouldn't match "Green Bay Phoenix" team)
         const isSportsChannel = /\b(nhl|nba|mlb|nfl|espn|sports?|team|hockey|basketball|football|baseball|soccer)\b/i.test(channelName);
 
+
         if (isSportsChannel && channelTokens.length > 0) {
           const titleLower = programTitle.toLowerCase();
           // Expanded placeholder detection to catch more variations
           const isPlaceholder = /\b(next\s+game|upcoming|coming\s+up|scheduled|preview|pre-?game|post-?game)\b/i.test(titleLower);
 
+
           // Only match if it's not a placeholder program
           if (!isPlaceholder) {
             const homeInChannel = homeTokens.some(token => channelTokens.includes(token));
             const awayInChannel = awayTokens.some(token => channelTokens.includes(token));
+
 
             if (homeInChannel || awayInChannel) {
               return true;
@@ -393,7 +392,7 @@ router.post('/', async (req, res) => {
     matchedChannels.forEach(channel => {
       // Build EXTINF line with channel metadata
       const tvgId = channel.epg_channel_id || '';
-      const tvgName = channel.name || channel.iptv_channel_name;
+      const tvgName = channel.name;
       const tvgLogo = channel.logo || '';
       const groupTitle = channel.group_title || 'Matched Channels';
 
@@ -412,38 +411,33 @@ router.post('/', async (req, res) => {
     const epgChannelIds = [...new Set(matchedChannels.map(ch => ch.epg_channel_id).filter(Boolean))];
 
     // Get EPG data from the EPG database
-    const epgDbPath = path.join(__dirname, '../data/epg.db');
-    const sqlite3 = require('sqlite3').verbose();
-    const epgDb = new sqlite3.Database(epgDbPath);
-
-    let epgPrograms = await new Promise((resolve, reject) => {
-      if (epgChannelIds.length === 0) {
-        return resolve([]);
-      }
-
-      const placeholders = epgChannelIds.map(() => '?').join(',');
-      epgDb.all(`
-        SELECT channel_id, title, start, stop, description, category
-        FROM programs
+    let epgPrograms = [];
+    if (epgChannelIds.length > 0) {
+      const placeholders = epgChannelIds.map((_, i) => `$${i + 1}`).join(',');
+      const result = await postgresService.query(`
+        SELECT
+          channel_id,
+          title,
+          TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS') || ' +0000' as start,
+          TO_CHAR(stop_time AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS') || ' +0000' as stop,
+          description,
+          categories as category
+        FROM epg_programs
         WHERE channel_id IN (${placeholders})
-        AND substr(stop, 1, 14) >= strftime('%Y%m%d%H%M%S', 'now')
-        ORDER BY channel_id, start
+        AND stop_time >= NOW()
+        ORDER BY channel_id, start_time
         LIMIT 1000
-      `, epgChannelIds, (err, rows) => {
-        if (err) {
-          logger.warn(`Error fetching EPG data: ${err.message}`);
-          resolve([]);
-        } else {
-          logger.info(`Fetched ${rows ? rows.length : 0} EPG programs for XMLTV generation`);
-          resolve(rows || []);
-        }
-      });
-    });
+      `, epgChannelIds);
 
-    epgDb.close();
+      epgPrograms = result.rows || [];
+      logger.info(`Fetched ${epgPrograms.length} EPG programs for XMLTV generation`);
+    }
 
     // Generate dummy EPG programs for channels with use_dummy_epg=1
-    const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg === 1);
+    // Note: PostgreSQL CASE returns integer, but pg library might convert to string
+    const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg == 1 || ch.use_dummy_epg === true);
+    logger.info(`[DEBUG] Channels with use_dummy_epg === 1: ${dummyEpgChannels.length}`);
+
     if (dummyEpgChannels.length > 0) {
       logger.info(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
 
@@ -468,15 +462,33 @@ router.post('/', async (req, res) => {
               const hours = pad(date.getHours());
               const minutes = pad(date.getMinutes());
               const seconds = pad(date.getSeconds());
-              return `${year}${month}${dayNum}${hours}${minutes}${seconds} +0000`;
+
+              // Get timezone offset in minutes, then convert to +HHMM format
+              const offsetMinutes = -date.getTimezoneOffset(); // Negative because getTimezoneOffset returns negative for positive offsets
+              const offsetHours = Math.floor(Math.abs(offsetMinutes) / 60);
+              const offsetMins = Math.abs(offsetMinutes) % 60;
+              const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+              const offsetStr = `${offsetSign}${pad(offsetHours)}${pad(offsetMins)}`;
+
+              return `${year}${month}${dayNum}${hours}${minutes}${seconds} ${offsetStr}`;
             };
+
+            // Check if this dummy program should have LIVE prefix
+            const programStartTime = startDate.getTime();
+            const programStopTime = stopDate.getTime();
+
+            const isLiveEvent = matchesLiveEvent(channel.name, channel.name, programStartTime, programStopTime);
+
+            // Apply LIVE prefix if channel has enable_live_prefix and matches a live event
+            const shouldAddLivePrefix = (channel.enable_live_prefix == 1 || channel.enable_live_prefix === true) && isLiveEvent;
+            const title = shouldAddLivePrefix ? `ʟɪᴠᴇ ${channel.name}` : channel.name;
 
             epgPrograms.push({
               channel_id: channel.epg_channel_id || `dummy_${channel.iptv_channel_id}`,
-              title: channel.name || channel.iptv_channel_name,
+              title: title,
               start: formatXmltvTime(startDate),
               stop: formatXmltvTime(stopDate),
-              description: `Streaming on ${channel.name || channel.iptv_channel_name}`,
+              description: `Streaming on ${channel.name}`,
               category: channel.group_title || 'Live TV'
             });
           }
@@ -512,7 +524,7 @@ router.post('/', async (req, res) => {
         if (!uniqueChannelIds.has(dummyChannelId)) {
           uniqueChannelIds.add(dummyChannelId);
           xmlLines.push(`  <channel id="${escapeXml(dummyChannelId)}">`);
-          xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.iptv_channel_name)}</display-name>`);
+          xmlLines.push(`    <display-name>${escapeXml(ch.name)}</display-name>`);
           if (ch.logo) {
             xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
           }
@@ -527,9 +539,9 @@ router.post('/', async (req, res) => {
       const channelId = ch.epg_channel_id || (ch.use_dummy_epg === 1 ? `dummy_${ch.iptv_channel_id}` : null);
       if (channelId) {
         channelSettings[channelId] = {
-          enableLivePrefix: ch.enable_live_prefix === 1,
-          autoDetectLive: ch.auto_detect_live === 1,
-          channelName: ch.name || ch.iptv_channel_name || ''
+          enableLivePrefix: ch.enable_live_prefix == 1 || ch.enable_live_prefix === true,
+          autoDetectLive: ch.auto_detect_live == 1 || ch.auto_detect_live === true,
+          channelName: ch.name || ''
         };
 
         // Debug: Log volleyball channel settings
@@ -539,7 +551,6 @@ router.post('/', async (req, res) => {
       }
     });
 
-    logger.info(`[SETUP] Total channelSettings entries: ${Object.keys(channelSettings).length}`);
 
     // Add program data
     const nowTimestamp = Date.now();
@@ -567,9 +578,6 @@ router.post('/', async (req, res) => {
 
       // Debug logging for volleyball channel
       if (prog.channel_id && prog.channel_id.includes('2115583')) {
-        logger.info(`[LIVE PREFIX DEBUG] Channel: ${prog.channel_id}, Title: ${prog.title}`);
-        logger.info(`[LIVE PREFIX DEBUG] Settings: ${JSON.stringify(settings)}`);
-        logger.info(`[LIVE PREFIX DEBUG] isLiveEvent: ${isLiveEvent}`);
       }
 
       // Check if LIVE prefix should be added
@@ -605,17 +613,17 @@ router.post('/', async (req, res) => {
     fs.writeFileSync(m3uFilePath, m3uContent);
     fs.writeFileSync(epgFilePath, epgContent);
 
-    // Store credentials in database for XTREAM API access
-    await new Promise((resolve, reject) => {
-      db.run(`
-        INSERT OR REPLACE INTO generated_credentials
-        (user_id, username, password, credential_id, m3u_file, epg_file, channel_count, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `, [userId, username, password, credentialId, m3uFilePath, epgFilePath, matchedChannels.length], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    // Store credentials in PostgreSQL for XTREAM API access
+    await postgresService.query(`
+      INSERT INTO credentials
+      (user_id, username, password, m3u_file, epg_file, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT (username) DO UPDATE SET
+        password = EXCLUDED.password,
+        m3u_file = EXCLUDED.m3u_file,
+        epg_file = EXCLUDED.epg_file,
+        updated_at = CURRENT_TIMESTAMP
+    `, [userId, username, password, m3uFilePath, epgFilePath]);
 
     // XTREAM API server URL (base URL without credentials)
     const xtreamServerUrl = `${baseUrl}/api/xtream`;
@@ -649,6 +657,7 @@ router.post('/', async (req, res) => {
  */
 router.post('/update-all', async (req, res) => {
   try {
+    logger.info('=== UPDATE-ALL ENDPOINT HIT - NEW CODE LOADED ===');
     const userId = req.user?.id;
 
     if (!userId) {
@@ -658,19 +667,14 @@ router.post('/update-all', async (req, res) => {
 
     logger.info(`Updating all XTREAM credentials for user ${userId}`);
 
-    const db = await iptvDatabaseService.connect();
+    // Get all existing credentials for this user from PostgreSQL
+    const credResult = await postgresService.query(`
+      SELECT id, username, password, m3u_file, epg_file
+      FROM credentials
+      WHERE user_id = $1
+    `, [userId]);
 
-    // Get all existing credentials for this user
-    const existingCredentials = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT id, username, password, credential_id, m3u_file, epg_file
-        FROM generated_credentials
-        WHERE user_id = ?
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows || []);
-      });
-    });
+    const existingCredentials = credResult.rows || [];
 
     if (existingCredentials.length === 0) {
       logger.warn(`No existing credentials found for user ${userId}`);
@@ -682,39 +686,32 @@ router.post('/update-all', async (req, res) => {
 
     logger.info(`Found ${existingCredentials.length} credentials to update for user ${userId}`);
 
-    // Get all matched channels for this user
-    const matchedChannels = await new Promise((resolve, reject) => {
-      db.all(`
-        SELECT
-          m.iptv_channel_id,
-          m.iptv_channel_name,
-          m.epg_channel_id,
-          m.epg_channel_name,
-          m.epg_source_name,
-          m.epg_source_id,
-          m.use_dummy_epg,
-          c.name,
-          c.logo,
-          c.url,
-          c.group_title,
-          c.enable_live_prefix,
-          s.id as source_id,
-          s.name as source_name,
-          s.url as source_url,
-          s.username as source_username,
-          s.password as source_password,
-          s.type as source_type,
-          s.auto_detect_live
-        FROM epg_matches m
-        JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
-        JOIN iptv_sources s ON c.source_id = s.id
-        WHERE m.user_id = ?
-        ORDER BY c.name
-      `, [userId], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    });
+    // Get all matched channels for this user from PostgreSQL
+    const result2 = await postgresService.query(`
+      SELECT
+        m.iptv_channel_id,
+        m.epg_channel_id,
+        CASE WHEN m.use_dummy_epg THEN 1 ELSE 0 END as use_dummy_epg,
+        c.name,
+        c.logo_url as logo,
+        c.stream_url as url,
+        c.group_title,
+        CASE WHEN c.enable_live_prefix THEN 1 ELSE 0 END as enable_live_prefix,
+        s.id as source_id,
+        s.name as source_name,
+        s.url as source_url,
+        s.username as source_username,
+        s.password as source_password,
+        s.type as source_type,
+        CASE WHEN s.auto_detect_live THEN 1 ELSE 0 END as auto_detect_live
+      FROM epg_matches m
+      JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+      JOIN iptv_sources s ON c.source_id = s.id
+      WHERE m.user_id = $1
+      ORDER BY c.name
+    `, [userId]);
+
+    const matchedChannels = result2.rows;
 
     if (!matchedChannels || matchedChannels.length === 0) {
       logger.warn(`No matched channels found for user ${userId}`);
@@ -768,7 +765,10 @@ router.post('/update-all', async (req, res) => {
 
     // Robust token-based matching for live events
     const matchesLiveEvent = (programTitle, channelName, programStartTime, programStopTime) => {
-      if (liveEvents.length === 0) return false;
+
+      if (liveEvents.length === 0) {
+        return false;
+      }
 
       const titleTokens = tokenize(programTitle);
       const channelTokens = tokenize(channelName);
@@ -780,9 +780,11 @@ router.post('/update-all', async (req, res) => {
         const eventStart = new Date(event.event_start).getTime();
         const eventEnd = new Date(event.event_end).getTime();
 
+
         // MUST have true time overlap (not just touching at a boundary)
         const programOverlapsEvent = programStartTime && programStopTime &&
           (programStartTime < eventEnd && programStopTime > eventStart);
+
 
         if (!programOverlapsEvent) {
           continue; // Skip if program doesn't air when event is live
@@ -792,12 +794,14 @@ router.post('/update-all', async (req, res) => {
         const homeTokens = tokenize(homeTeam);
         const awayTokens = tokenize(awayTeam);
 
+
         // METHOD 1: Token-based title matching
         // Check if significant words from BOTH teams appear in the title
         if (titleTokens.length > 0 && homeTokens.length > 0 && awayTokens.length > 0) {
           // Count how many tokens from each team appear in the title
           const homeMatches = homeTokens.filter(token => titleTokens.includes(token)).length;
           const awayMatches = awayTokens.filter(token => titleTokens.includes(token)).length;
+
 
           // Smart threshold: require at least 1 token match, or 50% of tokens for multi-word teams
           // This prevents false matches while still handling variations
@@ -809,6 +813,7 @@ router.post('/update-all', async (req, res) => {
           const homeThreshold = Math.max(1, Math.ceil(homeTokens.length * 0.5));
           const awayThreshold = Math.max(1, Math.ceil(awayTokens.length * 0.5));
 
+
           if (homeMatches >= homeThreshold && awayMatches >= awayThreshold) {
             return true;
           }
@@ -819,15 +824,18 @@ router.post('/update-all', async (req, res) => {
         // (e.g., "FOX PHOENIX" shouldn't match "Green Bay Phoenix" team)
         const isSportsChannel = /\b(nhl|nba|mlb|nfl|espn|sports?|team|hockey|basketball|football|baseball|soccer)\b/i.test(channelName);
 
+
         if (isSportsChannel && channelTokens.length > 0) {
           const titleLower = programTitle.toLowerCase();
           // Expanded placeholder detection to catch more variations
           const isPlaceholder = /\b(next\s+game|upcoming|coming\s+up|scheduled|preview|pre-?game|post-?game)\b/i.test(titleLower);
 
+
           // Only match if it's not a placeholder program
           if (!isPlaceholder) {
             const homeInChannel = homeTokens.some(token => channelTokens.includes(token));
             const awayInChannel = awayTokens.some(token => channelTokens.includes(token));
+
 
             if (homeInChannel || awayInChannel) {
               return true;
@@ -856,7 +864,7 @@ router.post('/update-all', async (req, res) => {
         const m3uLines = ['#EXTM3U'];
         matchedChannels.forEach(channel => {
           const tvgId = channel.epg_channel_id || '';
-          const tvgName = channel.name || channel.iptv_channel_name;
+          const tvgName = channel.name;
           const tvgLogo = channel.logo || '';
           const groupTitle = channel.group_title || 'Matched Channels';
 
@@ -872,37 +880,32 @@ router.post('/update-all', async (req, res) => {
         // Generate EPG XML content
         const epgChannelIds = [...new Set(matchedChannels.map(ch => ch.epg_channel_id).filter(Boolean))];
 
-        const epgDbPath = path.join(__dirname, '../data/epg.db');
-        const sqlite3 = require('sqlite3').verbose();
-        const epgDb = new sqlite3.Database(epgDbPath);
-
-        let epgPrograms = await new Promise((resolve, reject) => {
-          if (epgChannelIds.length === 0) {
-            return resolve([]);
-          }
-
-          const placeholders = epgChannelIds.map(() => '?').join(',');
-          epgDb.all(`
-            SELECT channel_id, title, start, stop, description, category
-            FROM programs
+        let epgPrograms = [];
+        if (epgChannelIds.length > 0) {
+          const placeholders = epgChannelIds.map((_, i) => `$${i + 1}`).join(',');
+          const result = await postgresService.query(`
+            SELECT
+              channel_id,
+              title,
+              TO_CHAR(start_time AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS') || ' +0000' as start,
+              TO_CHAR(stop_time AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS') || ' +0000' as stop,
+              description,
+              categories as category
+            FROM epg_programs
             WHERE channel_id IN (${placeholders})
-            AND substr(stop, 1, 14) >= strftime('%Y%m%d%H%M%S', 'now')
-            ORDER BY channel_id, start
+            AND stop_time >= NOW()
+            ORDER BY channel_id, start_time
             LIMIT 1000
-          `, epgChannelIds, (err, rows) => {
-            if (err) {
-              logger.warn(`Error fetching EPG data: ${err.message}`);
-              resolve([]);
-            } else {
-              resolve(rows || []);
-            }
-          });
-        });
+          `, epgChannelIds);
 
-        epgDb.close();
+          epgPrograms = result.rows || [];
+        }
 
         // Generate dummy EPG programs for channels with use_dummy_epg=1
-        const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg === 1);
+        // Note: PostgreSQL CASE returns integer, but pg library might convert to string
+        const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg == 1 || ch.use_dummy_epg === true);
+        logger.info(`[DEBUG UPDATE-ALL] Channels with use_dummy_epg === 1: ${dummyEpgChannels.length}`);
+
         if (dummyEpgChannels.length > 0) {
           logger.info(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
 
@@ -927,15 +930,32 @@ router.post('/update-all', async (req, res) => {
                   const hours = pad(date.getHours());
                   const minutes = pad(date.getMinutes());
                   const seconds = pad(date.getSeconds());
-                  return `${year}${month}${dayNum}${hours}${minutes}${seconds} +0000`;
+
+                  // Get timezone offset in minutes, then convert to +HHMM format
+                  const offsetMinutes = -date.getTimezoneOffset(); // Negative because getTimezoneOffset returns negative for positive offsets
+                  const offsetHours = Math.floor(Math.abs(offsetMinutes) / 60);
+                  const offsetMins = Math.abs(offsetMinutes) % 60;
+                  const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+                  const offsetStr = `${offsetSign}${pad(offsetHours)}${pad(offsetMins)}`;
+
+                  return `${year}${month}${dayNum}${hours}${minutes}${seconds} ${offsetStr}`;
                 };
+
+                // Check if this dummy program should have LIVE prefix
+                const programStartTime = startDate.getTime();
+                const programStopTime = stopDate.getTime();
+                const isLiveEvent = matchesLiveEvent(channel.name, channel.name, programStartTime, programStopTime);
+
+                // Apply LIVE prefix if channel has enable_live_prefix and matches a live event
+                const shouldAddLivePrefix = (channel.enable_live_prefix == 1 || channel.enable_live_prefix === true) && isLiveEvent;
+                const title = shouldAddLivePrefix ? `ʟɪᴠᴇ ${channel.name}` : channel.name;
 
                 epgPrograms.push({
                   channel_id: channel.epg_channel_id || `dummy_${channel.iptv_channel_id}`,
-                  title: channel.name || channel.iptv_channel_name,
+                  title: title,
                   start: formatXmltvTime(startDate),
                   stop: formatXmltvTime(stopDate),
-                  description: `Streaming on ${channel.name || channel.iptv_channel_name}`,
+                  description: `Streaming on ${channel.name}`,
                   category: channel.group_title || 'Live TV'
                 });
               }
@@ -970,7 +990,7 @@ router.post('/update-all', async (req, res) => {
             if (!uniqueChannelIds.has(dummyChannelId)) {
               uniqueChannelIds.add(dummyChannelId);
               xmlLines.push(`  <channel id="${escapeXml(dummyChannelId)}">`);
-              xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.iptv_channel_name)}</display-name>`);
+              xmlLines.push(`    <display-name>${escapeXml(ch.name)}</display-name>`);
               if (ch.logo) {
                 xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
               }
@@ -985,9 +1005,9 @@ router.post('/update-all', async (req, res) => {
           const channelId = ch.epg_channel_id || (ch.use_dummy_epg === 1 ? `dummy_${ch.iptv_channel_id}` : null);
           if (channelId) {
             channelSettings[channelId] = {
-              enableLivePrefix: ch.enable_live_prefix === 1,
-              autoDetectLive: ch.auto_detect_live === 1,
-              channelName: ch.name || ch.iptv_channel_name || ''
+              enableLivePrefix: ch.enable_live_prefix === true,
+              autoDetectLive: ch.auto_detect_live === true,
+              channelName: ch.name || ''
             };
           }
         });
@@ -1054,17 +1074,12 @@ router.post('/update-all', async (req, res) => {
         fs.writeFileSync(cred.m3u_file, m3uContent);
         fs.writeFileSync(cred.epg_file, epgContent);
 
-        // Update database record
-        await new Promise((resolve, reject) => {
-          db.run(`
-            UPDATE generated_credentials
-            SET channel_count = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          `, [matchedChannels.length, cred.id], (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        });
+        // Update database record in PostgreSQL
+        await postgresService.query(`
+          UPDATE credentials
+          SET updated_at = CURRENT_TIMESTAMP
+          WHERE id = $1
+        `, [cred.id]);
 
         updatedCount++;
         logger.info(`Successfully updated credential ${cred.credential_id} for user ${userId}`);
