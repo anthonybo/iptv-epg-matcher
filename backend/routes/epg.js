@@ -538,7 +538,7 @@ router.get('/:sessionId/search', async (req, res) => {
 
 /**
  * GET /published-channels-with-programs
- * Returns matched channels with EPG programs from the PUBLISHED/GENERATED XMLTV
+ * Returns matched channels with EPG programs from the PUBLISHED EPG database
  */
 router.get('/published-channels-with-programs', async (req, res) => {
   try {
@@ -564,38 +564,7 @@ router.get('/published-channels-with-programs', async (req, res) => {
       });
     }
 
-    // Load the generated XMLTV file
-    const xmlFilePath = credential.epg_file;
-
-    if (!xmlFilePath || !fs.existsSync(xmlFilePath)) {
-      return res.status(404).json({
-        error: 'Published EPG file not found. Please regenerate your credentials.',
-        channels: [],
-        debug: { xmlFilePath, exists: xmlFilePath ? fs.existsSync(xmlFilePath) : false }
-      });
-    }
-
-    // Parse XMLTV
-    const parsedXmltv = { channels: [], programmes: [] };
-
-    await new Promise((resolve, reject) => {
-      const parser = new XmltvParser();
-
-      parser.onChannel = (channel) => {
-        parsedXmltv.channels.push(channel);
-      };
-
-      parser.onProgramme = (programme) => {
-        parsedXmltv.programmes.push(programme);
-      };
-
-      parser.parseFile(xmlFilePath, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-
-    // Get matched channels from PostgreSQL
+    // Get matched channels from PostgreSQL (for channel metadata)
     const channelsResult = await postgresService.query(`
       SELECT DISTINCT
         c.channel_id as id,
@@ -603,8 +572,10 @@ router.get('/published-channels-with-programs', async (req, res) => {
         c.logo_url as logo,
         c.stream_url as url,
         c.group_title,
+        c.enable_live_prefix,
         m.epg_channel_id,
-        m.use_dummy_epg
+        m.use_dummy_epg,
+        s.auto_detect_live
       FROM iptv_channels c
       JOIN epg_matches m ON c.channel_id = m.iptv_channel_id
       JOIN iptv_sources s ON c.source_id = s.id
@@ -614,17 +585,137 @@ router.get('/published-channels-with-programs', async (req, res) => {
 
     const matchedChannels = channelsResult.rows;
 
-    // Build response with programs from parsed XMLTV
+    // Get LIVE EPG data for channels with real EPG
+    const epgResult = await postgresService.query(`
+      SELECT
+        m.iptv_channel_id,
+        m.epg_channel_id,
+        c.name as channel_name,
+        c.logo_url,
+        p.title,
+        p.description,
+        p.start_time::text as start_time,
+        p.stop_time::text as stop_time,
+        p.categories
+      FROM epg_matches m
+      JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
+      JOIN epg_programs p ON m.epg_channel_id = p.channel_id
+      WHERE m.user_id = $1
+      AND m.use_dummy_epg = false
+      AND p.stop_time >= NOW() - INTERVAL '12 hours'
+      ORDER BY m.iptv_channel_id, p.start_time
+    `, [userId]);
+
+    let epgData = epgResult.rows || [];
+
+    // Load live events for LIVE prefix detection
+    const liveEventsService = require('../services/liveEventsService');
+    const liveEvents = await liveEventsService.getAllEvents();
+
+    // Helper function to check if a program matches a live event
+    const matchesLiveEvent = (channelName, programStartTime, programStopTime) => {
+      if (!liveEvents || liveEvents.length === 0) return false;
+
+      for (const event of liveEvents) {
+        const eventStart = new Date(event.event_start).getTime();
+        const eventEnd = new Date(event.event_end).getTime();
+
+        // Check if program time overlaps with event time
+        if (programStartTime < eventEnd && programStopTime > eventStart) {
+          // Simple check: does channel name contain team names?
+          const homeTeam = (event.home_team || '').toLowerCase();
+          const awayTeam = (event.away_team || '').toLowerCase();
+          const channelLower = channelName.toLowerCase();
+
+          if ((homeTeam && channelLower.includes(homeTeam)) ||
+              (awayTeam && channelLower.includes(awayTeam))) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    // Generate dummy EPG for channels with use_dummy_epg=true
+    const dummyChannels = matchedChannels.filter(ch => ch.use_dummy_epg === true);
+    if (dummyChannels.length > 0) {
+      logger.info(`Generating dummy EPG for ${dummyChannels.length} channels in published guide`);
+
+      const now = new Date();
+      dummyChannels.forEach(channel => {
+        // Generate 7 days of dummy programs (3-hour blocks)
+        for (let day = 0; day < 7; day++) {
+          for (let hour = 0; hour < 24; hour += 3) {
+            const startDate = new Date(now);
+            startDate.setUTCDate(startDate.getUTCDate() + day);
+            startDate.setUTCHours(hour, 0, 0, 0);
+
+            const stopDate = new Date(startDate);
+            stopDate.setUTCHours(stopDate.getUTCHours() + 3);
+
+            // Format as PostgreSQL timestamp string
+            const formatTimestamp = (date) => {
+              const pad = (n) => String(n).padStart(2, '0');
+              return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+            };
+
+            // Check if this time slot overlaps with a live event
+            const programStartTime = startDate.getTime();
+            const programStopTime = stopDate.getTime();
+            const isLiveEvent = matchesLiveEvent(channel.iptv_channel_name, programStartTime, programStopTime);
+
+            // Apply LIVE prefix if channel has enable_live_prefix and matches a live event
+            const shouldAddLivePrefix = (channel.enable_live_prefix === true || channel.auto_detect_live === true) && isLiveEvent;
+            const title = shouldAddLivePrefix ? `ʟɪᴠᴇ ${channel.iptv_channel_name}` : channel.iptv_channel_name;
+
+            epgData.push({
+              iptv_channel_id: channel.id,
+              epg_channel_id: channel.epg_channel_id || `dummy_${channel.id}`,
+              channel_name: channel.iptv_channel_name,
+              logo_url: channel.logo,
+              title: title,
+              description: `Streaming on ${channel.iptv_channel_name}`,
+              start_time: formatTimestamp(startDate),
+              stop_time: formatTimestamp(stopDate),
+              categories: 'Live TV'
+            });
+          }
+        }
+      });
+
+      logger.info(`Total programs after adding dummy EPG: ${epgData.length}`);
+    }
+
+    if (!epgData || epgData.length === 0) {
+      return res.status(404).json({
+        error: 'No EPG data found. Your EPG data may need to refresh.',
+        channels: []
+      });
+    }
+
+    // Convert PostgreSQL timestamp string to ISO format for frontend
+    const toISOString = (timestamp) => {
+      if (!timestamp) return '';
+      // Timestamp is a string like "2025-11-19 04:35:00"
+      // Convert to ISO format: "2025-11-19T04:35:00.000Z"
+      if (typeof timestamp === 'string') {
+        return timestamp.replace(' ', 'T') + '.000Z';
+      }
+      // Fallback for Date objects
+      return timestamp.toISOString();
+    };
+
+    // Build response with programs from database
     const channelsWithPrograms = matchedChannels.map(channel => {
-      // Find programs for this channel from the parsed XMLTV
-      const channelPrograms = (parsedXmltv.programmes || [])
-        .filter(prog => prog.chan === channel.epg_channel_id)
-        .map(prog => ({
-          title: prog.title || 'Unknown',
-          description: prog.desc || null,
-          start: prog.start,
-          stop: prog.end,
-          category: prog.cat && prog.cat.length > 0 ? prog.cat[0] : null
+      // Find programs for this channel from live EPG
+      const channelPrograms = epgData
+        .filter(row => row.iptv_channel_id === channel.id)
+        .map(row => ({
+          title: row.title || 'Unknown',
+          description: row.description || null,
+          start: toISOString(row.start_time), // Return ISO format for frontend
+          stop: toISOString(row.stop_time),   // Return ISO format for frontend
+          category: row.categories || null
         }));
 
       return {
@@ -639,7 +730,9 @@ router.get('/published-channels-with-programs', async (req, res) => {
       };
     });
 
-    logger.info(`Returning ${channelsWithPrograms.length} published channels with programs for user ${userId}`);
+    // Log detailed stats
+    const totalPrograms = channelsWithPrograms.reduce((sum, ch) => sum + ch.programs.length, 0);
+    logger.info(`Returning ${channelsWithPrograms.length} published channels with ${totalPrograms} programs for user ${userId}`);
 
     res.json({
       channels: channelsWithPrograms,

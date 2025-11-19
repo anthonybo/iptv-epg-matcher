@@ -13,6 +13,8 @@ const { UPLOADS_DIR } = require('../config/constants');
 const { authMiddleware } = require('../middleware/authMiddleware');
 const postgresService = require('../services/postgresService');
 const liveEventsService = require('../services/liveEventsService');
+const publishedEpgService = require('../services/publishedEpgService');
+const { generateXmltvFromDatabase } = require('../utils/xmltvGenerator');
 
 // Module loaded timestamp - this executes IMMEDIATELY when module is required
 const MODULE_LOAD_TIME = new Date().toISOString();
@@ -614,7 +616,7 @@ router.post('/', async (req, res) => {
     fs.writeFileSync(epgFilePath, epgContent);
 
     // Store credentials in PostgreSQL for XTREAM API access
-    await postgresService.query(`
+    const credentialResult = await postgresService.query(`
       INSERT INTO credentials
       (user_id, username, password, m3u_file, epg_file, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
@@ -623,7 +625,42 @@ router.post('/', async (req, res) => {
         m3u_file = EXCLUDED.m3u_file,
         epg_file = EXCLUDED.epg_file,
         updated_at = CURRENT_TIMESTAMP
+      RETURNING id
     `, [userId, username, password, m3uFilePath, epgFilePath]);
+
+    const dbCredentialId = credentialResult.rows[0].id;
+
+    // Publish EPG data to database (replaces static XMLTV file for dynamic serving)
+    logger.info(`Publishing EPG to database for credential ${dbCredentialId}`);
+    try {
+      // Transform epgPrograms to include channel metadata for published_epg table
+      const epgProgramsWithMetadata = epgPrograms.map(prog => {
+        // Find matching channel info
+        const channel = matchedChannels.find(ch =>
+          (ch.epg_channel_id && ch.epg_channel_id === prog.channel_id) ||
+          (`dummy_${ch.iptv_channel_id}` === prog.channel_id)
+        );
+
+        return {
+          ...prog,
+          iptv_channel_id: channel ? channel.iptv_channel_id : prog.channel_id,
+          epg_channel_id: prog.channel_id,
+          channel_name: channel ? channel.name : prog.title,
+          logo_url: channel ? channel.logo : null
+        };
+      });
+
+      await publishedEpgService.publishEpgForCredential(
+        dbCredentialId,
+        userId,
+        matchedChannels,
+        epgProgramsWithMetadata
+      );
+      logger.info(`Successfully published ${epgProgramsWithMetadata.length} EPG programs to database`);
+    } catch (publishError) {
+      logger.error(`Error publishing EPG to database: ${publishError.message}`);
+      // Continue anyway - XMLTV file is still written as fallback
+    }
 
     // XTREAM API server URL (base URL without credentials)
     const xtreamServerUrl = `${baseUrl}/api/xtream`;
@@ -1073,6 +1110,38 @@ router.post('/update-all', async (req, res) => {
         // Update files
         fs.writeFileSync(cred.m3u_file, m3uContent);
         fs.writeFileSync(cred.epg_file, epgContent);
+
+        // Publish EPG data to database (replaces static XMLTV file for dynamic serving)
+        logger.info(`Publishing EPG to database for credential ${cred.id}`);
+        try {
+          // Transform epgPrograms to include channel metadata for published_epg table
+          const epgProgramsWithMetadata = epgPrograms.map(prog => {
+            // Find matching channel info
+            const channel = matchedChannels.find(ch =>
+              (ch.epg_channel_id && ch.epg_channel_id === prog.channel_id) ||
+              (`dummy_${ch.iptv_channel_id}` === prog.channel_id)
+            );
+
+            return {
+              ...prog,
+              iptv_channel_id: channel ? channel.iptv_channel_id : prog.channel_id,
+              epg_channel_id: prog.channel_id,
+              channel_name: channel ? channel.name : prog.title,
+              logo_url: channel ? channel.logo : null
+            };
+          });
+
+          await publishedEpgService.publishEpgForCredential(
+            cred.id,
+            userId,
+            matchedChannels,
+            epgProgramsWithMetadata
+          );
+          logger.info(`Successfully published ${epgProgramsWithMetadata.length} EPG programs to database for credential ${cred.id}`);
+        } catch (publishError) {
+          logger.error(`Error publishing EPG to database for credential ${cred.id}: ${publishError.message}`);
+          // Continue anyway - XMLTV file is still written as fallback
+        }
 
         // Update database record in PostgreSQL
         await postgresService.query(`
