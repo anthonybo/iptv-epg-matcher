@@ -594,8 +594,8 @@ router.get('/published-channels-with-programs', async (req, res) => {
         c.logo_url,
         p.title,
         p.description,
-        p.start_time::text as start_time,
-        p.stop_time::text as stop_time,
+        p.start_time,
+        p.stop_time,
         p.categories
       FROM epg_matches m
       JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
@@ -607,6 +607,12 @@ router.get('/published-channels-with-programs', async (req, res) => {
     `, [userId]);
 
     let epgData = epgResult.rows || [];
+
+    logger.info(`[DEBUG] Published channels query returned ${epgData.length} programs for user ${userId}`);
+    const fxPrograms = epgData.filter(p => p.channel_name && p.channel_name.includes('FX'));
+    if (fxPrograms.length > 0) {
+      logger.info(`[DEBUG] FX programs found: ${JSON.stringify(fxPrograms.slice(0, 3))}`);
+    }
 
     // Load live events for LIVE prefix detection
     const liveEventsService = require('../services/liveEventsService');
@@ -693,16 +699,18 @@ router.get('/published-channels-with-programs', async (req, res) => {
       });
     }
 
-    // Convert PostgreSQL timestamp string to ISO format for frontend
+    // Convert PostgreSQL timestamp to ISO format for frontend
     const toISOString = (timestamp) => {
       if (!timestamp) return '';
-      // Timestamp is a string like "2025-11-19 04:35:00"
-      // Convert to ISO format: "2025-11-19T04:35:00.000Z"
+      // Handle both Date objects and string timestamps
+      if (timestamp instanceof Date) {
+        return timestamp.toISOString();
+      }
+      // String timestamp like "2025-11-19 04:35:00" - convert to ISO
       if (typeof timestamp === 'string') {
         return timestamp.replace(' ', 'T') + '.000Z';
       }
-      // Fallback for Date objects
-      return timestamp.toISOString();
+      return '';
     };
 
     // Build response with programs from database

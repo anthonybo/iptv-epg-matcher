@@ -90,19 +90,30 @@ const getMatchedChannelsWithPrograms = async (userId) => {
 
     logger.info(`Getting matched channels with programs for user ${userId}`);
 
-    // Get matched channels from PostgreSQL database
+    // OPTIMIZATION: Single query to get all matched channels with full IPTV and source info
     const query = `
       SELECT
         m.iptv_channel_id,
-        c.name as iptv_channel_name,
         m.epg_channel_id,
         m.use_dummy_epg,
+        m.created_at as match_created_at,
+        c.channel_id,
+        c.name as iptv_channel_name,
+        c.logo_url as logo,
+        c.stream_url as url,
+        c.group_title,
+        c.tvg_id as epg_channel_id_from_channel,
         c.source_id as iptv_source_id,
+        c.enable_live_prefix,
         s.auto_detect_live,
-        c.enable_live_prefix
+        s.type as source_type,
+        s.url as source_url,
+        CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
+        p.nickname as source_nickname
       FROM epg_matches m
       LEFT JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
       LEFT JOIN iptv_sources s ON c.source_id = s.id
+      LEFT JOIN user_iptv_preferences p ON p.user_id = $1 AND p.source_id = s.id
       WHERE m.user_id = $1
       ORDER BY c.name
     `;
@@ -119,243 +130,157 @@ const getMatchedChannelsWithPrograms = async (userId) => {
       };
     }
 
-    // Fetch EPG data for each matched channel
+    // Extract unique EPG channel IDs for batch fetch
+    const epgChannelIds = [...new Set(dbMatches.map(m => m.epg_channel_id).filter(Boolean))];
+
+    // OPTIMIZATION: Batch fetch EPG channel info
+    const epgChannelsMap = new Map();
+    if (epgChannelIds.length > 0) {
+      const epgChannelsResult = await postgresService.query(`
+        SELECT
+          ec.id,
+          ec.name,
+          ec.icon,
+          es.name as source_name
+        FROM epg_channels ec
+        LEFT JOIN epg_sources es ON ec.source_id = es.id
+        WHERE ec.id = ANY($1)
+      `, [epgChannelIds]);
+
+      epgChannelsResult.rows.forEach(row => {
+        epgChannelsMap.set(row.id, row);
+      });
+    }
+
+    // OPTIMIZATION: Batch fetch programs for all non-dummy channels
+    const now = new Date();
+    const startTime = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+    const endTime = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+
+    const nonDummyEpgIds = dbMatches
+      .filter(m => m.use_dummy_epg !== 1 && m.epg_channel_id)
+      .map(m => m.epg_channel_id);
+
+    const programsMap = new Map();
+    if (nonDummyEpgIds.length > 0) {
+      const programsResult = await postgresService.query(`
+        SELECT
+          channel_id,
+          title,
+          description,
+          start_time,
+          stop_time
+        FROM epg_programs
+        WHERE channel_id = ANY($1)
+        AND stop_time >= $2
+        AND start_time <= $3
+        ORDER BY channel_id, start_time
+      `, [nonDummyEpgIds, startTime, endTime]);
+
+      // Group programs by channel_id
+      programsResult.rows.forEach(row => {
+        if (!programsMap.has(row.channel_id)) {
+          programsMap.set(row.channel_id, []);
+        }
+        programsMap.get(row.channel_id).push({
+          title: row.title,
+          description: row.description,
+          start: row.start_time,
+          stop: row.stop_time
+        });
+      });
+    }
+
+    // Process each matched channel
     const channelsWithEpg = [];
 
     for (const match of dbMatches) {
       try {
         const epgChannelId = match.epg_channel_id;
         const iptvChannelId = match.iptv_channel_id;
-        const iptvChannelName = match.iptv_channel_name;
 
         if (!epgChannelId) {
           logger.warn(`No EPG ID found for channel ${iptvChannelId}`);
           continue;
         }
 
-        // Get full IPTV channel info from IPTV database, including source info
-        let iptvChannelData = null;
+        // Build source info from joined data
         let iptvSourceInfo = null;
+        if (match.iptv_source_id) {
+          // Determine display name with fallback logic
+          let displayName = match.source_nickname || match.source_name;
 
-        try {
-          logger.info(`Looking for IPTV channel with ID: ${iptvChannelId}`);
-
-          const iptvChannelResult = await postgresService.query(`
-            SELECT c.channel_id, c.name, c.logo_url as logo, c.stream_url as url, c.group_title, c.tvg_id as epg_channel_id, c.source_id,
-                   CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
-                   s.url as source_url,
-                   s.type as source_type
-            FROM iptv_channels c
-            LEFT JOIN iptv_sources s ON c.source_id = s.id
-            WHERE c.channel_id = $1
-            LIMIT 1
-          `, [iptvChannelId]);
-          iptvChannelData = iptvChannelResult.rows[0];
-
-          // If no channel found by channel_id, try matching by epg_channel_id (case-insensitive)
-          if (!iptvChannelData) {
-            logger.warn(`No IPTV channel found for ID: ${iptvChannelId}, trying epg_channel_id match`);
-
-            let fallbackQuery = `
-              SELECT c.channel_id, c.name, c.logo_url as logo, c.stream_url as url, c.group_title, c.tvg_id as epg_channel_id, c.source_id,
-                     CASE WHEN s.name LIKE 'Legacy IPTV Source%' THEN s.url ELSE s.name END as source_name,
-                     s.url as source_url,
-                     s.type as source_type
-              FROM iptv_channels c
-              LEFT JOIN iptv_sources s ON c.source_id = s.id
-              WHERE LOWER(c.tvg_id) = LOWER($1)
-            `;
-            const params = [iptvChannelId];
-
-            // Filter by user's sources if authenticated
-            if (userId) {
-              fallbackQuery += ` AND EXISTS (
-                SELECT 1 FROM user_iptv_preferences p
-                WHERE p.user_id = $2 AND p.source_id = c.source_id
-              )`;
-              params.push(userId);
-            }
-
-            fallbackQuery += ` LIMIT 1`;
-
-            const iptvChannelByEpgResult = await postgresService.query(fallbackQuery, params);
-            const iptvChannelByEpg = iptvChannelByEpgResult.rows[0];
-
-            if (iptvChannelByEpg) {
-              logger.info(`Found IPTV channel by EPG ID match: ${iptvChannelByEpg.name} (${iptvChannelByEpg.channel_id})`);
-              iptvChannelData = iptvChannelByEpg;
-            }
-          }
-
-          if (!iptvChannelData) {
-            logger.warn(`No IPTV channel found for ID: ${iptvChannelId} even after EPG ID fallback`);
-
-            // Use stored source_id from match as fallback
-            if (match.iptv_source_id) {
-              logger.info(`Using stored source_id ${match.iptv_source_id} from match`);
-
-              const sourceInfoResult = await postgresService.query(`
-                SELECT id,
-                       CASE WHEN name LIKE 'Legacy IPTV Source%' THEN url ELSE name END as name,
-                       url,
-                       type
-                FROM iptv_sources
-                WHERE id = $1
-              `, [match.iptv_source_id]);
-              const sourceInfo = sourceInfoResult.rows[0];
-
-              if (sourceInfo) {
-                // Get user's nickname if authenticated
-                if (userId) {
-                  const sourcePrefsResult = await postgresService.query(`
-                    SELECT nickname FROM user_iptv_preferences
-                    WHERE user_id = $1 AND source_id = $2
-                  `, [userId, sourceInfo.id]);
-                  const sourcePrefs = sourcePrefsResult.rows[0];
-
-                  // Determine display name with fallback logic
-                  let displayName = sourcePrefs?.nickname || sourceInfo.name;
-                  if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
-                    displayName = sourceInfo.url || `Source ${sourceInfo.id}`;
-                  }
-
-                  iptvSourceInfo = {
-                    id: sourceInfo.id,
-                    name: displayName,
-                    type: sourceInfo.type
-                  };
-                } else {
-                  // Determine display name with fallback logic
-                  let displayName = sourceInfo.name;
-                  if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
-                    displayName = sourceInfo.url || `Source ${sourceInfo.id}`;
-                  }
-
-                  iptvSourceInfo = {
-                    id: sourceInfo.id,
-                    name: displayName,
-                    type: sourceInfo.type
-                  };
-                }
-              }
-            }
-          } else {
-            logger.info(`Found IPTV channel: ${iptvChannelData.name}, source_id: ${iptvChannelData.source_id}`);
-          }
-
-          // Get user's nickname for this source if available
-          if (iptvChannelData && iptvChannelData.source_id && userId) {
-            const sourcePrefsResult = await postgresService.query(`
-              SELECT nickname FROM user_iptv_preferences
-              WHERE user_id = $1 AND source_id = $2
-            `, [userId, iptvChannelData.source_id]);
-            const sourcePrefs = sourcePrefsResult.rows[0];
-
-            // Determine display name with fallback logic
-            let displayName = sourcePrefs?.nickname || iptvChannelData.source_name;
-
-            // Fallback: if source name is invalid, extract URL from channel
-            if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+          if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
+            if (match.url) {
               try {
-                const urlObj = new URL(iptvChannelData.url);
+                const urlObj = new URL(match.url);
                 displayName = `${urlObj.protocol}//${urlObj.host}`;
-                logger.info(`Extracted URL fallback for source ${iptvChannelData.source_id}: ${displayName}`);
               } catch (urlError) {
-                displayName = iptvChannelData.source_url || `Source ${iptvChannelData.source_id}`;
-                logger.warn(`Failed to extract URL for source ${iptvChannelData.source_id}, using: ${displayName}`);
+                displayName = match.source_url || `Source ${match.iptv_source_id}`;
               }
+            } else {
+              displayName = match.source_url || `Source ${match.iptv_source_id}`;
             }
-
-            iptvSourceInfo = {
-              id: iptvChannelData.source_id,
-              name: displayName,
-              type: iptvChannelData.source_type
-            };
-          } else if (iptvChannelData && iptvChannelData.source_id) {
-            // Determine display name with fallback logic
-            let displayName = iptvChannelData.source_name;
-
-            // Fallback: if source name is invalid, extract URL from channel
-            if (!displayName || displayName.startsWith('session_') || displayName === 'null') {
-              try {
-                const urlObj = new URL(iptvChannelData.url);
-                displayName = `${urlObj.protocol}//${urlObj.host}`;
-                logger.info(`Extracted URL fallback for source ${iptvChannelData.source_id}: ${displayName}`);
-              } catch (urlError) {
-                displayName = iptvChannelData.source_url || `Source ${iptvChannelData.source_id}`;
-                logger.warn(`Failed to extract URL for source ${iptvChannelData.source_id}, using: ${displayName}`);
-              }
-            }
-
-            iptvSourceInfo = {
-              id: iptvChannelData.source_id,
-              name: displayName,
-              type: iptvChannelData.source_type
-            };
           }
-        } catch (dbError) {
-          logger.warn(`Could not fetch IPTV channel data for ${iptvChannelId}: ${dbError.message}`);
+
+          iptvSourceInfo = {
+            id: match.iptv_source_id,
+            name: displayName,
+            type: match.source_type
+          };
         }
 
-        // Get channel info from EPG database
-        const channelInfo = await getChannelById(epgChannelId);
+        // Get EPG channel info from batch-fetched map
+        const channelInfo = epgChannelsMap.get(epgChannelId);
 
         let formattedPrograms = [];
 
         // Handle dummy EPG channels
         if (match.use_dummy_epg === 1) {
-          logger.info(`Generating dummy EPG programs for channel ${iptvChannelId}`);
-
-          // Use current channel name from fresh data, fallback to stored name
-          const currentChannelName = iptvChannelData?.name || iptvChannelName;
-
           formattedPrograms = await generateDummyEpgPrograms(
-            currentChannelName,
+            match.iptv_channel_name,
             match.enable_live_prefix === 1,
             match.auto_detect_live === 1
           );
         } else {
-          // Regular EPG channel
-          if (!channelInfo) {
+          // Get programs from batch-fetched map
+          const programs = programsMap.get(epgChannelId) || [];
+
+          if (programs.length === 0 && !channelInfo) {
             logger.warn(`No EPG data found for channel ${epgChannelId}`);
             continue;
           }
 
-          // Get programs for this channel (12 hours in the past to 48 hours in the future for guide view)
-          const now = new Date();
-          const startTime = new Date(now.getTime() - 12 * 60 * 60 * 1000);
-          const endTime = new Date(now.getTime() + 48 * 60 * 60 * 1000);
-
-          const programs = await epgDatabaseService.getProgramsByChannelId(epgChannelId, startTime, endTime);
-
           // Add LIVE prefix if needed
-          formattedPrograms = await Promise.all(programs.map(async (p) => {
-            const title = await addLivePrefixIfNeeded(
-              { ...p, start: p.start, stop: p.stop },
-              match.enable_live_prefix === 1,
-              match.auto_detect_live === 1
-            );
+          const nowTimestamp = Date.now();
+          formattedPrograms = programs.map(p => {
+            const startTime = new Date(p.start).getTime();
+            const stopTime = new Date(p.stop).getTime();
+            const isCurrentlyAiring = nowTimestamp >= startTime && nowTimestamp < stopTime;
+
+            // Simple LIVE prefix logic (without async database check for performance)
+            const shouldAddLivePrefix = isCurrentlyAiring && match.enable_live_prefix === 1;
 
             return {
-              id: p.id,
-              title: title,
+              id: `${epgChannelId}_${startTime}`,
+              title: shouldAddLivePrefix ? `ʟɪᴠᴇ ${p.title}` : p.title,
               description: p.description,
               start: p.start,
               stop: p.stop
             };
-          }));
+          });
         }
 
         channelsWithEpg.push({
           id: iptvChannelId,
-          name: iptvChannelData?.name || channelInfo?.name || iptvChannelName,
-          logo: iptvChannelData?.logo || channelInfo?.icon || null,
-          url: (iptvChannelData?.url || '').trim(),
+          name: match.iptv_channel_name || channelInfo?.name || 'Unknown',
+          logo: match.logo || channelInfo?.icon || null,
+          url: (match.url || '').trim(),
           group: {
-            title: iptvChannelData?.group_title || ''
+            title: match.group_title || ''
           },
           tvg: {
-            id: iptvChannelData?.epg_channel_id || epgChannelId
+            id: match.epg_channel_id_from_channel || epgChannelId
           },
           epgId: epgChannelId,
           epgSource: channelInfo?.source_name || (match.use_dummy_epg === 1 ? 'Dummy EPG' : 'Unknown'),
@@ -365,12 +290,14 @@ const getMatchedChannelsWithPrograms = async (userId) => {
           sourceAutoDetectLive: match.auto_detect_live
         });
       } catch (channelError) {
-        logger.error(`Error fetching EPG for channel ${match.iptv_channel_id}: ${channelError.message}`);
+        logger.error(`Error processing channel ${match.iptv_channel_id}: ${channelError.message}`);
       }
     }
 
     // Sort channels by name
     channelsWithEpg.sort((a, b) => a.name.localeCompare(b.name));
+
+    logger.info(`Returning ${channelsWithEpg.length} channels with programs for user ${userId}`);
 
     return {
       success: true,

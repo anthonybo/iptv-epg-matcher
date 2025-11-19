@@ -457,8 +457,8 @@ router.get('/xmltv.php', async (req, res) => {
         c.logo_url,
         p.title,
         p.description,
-        p.start_time::text as start_time,
-        p.stop_time::text as stop_time,
+        p.start_time,
+        p.stop_time,
         p.categories
       FROM epg_matches m
       JOIN iptv_channels c ON m.iptv_channel_id = c.channel_id
@@ -540,20 +540,6 @@ router.get('/xmltv.php', async (req, res) => {
     logger.info(`Served XMLTV for credential ${credential.id}: ${epgData.length} programs`);
   } catch (error) {
     logger.error('Error generating XMLTV from database:', error);
-
-    // Fallback to static file if database fails
-    try {
-      if (credential.epg_file && fs.existsSync(credential.epg_file)) {
-        logger.warn('Falling back to static XMLTV file');
-        const epgContent = fs.readFileSync(credential.epg_file, 'utf8');
-        res.set('Content-Type', 'application/xml');
-        res.set('Content-Disposition', `attachment; filename="epg_${username}.xml"`);
-        return res.send(epgContent);
-      }
-    } catch (fallbackError) {
-      logger.error('Fallback to static file also failed:', fallbackError);
-    }
-
     res.status(500).send('Error generating EPG');
   }
 });

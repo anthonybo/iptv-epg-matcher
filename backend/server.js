@@ -24,7 +24,6 @@ const morgan = require('morgan');
 const { ensureCacheDirectory, scheduleCacheCleanup } = require('./services/cacheService');
 const { initializeSession } = require('./utils/storageUtils');
 const epgService = require('./services/epgService');
-const db = require('./services/databaseService');
 const epgParser = require('./services/epgParserService');
 
 // Import EPG Finder to locate any EPG data in memory

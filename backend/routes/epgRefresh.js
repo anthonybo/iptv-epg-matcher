@@ -48,9 +48,9 @@ router.post('/source', async (req, res) => {
 
     logger.info(`[EPG REFRESH] Successfully loaded EPG from ${url}: ${channelCount} channels, ${programCount} programs`);
 
-    // Save to database
-    logger.info(`[EPG REFRESH] Saving EPG data to database...`);
-    const databaseService = require('../services/databaseService');
+    // Save to database (PostgreSQL)
+    logger.info(`[EPG REFRESH] Saving EPG data to PostgreSQL database...`);
+    const epgDatabaseService = require('../services/epgDatabaseService');
 
     // Generate source ID from URL
     const sourceId = crypto.createHash('md5').update(url).digest('hex');
@@ -74,11 +74,11 @@ router.post('/source', async (req, res) => {
     }
 
     // Add or update source
-    await databaseService.addSource({
+    await epgDatabaseService.saveSource({
       id: sourceId,
       name: sourceName,
       url: url,
-      filePath: null
+      file_path: null
     });
 
     // Transform and save channels
@@ -94,9 +94,9 @@ router.post('/source', async (req, res) => {
         };
       });
 
-      logger.info(`[EPG REFRESH] Saving ${dbChannels.length} channels to database...`);
+      logger.info(`[EPG REFRESH] Saving ${dbChannels.length} channels to PostgreSQL...`);
       logger.info(`[EPG REFRESH] Sample channel IDs: ${Array.from(savedChannelIds).slice(0, 5).join(', ')}`);
-      await databaseService.addChannels(dbChannels);
+      await epgDatabaseService.saveChannels(dbChannels);
     }
 
     // Transform and save programs from programMap
@@ -141,8 +141,8 @@ router.post('/source', async (req, res) => {
       }
 
       if (allPrograms.length > 0) {
-        logger.info(`[EPG REFRESH] Saving ${allPrograms.length} programs to database...`);
-        await databaseService.addPrograms(allPrograms);
+        logger.info(`[EPG REFRESH] Saving ${allPrograms.length} programs to PostgreSQL...`);
+        await epgDatabaseService.savePrograms(allPrograms);
         totalSavedPrograms = allPrograms.length;
       } else {
         logger.warn(`[EPG REFRESH] No programs to save after filtering`);
@@ -152,7 +152,7 @@ router.post('/source', async (req, res) => {
     }
 
     // Update source statistics
-    await databaseService.updateSourceStats(sourceId, channelCount, programCount);
+    await epgDatabaseService.updateSourceStats(sourceId, channelCount, programCount);
     logger.info(`[EPG REFRESH] Database updated successfully`);
 
     // Mark user EPG source as verified if it successfully loaded data

@@ -499,134 +499,23 @@ router.post('/', async (req, res) => {
       logger.info(`Added ${epgPrograms.length} total programs (real + dummy)`);
     }
 
-    // Build XMLTV format EPG
-    const xmlLines = [
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      '<!DOCTYPE tv SYSTEM "xmltv.dtd">',
-      '<tv generator-info-name="IPTV Guru">'
-    ];
-
-    // Add channel definitions
-    const uniqueChannelIds = new Set();
-    matchedChannels.forEach(ch => {
-      // Add regular EPG channel definitions
-      if (ch.epg_channel_id && !uniqueChannelIds.has(ch.epg_channel_id)) {
-        uniqueChannelIds.add(ch.epg_channel_id);
-        xmlLines.push(`  <channel id="${escapeXml(ch.epg_channel_id)}">`);
-        xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.epg_channel_name)}</display-name>`);
-        if (ch.logo) {
-          xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
-        }
-        xmlLines.push(`  </channel>`);
-      }
-
-      // Add dummy EPG channel definitions for channels without EPG match
-      if (ch.use_dummy_epg === 1 && !ch.epg_channel_id) {
-        const dummyChannelId = `dummy_${ch.iptv_channel_id}`;
-        if (!uniqueChannelIds.has(dummyChannelId)) {
-          uniqueChannelIds.add(dummyChannelId);
-          xmlLines.push(`  <channel id="${escapeXml(dummyChannelId)}">`);
-          xmlLines.push(`    <display-name>${escapeXml(ch.name)}</display-name>`);
-          if (ch.logo) {
-            xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
-          }
-          xmlLines.push(`  </channel>`);
-        }
-      }
-    });
-
-    // Create a map of epg_channel_id to channel settings for LIVE prefix feature
-    const channelSettings = {};
-    matchedChannels.forEach(ch => {
-      const channelId = ch.epg_channel_id || (ch.use_dummy_epg === 1 ? `dummy_${ch.iptv_channel_id}` : null);
-      if (channelId) {
-        channelSettings[channelId] = {
-          enableLivePrefix: ch.enable_live_prefix == 1 || ch.enable_live_prefix === true,
-          autoDetectLive: ch.auto_detect_live == 1 || ch.auto_detect_live === true,
-          channelName: ch.name || ''
-        };
-
-        // Debug: Log volleyball channel settings
-        if (channelId.includes('2115583')) {
-          logger.info(`[SETUP] Channel ${channelId}: name="${channelSettings[channelId].channelName}", enableLivePrefix=${channelSettings[channelId].enableLivePrefix}, autoDetectLive=${channelSettings[channelId].autoDetectLive}`);
-        }
-      }
-    });
-
-
-    // Add program data
-    const nowTimestamp = Date.now();
-    epgPrograms.forEach(prog => {
-      // Parse XMLTV timestamp to check if program is currently airing
-      const parseXmltvTime = (xmltvTime) => {
-        // Format: YYYYMMDDHHMMSS +TZTZ
-        const dateStr = xmltvTime.substring(0, 14);
-        const year = parseInt(dateStr.substring(0, 4));
-        const month = parseInt(dateStr.substring(4, 6)) - 1;
-        const day = parseInt(dateStr.substring(6, 8));
-        const hour = parseInt(dateStr.substring(8, 10));
-        const minute = parseInt(dateStr.substring(10, 12));
-        const second = parseInt(dateStr.substring(12, 14));
-        return new Date(Date.UTC(year, month, day, hour, minute, second)).getTime();
-      };
-
-      const startTime = parseXmltvTime(prog.start);
-      const stopTime = parseXmltvTime(prog.stop);
-
-      // Check if program matches a live event (program airtime overlaps with event live time)
-      const settings = channelSettings[prog.channel_id];
-      const channelName = settings ? settings.channelName : '';
-      const isLiveEvent = matchesLiveEvent(prog.title, channelName, startTime, stopTime);
-
-      // Debug logging for volleyball channel
-      if (prog.channel_id && prog.channel_id.includes('2115583')) {
-      }
-
-      // Check if LIVE prefix should be added
-      // BOTH enableLivePrefix and autoDetectLive require live_events database confirmation
-      // This ensures we only show LIVE when the program airs during an actual live event
-      const shouldAddLivePrefix = settings && isLiveEvent &&
-        (settings.enableLivePrefix || settings.autoDetectLive);
-
-      // Prepend small caps "LIVE" to title if applicable
-      const title = shouldAddLivePrefix
-        ? `ʟɪᴠᴇ ${prog.title || 'Unknown'}`
-        : prog.title || 'Unknown';
-
-      xmlLines.push(`  <programme start="${prog.start}" stop="${prog.stop}" channel="${escapeXml(prog.channel_id)}">`);
-      xmlLines.push(`    <title>${escapeXml(title)}</title>`);
-      if (prog.description) {
-        xmlLines.push(`    <desc>${escapeXml(prog.description)}</desc>`);
-      }
-      if (prog.category) {
-        xmlLines.push(`    <category>${escapeXml(prog.category)}</category>`);
-      }
-      xmlLines.push(`  </programme>`);
-    });
-
-    xmlLines.push('</tv>');
-    const epgContent = xmlLines.join('\n');
-
-    // Save generated files
+    // Save M3U file only (XMLTV is now generated dynamically from database)
     const credentialId = `${userId}_${Date.now()}`;
     const m3uFilePath = path.join(UPLOADS_DIR, `${credentialId}.m3u`);
-    const epgFilePath = path.join(UPLOADS_DIR, `${credentialId}.xml`);
 
     fs.writeFileSync(m3uFilePath, m3uContent);
-    fs.writeFileSync(epgFilePath, epgContent);
 
     // Store credentials in PostgreSQL for XTREAM API access
     const credentialResult = await postgresService.query(`
       INSERT INTO credentials
-      (user_id, username, password, m3u_file, epg_file, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      (user_id, username, password, m3u_file, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT (username) DO UPDATE SET
         password = EXCLUDED.password,
         m3u_file = EXCLUDED.m3u_file,
-        epg_file = EXCLUDED.epg_file,
         updated_at = CURRENT_TIMESTAMP
       RETURNING id
-    `, [userId, username, password, m3uFilePath, epgFilePath]);
+    `, [userId, username, password, m3uFilePath]);
 
     const dbCredentialId = credentialResult.rows[0].id;
 
@@ -706,7 +595,7 @@ router.post('/update-all', async (req, res) => {
 
     // Get all existing credentials for this user from PostgreSQL
     const credResult = await postgresService.query(`
-      SELECT id, username, password, m3u_file, epg_file
+      SELECT id, username, password, m3u_file
       FROM credentials
       WHERE user_id = $1
     `, [userId]);
@@ -1001,115 +890,8 @@ router.post('/update-all', async (req, res) => {
           logger.info(`Added ${epgPrograms.length} total programs (real + dummy)`);
         }
 
-        // Build XMLTV
-        const xmlLines = [
-          '<?xml version="1.0" encoding="UTF-8"?>',
-          '<!DOCTYPE tv SYSTEM "xmltv.dtd">',
-          '<tv generator-info-name="IPTV Guru">'
-        ];
-
-        const uniqueChannelIds = new Set();
-        matchedChannels.forEach(ch => {
-          // Add regular EPG channel definitions
-          if (ch.epg_channel_id && !uniqueChannelIds.has(ch.epg_channel_id)) {
-            uniqueChannelIds.add(ch.epg_channel_id);
-            xmlLines.push(`  <channel id="${escapeXml(ch.epg_channel_id)}">`);
-            xmlLines.push(`    <display-name>${escapeXml(ch.name || ch.epg_channel_name)}</display-name>`);
-            if (ch.logo) {
-              xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
-            }
-            xmlLines.push(`  </channel>`);
-          }
-
-          // Add dummy EPG channel definitions for channels without EPG match
-          if (ch.use_dummy_epg === 1 && !ch.epg_channel_id) {
-            const dummyChannelId = `dummy_${ch.iptv_channel_id}`;
-            if (!uniqueChannelIds.has(dummyChannelId)) {
-              uniqueChannelIds.add(dummyChannelId);
-              xmlLines.push(`  <channel id="${escapeXml(dummyChannelId)}">`);
-              xmlLines.push(`    <display-name>${escapeXml(ch.name)}</display-name>`);
-              if (ch.logo) {
-                xmlLines.push(`    <icon src="${escapeXml(ch.logo)}" />`);
-              }
-              xmlLines.push(`  </channel>`);
-            }
-          }
-        });
-
-        // Create a map of epg_channel_id to channel settings for LIVE prefix feature
-        const channelSettings = {};
-        matchedChannels.forEach(ch => {
-          const channelId = ch.epg_channel_id || (ch.use_dummy_epg === 1 ? `dummy_${ch.iptv_channel_id}` : null);
-          if (channelId) {
-            channelSettings[channelId] = {
-              enableLivePrefix: ch.enable_live_prefix === true,
-              autoDetectLive: ch.auto_detect_live === true,
-              channelName: ch.name || ''
-            };
-          }
-        });
-
-        logger.info(`[UPDATE-ALL] Total channelSettings entries: ${Object.keys(channelSettings).length}`);
-
-        // Add program data with LIVE prefix support
-        const nowTimestamp = Date.now();
-        epgPrograms.forEach(prog => {
-          // Parse XMLTV timestamp to check if program is currently airing
-          const parseXmltvTime = (xmltvTime) => {
-            // Format: YYYYMMDDHHMMSS +TZTZ
-            const dateStr = xmltvTime.substring(0, 14);
-            const year = parseInt(dateStr.substring(0, 4));
-            const month = parseInt(dateStr.substring(4, 6)) - 1;
-            const day = parseInt(dateStr.substring(6, 8));
-            const hour = parseInt(dateStr.substring(8, 10));
-            const minute = parseInt(dateStr.substring(10, 12));
-            const second = parseInt(dateStr.substring(12, 14));
-            return new Date(Date.UTC(year, month, day, hour, minute, second)).getTime();
-          };
-
-          const startTime = parseXmltvTime(prog.start);
-          const stopTime = parseXmltvTime(prog.stop);
-
-          // Check if program matches a live event (program airtime overlaps with event live time)
-          const settings = channelSettings[prog.channel_id];
-          const channelName = settings ? settings.channelName : '';
-          const isLiveEvent = matchesLiveEvent(prog.title, channelName, startTime, stopTime);
-
-          // Debug logging for volleyball channel
-          if (prog.channel_id && prog.channel_id.includes('2115583')) {
-            logger.info(`[UPDATE-ALL DEBUG] Channel: ${prog.channel_id}, Title: ${prog.title}`);
-            logger.info(`[UPDATE-ALL DEBUG] Settings: ${JSON.stringify(settings)}`);
-            logger.info(`[UPDATE-ALL DEBUG] isLiveEvent: ${isLiveEvent}`);
-          }
-
-          // Check if LIVE prefix should be added
-          // BOTH enableLivePrefix and autoDetectLive require live_events database confirmation
-          // This ensures we only show LIVE when the program airs during an actual live event
-          const shouldAddLivePrefix = settings && isLiveEvent &&
-            (settings.enableLivePrefix || settings.autoDetectLive);
-
-          // Prepend small caps "LIVE" to title if applicable
-          const title = shouldAddLivePrefix
-            ? `ʟɪᴠᴇ ${prog.title || 'Unknown'}`
-            : prog.title || 'Unknown';
-
-          xmlLines.push(`  <programme start="${prog.start}" stop="${prog.stop}" channel="${escapeXml(prog.channel_id)}">`);
-          xmlLines.push(`    <title>${escapeXml(title)}</title>`);
-          if (prog.description) {
-            xmlLines.push(`    <desc>${escapeXml(prog.description)}</desc>`);
-          }
-          if (prog.category) {
-            xmlLines.push(`    <category>${escapeXml(prog.category)}</category>`);
-          }
-          xmlLines.push(`  </programme>`);
-        });
-
-        xmlLines.push('</tv>');
-        const epgContent = xmlLines.join('\n');
-
-        // Update files
+        // Update M3U file only (XMLTV is now generated dynamically from database)
         fs.writeFileSync(cred.m3u_file, m3uContent);
-        fs.writeFileSync(cred.epg_file, epgContent);
 
         // Publish EPG data to database (replaces static XMLTV file for dynamic serving)
         logger.info(`Publishing EPG to database for credential ${cred.id}`);
@@ -1190,18 +972,5 @@ router.post('/update-all', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-/**
- * Helper function to escape XML special characters
- */
-function escapeXml(text) {
-  if (!text) return '';
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 module.exports = router;
