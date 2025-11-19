@@ -359,6 +359,7 @@ const userEpgSourcesRoutes = require('./routes/userEpgSources');
 const epgRefreshRoutes = require('./routes/epgRefresh');
 const liveEventsRoutes = require('./routes/liveEvents');
 const metricsRoutes = require('./routes/metrics');
+const logsRoutes = require('./routes/logs');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -407,6 +408,7 @@ app.use('/api/user-epg-sources', userEpgSourcesRoutes); // User EPG sources mana
 app.use('/api/epg-refresh', epgRefreshRoutes); // EPG refresh management
 app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
+app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));

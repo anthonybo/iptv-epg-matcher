@@ -5,15 +5,19 @@ import App from './App';
 import reportWebVitals from './reportWebVitals';
 import { AuthProvider } from './contexts/AuthContext';
 import AuthWrapper from './components/AuthWrapper';
+import logger from './utils/logger'; // Initialize frontend logger
+import ErrorBoundary from './components/ErrorBoundary';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
-    <AuthProvider>
-      <AuthWrapper>
-        <App />
-      </AuthWrapper>
-    </AuthProvider>
+    <ErrorBoundary>
+      <AuthProvider>
+        <AuthWrapper>
+          <App />
+        </AuthWrapper>
+      </AuthProvider>
+    </ErrorBoundary>
   </React.StrictMode>
 );
 
