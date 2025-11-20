@@ -228,6 +228,12 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         
         logger.info(`Streaming channel: ${channel.name} (${normalizedChannelId}) from URL: ${channel.url}`);
 
+        // For HEAD requests, skip expensive Stalker token fetching - just check if channel exists
+        if (req.method === 'HEAD') {
+            logger.info(`[HEAD] Channel exists in database, returning 200`);
+            return res.status(200).end();
+        }
+
         // Handle Stalker portal URLs - request FRESH link from portal
         let streamUrl = channel.url;
         if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {

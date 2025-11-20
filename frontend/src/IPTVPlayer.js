@@ -76,6 +76,7 @@ const IPTVPlayer = ({
   const healthCheckIntervalRef = useRef(null);
   const lastKnownCurrentTimeRef = useRef(0);
   const videoElementRef = useRef(null);
+  const isInitializingRef = useRef(false); // Prevent race conditions from rapid re-renders
   
   // Enhanced logging function
   const log = (level, message, data = null) => {
@@ -321,13 +322,31 @@ const IPTVPlayer = ({
     if (playerInstanceRef.current) {
       log('info', 'Destroying player instance');
       try {
+        // CRITICAL: mpegts.js requires proper cleanup sequence to prevent memory leaks
+        // Must call unload() → detachMediaElement() → destroy() in this order
+        if (typeof playerInstanceRef.current.unload === 'function') {
+          log('info', 'Unloading mpegts player');
+          playerInstanceRef.current.unload();
+        }
+
+        if (typeof playerInstanceRef.current.detachMediaElement === 'function') {
+          log('info', 'Detaching media element from mpegts player');
+          playerInstanceRef.current.detachMediaElement();
+        }
+
         playerInstanceRef.current.destroy();
+        log('info', 'Player destroyed successfully');
       } catch (e) {
         log('error', 'Error destroying player', { error: e.message });
       }
       playerInstanceRef.current = null;
     }
 
+    // CRITICAL: Remove video element from DOM to prevent accumulation
+    if (videoElementRef.current && videoElementRef.current.parentNode) {
+      log('info', 'Removing video element from DOM');
+      videoElementRef.current.parentNode.removeChild(videoElementRef.current);
+    }
     videoElementRef.current = null;
   };
 
@@ -439,12 +458,25 @@ const IPTVPlayer = ({
 
   // Initialize the appropriate player
   const initializePlayer = () => {
+    const newChannelId = getChannelId();
+
+    // CRITICAL: Prevent race conditions from rapid re-renders
+    // BUT allow initialization if the channel has changed (legitimate user action)
+    if (isInitializingRef.current && newChannelId === currentChannelIdRef.current) {
+      log('warn', 'Player initialization already in progress for same channel, skipping duplicate call');
+      return;
+    }
+
+    isInitializingRef.current = true;
+    log('info', 'Starting player initialization', { channelId: newChannelId });
+
     cleanupPlayer();
     retryCountRef.current = 0; // Reset retry count when changing channels
-    currentChannelIdRef.current = getChannelId(); // Track current channel
+    currentChannelIdRef.current = newChannelId; // Track current channel
 
     if (!containerRef.current) {
       log('error', 'Player container not available');
+      isInitializingRef.current = false;
       return;
     }
 
@@ -468,6 +500,7 @@ const IPTVPlayer = ({
         log('error', 'Unknown playback method', { method: playbackMethod });
         setError('Unknown playback method');
         setLoading(false);
+        isInitializingRef.current = false;
     }
   };
 
@@ -566,6 +599,9 @@ const IPTVPlayer = ({
         retryCountRef.current = 0; // Reset retry count on successful playback
         lastPlayingTimeRef.current = Date.now();
 
+        // CRITICAL: Reset initialization lock when player successfully starts
+        isInitializingRef.current = false;
+
         // Clear stall timer when playing resumes
         if (stallTimerRef.current) {
           clearTimeout(stallTimerRef.current);
@@ -647,6 +683,9 @@ const IPTVPlayer = ({
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_ERROR, (error) => {
         log('error', 'Player error', { error });
         setLoading(false);
+
+        // CRITICAL: Reset initialization lock on error
+        isInitializingRef.current = false;
 
         // Attempt auto-recovery with exponential backoff
         const MAX_RETRIES = 3;
@@ -805,6 +844,9 @@ const IPTVPlayer = ({
           log('error', 'mpegts player error', { errorType, errorDetail, errorInfo });
           setLoading(false);
 
+          // CRITICAL: Reset initialization lock on error
+          isInitializingRef.current = false;
+
           // Attempt auto-recovery with exponential backoff
           const MAX_RETRIES = 3;
           const retryCount = retryCountRef.current;
@@ -878,6 +920,9 @@ const IPTVPlayer = ({
           retryCountRef.current = 0; // Reset retry count on successful playback
           lastPlayingTimeRef.current = Date.now();
           lastKnownCurrentTimeRef.current = videoEl.currentTime;
+
+          // CRITICAL: Reset initialization lock when player successfully starts
+          isInitializingRef.current = false;
 
           // Clear stall timer when playing resumes
           if (stallTimerRef.current) {
@@ -956,6 +1001,7 @@ const IPTVPlayer = ({
           log('error', 'Video error', { error: videoEl.error });
           setError('Error playing video. Try another method or channel.');
           setLoading(false);
+          isInitializingRef.current = false;
         });
 
         // Handle unexpected stream end for live streams

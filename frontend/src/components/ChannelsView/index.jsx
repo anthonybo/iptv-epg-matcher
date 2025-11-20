@@ -35,6 +35,8 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
   const [showAutoTestPlayer, setShowAutoTestPlayer] = React.useState(false);
   const [autoTestChannel, setAutoTestChannel] = React.useState(null);
   const [foundWorkingChannel, setFoundWorkingChannel] = React.useState(false);
+  const [autoTestPhase, setAutoTestPhase] = React.useState('checking'); // 'checking' or 'verifying'
+  const [autoTestStatus, setAutoTestStatus] = React.useState(''); // Status message for UI
 
   // Auto-test refs (to prevent race conditions)
   const autoTestingRef = React.useRef(false);
@@ -47,6 +49,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
   const originalConsoleLogRef = React.useRef(null);
   const playerErrorListenerRef = React.useRef(null);
   const playerLogListenerRef = React.useRef(null);
+  const abortControllerRef = React.useRef(null); // For cancelling HEAD requests
 
   // Save view mode preference to localStorage
   const handleViewModeChange = (mode) => {
@@ -199,7 +202,57 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     console.log = playerLogListenerRef.current;
   }, [cleanupErrorListener]);
 
-  const handleNextChannel = React.useCallback(() => {
+  /**
+   * Check if a stream is reachable using HEAD request (Phase 1)
+   * Returns true if stream is reachable, false otherwise
+   */
+  const checkStreamAvailability = React.useCallback(async (channel) => {
+    try {
+      // Cancel any previous HEAD request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+
+      // Create new abort controller for this request
+      abortControllerRef.current = new AbortController();
+
+      const token = localStorage.getItem('auth_token');
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+
+      const baseUrl = window.location.hostname === 'localhost'
+        ? 'http://localhost:5001'
+        : window.location.origin;
+
+      const streamUrl = `${baseUrl}/api/stream/${sessionId}/${channel.id}?source_id=${channel.sourceId}`;
+
+      console.log(`[Auto-Test Phase 1] Checking availability: ${channel.name}`);
+      setAutoTestStatus(`Checking: ${channel.name}`);
+
+      const response = await fetch(streamUrl, {
+        method: 'HEAD',
+        headers,
+        signal: abortControllerRef.current.signal,
+        timeout: 5000 // 5 second timeout for HEAD requests
+      });
+
+      if (response.ok) {
+        console.log(`[Auto-Test Phase 1] ✓ Stream is reachable: ${channel.name}`);
+        return true;
+      } else {
+        console.log(`[Auto-Test Phase 1] ✗ Stream unavailable (${response.status}): ${channel.name}`);
+        return false;
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.log(`[Auto-Test Phase 1] Request aborted for: ${channel.name}`);
+        return false;
+      }
+      console.log(`[Auto-Test Phase 1] ✗ Stream check failed: ${channel.name} - ${error.message}`);
+      return false;
+    }
+  }, [sessionId]);
+
+  const handleNextChannel = React.useCallback(async () => {
     if (isAdvancingRef.current) {
       console.log('[Auto-Test] Already advancing, ignoring duplicate call');
       return;
@@ -218,7 +271,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     }
 
     const testChannels = channelsRef.current;
-    const currentIndex = currentTestIndexRef.current;
+    let currentIndex = currentTestIndexRef.current;
 
     console.log(`[Auto-Test] Current index: ${currentIndex}, Total channels: ${testChannels.length}`);
 
@@ -227,6 +280,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       setAutoTesting(false);
       autoTestingRef.current = false;
       isAdvancingRef.current = false;
+      setAutoTestStatus('No working streams found');
       return;
     }
 
@@ -239,11 +293,48 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       setupErrorListener();
     }
 
-    const nextIndex = currentIndex + 1;
+    // PHASE 1: Check stream availability with HEAD requests
+    // Loop through channels until we find one that passes HEAD check
+    let nextIndex = currentIndex + 1;
+    let channelFound = false;
+    let testedCount = 0;
+    const maxToCheck = 100; // Safety limit
+
+    setAutoTestPhase('checking');
+
+    while (nextIndex < testChannels.length && !channelFound && testedCount < maxToCheck) {
+      const candidateChannel = testChannels[nextIndex];
+
+      console.log(`[Auto-Test] Testing channel ${nextIndex + 1}/${testChannels.length}: ${candidateChannel.name}`);
+
+      const isAvailable = await checkStreamAvailability(candidateChannel);
+
+      if (isAvailable) {
+        console.log(`[Auto-Test] Found reachable stream at index ${nextIndex}, moving to Phase 2 (video verification)`);
+        channelFound = true;
+        break;
+      } else {
+        console.log(`[Auto-Test] Skipping unavailable stream, checking next...`);
+        nextIndex++;
+        testedCount++;
+      }
+    }
+
+    if (!channelFound) {
+      console.log('[Auto-Test] No more reachable streams found, stopping');
+      setAutoTesting(false);
+      autoTestingRef.current = false;
+      isAdvancingRef.current = false;
+      setAutoTestStatus(`Checked ${testedCount} streams - none available`);
+      return;
+    }
+
+    // PHASE 2: Verify with video player
     currentTestIndexRef.current = nextIndex;
     setCurrentTestIndex(nextIndex);
+    setAutoTestPhase('verifying');
 
-    console.log(`[Auto-Test] Moving to channel ${nextIndex + 1} of ${testChannels.length}`);
+    console.log(`[Auto-Test Phase 2] Loading video for channel ${nextIndex + 1} of ${testChannels.length}`);
 
     const nextChannel = testChannels[nextIndex];
     setAutoTestChannel({
@@ -253,18 +344,20 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       logo: nextChannel.logo,
       url: nextChannel.url
     });
+    setAutoTestStatus(`Verifying: ${nextChannel.name}`);
 
     setTimeout(() => {
       isAdvancingRef.current = false;
     }, 500);
 
+    // Set timeout for video verification (15 seconds instead of 60)
     autoTestTimerRef.current = setTimeout(() => {
-      console.log('[Auto-Test] Timeout reached (60s), moving to next channel...');
+      console.log('[Auto-Test Phase 2] Video verification timeout (15s), moving to next channel...');
       if (handleNextChannelRef.current) {
         handleNextChannelRef.current();
       }
-    }, 60000);
-  }, [setupErrorListener]);
+    }, 15000); // Reduced from 60s since we already know stream is reachable
+  }, [setupErrorListener, checkStreamAvailability]);
 
   // Assign the callback to the ref so setupErrorListener can call it
   React.useEffect(() => {
@@ -277,6 +370,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     autoTestingRef.current = false;
     setFoundWorkingChannel(false);
     setShowAutoTestPlayer(false);
+    setAutoTestStatus('');
 
     if (autoTestTimerRef.current) {
       clearTimeout(autoTestTimerRef.current);
@@ -288,10 +382,16 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       errorDebounceRef.current = null;
     }
 
+    // Cancel any in-flight HEAD requests
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
     cleanupErrorListener();
   }, [cleanupErrorListener]);
 
-  const handleAutoTest = React.useCallback((startingChannel = null) => {
+  const handleAutoTest = React.useCallback(async (startingChannel = null) => {
     if (channels.length === 0) return;
 
     setAutoTesting(true);
@@ -299,6 +399,8 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     setFoundWorkingChannel(false);
     channelsRef.current = channels;
     setShowAutoTestPlayer(true);
+    setAutoTestPhase('checking');
+    setAutoTestStatus('Starting auto-test...');
 
     // Find the starting index
     let startIndex = 0;
@@ -312,24 +414,13 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       }
     }
 
-    setCurrentTestIndex(startIndex);
-    currentTestIndexRef.current = startIndex;
-
-    const channelToTest = channels[startIndex];
-    setAutoTestChannel({
-      id: channelToTest.id,
-      sourceId: channelToTest.sourceId,
-      name: channelToTest.name,
-      logo: channelToTest.logo,
-      url: channelToTest.url
-    });
+    setCurrentTestIndex(startIndex - 1); // Set to -1 so handleNextChannel starts at startIndex
+    currentTestIndexRef.current = startIndex - 1;
 
     setupErrorListener();
 
-    autoTestTimerRef.current = setTimeout(() => {
-      console.log('[Auto-Test] Timeout reached (60s), moving to next channel...');
-      handleNextChannel();
-    }, 60000);
+    // Start the two-phase testing process
+    handleNextChannel();
   }, [channels, setupErrorListener, handleNextChannel]);
 
   // Cleanup auto-test on unmount
@@ -340,6 +431,9 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       }
       if (errorDebounceRef.current) {
         clearTimeout(errorDebounceRef.current);
+      }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
       }
       cleanupErrorListener();
     };
