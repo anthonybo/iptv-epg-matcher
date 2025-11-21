@@ -619,9 +619,9 @@ const IPTVPlayer = ({
 
     // More aggressive health checks: 1 second in theatre mode, 2 seconds in single view
     const checkInterval = theatreMode ? 1000 : 2000;
-    // Freeze threshold: trigger recovery immediately after 1 check detects no progress
-    // This means recovery triggers after 1-2 seconds in theatre mode, 2-4 seconds in single view
-    const freezeThreshold = checkInterval;
+    // Freeze threshold: allow some time for normal buffering before triggering recovery
+    // In theatre mode: 3 checks needed (3s), single view: 2 checks needed (4s)
+    const freezeThreshold = checkInterval * 3;
 
     // Check periodically if video is progressing
     healthCheckIntervalRef.current = setInterval(() => {
@@ -660,7 +660,7 @@ const IPTVPlayer = ({
       if (currentTime === lastKnownTime) {
         const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
 
-        if (timeSinceLastPlaying > freezeThreshold) {
+        if (timeSinceLastPlaying >= freezeThreshold) {
           log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`);
           clearInterval(healthCheckIntervalRef.current);
           healthCheckIntervalRef.current = null;

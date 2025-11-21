@@ -403,15 +403,20 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
             res.setHeader('Access-Control-Allow-Origin', '*');
 
-            // Fetch and pipe the stream
+            // Fetch and pipe the stream with proper timeout using AbortController
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout for stream to start
+
             const streamResponse = await fetch(streamUrl, {
                 method: 'GET',
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
                 },
-                timeout: 60000, // Increase timeout to 60 seconds
+                signal: controller.signal,
                 agent: streamUrl.startsWith('https') ? httpsAgent : httpAgent
             });
+
+            clearTimeout(timeoutId);
             
             if (!streamResponse.ok) {
                 logger.error(`Failed to fetch stream: ${streamResponse.status} ${streamResponse.statusText}`);
