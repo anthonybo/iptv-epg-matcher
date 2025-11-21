@@ -35,6 +35,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
   const [selectedSports, setSelectedSports] = useState(new Set());
   const [selectedLeagues, setSelectedLeagues] = useState(new Set());
   const [multiviewUpdateTrigger, setMultiviewUpdateTrigger] = useState(0);
+  const [multiviewStreams, setMultiviewStreams] = useState([]);
 
   // Get unique sports and leagues with counts
   const getAvailableSports = () => {
@@ -360,24 +361,27 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     isAdvancingRef.current = false;
   };
 
-  const handleAddToMultiview = () => {
+  const handleAddToMultiview = async () => {
     if (!pipChannel) return;
 
-    addToMultiview(pipChannel);
-    window.dispatchEvent(new Event('multiviewUpdate'));
-    showToast(`Added "${pipChannel.name}" to Multi-View`, 'success');
+    const success = await addToMultiview(pipChannel);
+
+    if (success) {
+      window.dispatchEvent(new Event('multiviewUpdate'));
+      showToast(`Added "${pipChannel.name}" to Multi-View`, 'success');
+    } else {
+      showToast('Failed to add to Multi-View', 'error');
+    }
   };
 
   // Check if ANY stream from the same source is in multiview
-  // This value is computed based on multiviewUpdateTrigger to force re-render
   const isInMultiview = React.useMemo(() => {
     if (!pipChannel) return false;
-    const multiviewStreams = getMultiviewStreams();
     // Check if any stream from the same source (by sourceId) is in multiview
     return multiviewStreams.some(
       stream => stream.sourceId === pipChannel.sourceId
     );
-  }, [pipChannel, multiviewUpdateTrigger]);
+  }, [pipChannel, multiviewStreams]);
 
   const setupErrorListener = () => {
     // Clean up any existing listener
@@ -444,6 +448,32 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     };
   }, []);
 
+  // Load multiview streams on mount and when updated
+  useEffect(() => {
+    let ignore = false;
+
+    const loadMultiviewStreams = async () => {
+      try {
+        const streams = await getMultiviewStreams();
+        if (!ignore) {
+          setMultiviewStreams(streams);
+        }
+      } catch (error) {
+        if (!ignore) {
+          console.error('Failed to load multiview streams:', error);
+          // Fail silently for multiview status (non-critical feature)
+          setMultiviewStreams([]);
+        }
+      }
+    };
+
+    loadMultiviewStreams();
+
+    return () => {
+      ignore = true;
+    };
+  }, [multiviewUpdateTrigger]);
+
   // Listen for multiview updates to refresh badge colors
   useEffect(() => {
     const handleMultiviewUpdate = () => {
@@ -451,7 +481,6 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     };
 
     window.addEventListener('multiviewUpdate', handleMultiviewUpdate);
-    window.addEventListener('storage', handleMultiviewUpdate);
 
     return () => {
       window.removeEventListener('multiviewUpdate', handleMultiviewUpdate);
@@ -509,10 +538,8 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     return 'bg-slate-500/20 text-slate-300';
   };
 
-  // Check if event has any channels in multiview (depends on multiviewUpdateTrigger for reactivity)
+  // Check if event has any channels in multiview
   const isEventInMultiview = (eventId) => {
-    const multiviewStreams = getMultiviewStreams();
-
     // Check if any stream in multiview has matching ESPN event ID
     return multiviewStreams.some(stream => {
       return stream.espnEventId === eventId;
@@ -862,12 +889,12 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
                             {channel.source_name && (
                               <span
                                 className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 border text-[10px] font-semibold flex-shrink-0 ${
-                                  getMultiviewStreams().some(stream => stream.sourceId === channel.source_id)
+                                  multiviewStreams.some(stream => stream.sourceId === channel.source_id)
                                     ? 'bg-red-500/20 text-red-200 border-red-500/40'
                                     : 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40'
                                 }`}
                                 title={`IPTV Source: ${channel.source_name}${
-                                  getMultiviewStreams().some(stream => stream.sourceId === channel.source_id)
+                                  multiviewStreams.some(stream => stream.sourceId === channel.source_id)
                                     ? ' (Active in Multi-View)'
                                     : ''
                                 }`}

@@ -43,12 +43,17 @@ const TheatreView = ({
       : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-slate-100'
   ].join(' ');
 
-  const handleAddToMultiview = () => {
+  const handleAddToMultiview = async () => {
     if (!selectedChannel) return;
 
-    addToMultiview(selectedChannel);
-    window.dispatchEvent(new Event('multiviewUpdate'));
-    showToast(`Added "${selectedChannel.name}" to Multi-View`, 'success');
+    const success = await addToMultiview(selectedChannel);
+
+    if (success) {
+      window.dispatchEvent(new Event('multiviewUpdate'));
+      showToast(`Added "${selectedChannel.name}" to Multi-View`, 'success');
+    } else {
+      showToast('Failed to add to Multi-View', 'error');
+    }
   };
 
   return (

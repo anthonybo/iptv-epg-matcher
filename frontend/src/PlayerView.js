@@ -122,16 +122,20 @@ const PlayerView = ({
     }));
   };
 
-  const handleAddToMultiview = () => {
+  const handleAddToMultiview = async () => {
     if (!currentChannel) return;
 
-    addToMultiview(currentChannel);
+    const success = await addToMultiview(currentChannel);
 
-    // Trigger custom event to update multiview page if it's open
-    window.dispatchEvent(new Event('multiviewUpdate'));
+    if (success) {
+      // Trigger custom event to update multiview page if it's open
+      window.dispatchEvent(new Event('multiviewUpdate'));
 
-    // Show toast notification
-    showToast(`Added "${currentChannel.name}" to Multi-View`, 'success');
+      // Show toast notification
+      showToast(`Added "${currentChannel.name}" to Multi-View`, 'success');
+    } else {
+      showToast('Failed to add to Multi-View', 'error');
+    }
   };
 
   console.log('[PlayerView] Rendering with sourceName:', sourceName);

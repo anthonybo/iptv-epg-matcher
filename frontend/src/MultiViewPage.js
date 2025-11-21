@@ -3,6 +3,7 @@ import IPTVPlayer from './IPTVPlayer';
 import VideoQualityBadge from './components/VideoQualityBadge';
 import ConfirmModal from './components/ConfirmModal';
 import { useAppContext } from './contexts/AppContext';
+import { showToast } from './components/Toast';
 import {
   getMultiviewStreams,
   removeFromMultiview,
@@ -34,6 +35,7 @@ const MultiViewPage = ({ sessionId }) => {
   const [blacklistedChannels, setBlacklistedChannels] = useState([]);
   const [showBlacklistModal, setShowBlacklistModal] = useState(false);
   const [loadingBlacklist, setLoadingBlacklist] = useState(true);
+  const [loadingStreams, setLoadingStreams] = useState(true);
 
   // Load blacklist from API on mount
   useEffect(() => {
@@ -66,51 +68,56 @@ const MultiViewPage = ({ sessionId }) => {
     }
   };
 
-  // Load streams from localStorage on mount
+  // Load streams from API on mount
   useEffect(() => {
-    loadStreams();
+    let ignore = false;
 
-    // Listen for storage events (when streams are added from other tabs/windows)
-    const handleStorageChange = (e) => {
-      if (e.key === 'multiview_streams') {
-        loadStreams();
+    const loadStreams = async () => {
+      try {
+        setLoadingStreams(true);
+        const loaded = await getMultiviewStreams();
+        if (!ignore) {
+          setStreams(loaded);
+
+          // Mute all streams by default
+          const streamKeys = loaded.map(s => `${s.sourceId}_${s.id}`);
+          setMutedStreams(new Set(streamKeys));
+        }
+      } catch (error) {
+        if (!ignore) {
+          console.error('Failed to load multiview streams:', error);
+          showToast('Failed to load streams', 'error');
+        }
+      } finally {
+        if (!ignore) {
+          setLoadingStreams(false);
+        }
       }
     };
 
-    window.addEventListener('storage', handleStorageChange);
+    loadStreams();
 
-    // Also listen for custom event when streams are added in same tab
-    const handleMultiviewUpdate = () => {
-      // Only add new streams, don't reload existing ones to prevent video refresh
-      setStreams(prevStreams => {
-        const currentStreamKeys = new Set(prevStreams.map(s => `${s.sourceId}_${s.id}`));
-        const allStreams = getMultiviewStreams();
-        const newStreams = allStreams.filter(s => !currentStreamKeys.has(`${s.sourceId}_${s.id}`));
-
-        if (newStreams.length > 0) {
-          // Mute new streams by default
-          setMutedStreams(prev => {
-            const updated = new Set(prev);
-            newStreams.forEach(s => updated.add(`${s.sourceId}_${s.id}`));
-            return updated;
-          });
-
-          // Add new streams to existing array
-          return [...prevStreams, ...newStreams];
-        } else if (allStreams.length < prevStreams.length) {
-          // Stream was removed, reload all
-          loadStreams();
-          return prevStreams;
+    // Listen for custom event when streams are added in same tab
+    const handleMultiviewUpdate = async () => {
+      try {
+        const loaded = await getMultiviewStreams();
+        if (!ignore) {
+          setStreams(loaded);
+          const streamKeys = loaded.map(s => `${s.sourceId}_${s.id}`);
+          setMutedStreams(new Set(streamKeys));
         }
-
-        return prevStreams;
-      });
+      } catch (error) {
+        if (!ignore) {
+          console.error('Failed to reload multiview streams:', error);
+          showToast('Failed to reload streams', 'error');
+        }
+      }
     };
 
     window.addEventListener('multiviewUpdate', handleMultiviewUpdate);
 
     return () => {
-      window.removeEventListener('storage', handleStorageChange);
+      ignore = true;
       window.removeEventListener('multiviewUpdate', handleMultiviewUpdate);
     };
   }, []);
@@ -120,15 +127,6 @@ const MultiViewPage = ({ sessionId }) => {
     const newLayout = calculateLayout(streams.length);
     setLayout(newLayout);
   }, [streams.length]);
-
-  const loadStreams = () => {
-    const loaded = getMultiviewStreams();
-    setStreams(loaded);
-
-    // Mute all streams by default
-    const streamKeys = loaded.map(s => `${s.sourceId}_${s.id}`);
-    setMutedStreams(new Set(streamKeys));
-  };
 
   const toggleMute = (streamKey) => {
     setMutedStreams(prev => {
@@ -142,25 +140,45 @@ const MultiViewPage = ({ sessionId }) => {
     });
   };
 
-  const handleRemoveStream = (id, sourceId) => {
-    removeFromMultiview(id, sourceId);
-    // Update state directly instead of reloading from localStorage
-    // This prevents other streams from stopping and restarting
-    setStreams(prevStreams => prevStreams.filter(
-      stream => !(stream.id === id && stream.sourceId === sourceId)
-    ));
-    // Also remove quality data for the removed stream
-    const streamKey = `${sourceId}_${id}`;
-    setStreamQualities(prev => {
-      const { [streamKey]: removed, ...rest } = prev;
-      return rest;
-    });
+  const handleRemoveStream = async (id, sourceId) => {
+    try {
+      const success = await removeFromMultiview(id, sourceId);
+      if (success) {
+        // Update state directly instead of reloading from API
+        // This prevents other streams from stopping and restarting
+        setStreams(prevStreams => prevStreams.filter(
+          stream => !(stream.id === id && stream.sourceId === sourceId)
+        ));
+        // Also remove quality data for the removed stream
+        const streamKey = `${sourceId}_${id}`;
+        setStreamQualities(prev => {
+          const { [streamKey]: removed, ...rest } = prev;
+          return rest;
+        });
+      } else {
+        showToast('Failed to remove stream', 'error');
+      }
+    } catch (error) {
+      console.error('Error removing stream:', error);
+      showToast('Failed to remove stream', 'error');
+    }
   };
 
-  const handleClearAll = () => {
-    clearMultiview();
-    loadStreams();
-    setStreamQualities({});
+  const handleClearAll = async () => {
+    try {
+      const success = await clearMultiview();
+      if (success) {
+        // Trigger reload via multiviewUpdate event
+        window.dispatchEvent(new Event('multiviewUpdate'));
+        setStreamQualities({});
+        showToast('All streams cleared', 'success');
+      } else {
+        showToast('Failed to clear streams', 'error');
+      }
+    } catch (error) {
+      console.error('Error clearing streams:', error);
+      showToast('Failed to clear streams', 'error');
+    }
   };
 
   const handleQualityDetected = (streamId, quality) => {
@@ -325,12 +343,18 @@ const MultiViewPage = ({ sessionId }) => {
 
       if (data.success && data.channel) {
         // Add the channel to multiview
-        addToMultiview(data.channel);
+        const success = await addToMultiview(data.channel);
 
-        // Trigger reload
-        window.dispatchEvent(new Event('multiviewUpdate'));
+        if (success) {
+          // Trigger reload
+          window.dispatchEvent(new Event('multiviewUpdate'));
+          showToast(`Added "${data.channel.name}" to Multi-View`, 'success');
+        } else {
+          showToast('Failed to add channel to Multi-View', 'error');
+        }
       } else {
         console.error(data.message || 'No working channels found');
+        showToast(data.message || 'No working channels found', 'error');
       }
     } catch (error) {
       if (error.name === 'AbortError') {
@@ -390,18 +414,25 @@ const MultiViewPage = ({ sessionId }) => {
 
       if (data.success && data.channel) {
         // Add the channel to multiview
-        addToMultiview(data.channel);
+        const success = await addToMultiview(data.channel);
 
-        // Trigger reload
-        window.dispatchEvent(new Event('multiviewUpdate'));
+        if (success) {
+          // Trigger reload
+          window.dispatchEvent(new Event('multiviewUpdate'));
+          showToast(`Added "${data.channel.name}" to Multi-View`, 'success');
+        } else {
+          showToast('Failed to add stream to Multi-View', 'error');
+        }
       } else {
         console.error(data.message || 'No working streams found');
+        showToast(data.message || 'No working streams found', 'error');
       }
     } catch (error) {
       if (error.name === 'AbortError') {
         console.log('Stream search cancelled by user');
       } else {
         console.error('Error finding random stream:', error);
+        showToast('Error finding random stream', 'error');
       }
     } finally {
       setSearchingStream(false);
@@ -600,7 +631,19 @@ const MultiViewPage = ({ sessionId }) => {
 
       {/* Grid Container */}
       <div className={`flex-1 overflow-auto ${isTheatreMode ? 'p-0' : 'p-4'}`}>
-        {streams.length === 0 ? (
+        {loadingStreams ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="text-center">
+              <div className="mb-4 inline-flex h-24 w-24 items-center justify-center">
+                <svg className="animate-spin h-12 w-12 text-slate-400" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-slate-400">Loading streams...</h3>
+            </div>
+          </div>
+        ) : streams.length === 0 ? (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <div className="mb-4 inline-flex h-24 w-24 items-center justify-center rounded-full bg-slate-800/50">

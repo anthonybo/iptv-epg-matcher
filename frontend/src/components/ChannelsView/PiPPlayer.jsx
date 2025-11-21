@@ -21,10 +21,15 @@ const PiPPlayer = ({ channel, sessionId, onClose }) => {
     setVideoQuality(null);
   }, [channel?.id]);
 
-  const handleAddToMultiview = () => {
-    addToMultiview(channel);
-    window.dispatchEvent(new Event('multiviewUpdate'));
-    showToast(`Added "${channel.name}" to Multi-View`, 'success');
+  const handleAddToMultiview = async () => {
+    const success = await addToMultiview(channel);
+
+    if (success) {
+      window.dispatchEvent(new Event('multiviewUpdate'));
+      showToast(`Added "${channel.name}" to Multi-View`, 'success');
+    } else {
+      showToast('Failed to add to Multi-View', 'error');
+    }
   };
 
   if (!channel) return null;

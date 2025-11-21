@@ -2,16 +2,35 @@
  * MultiView Manager - Handles adding, removing, and persisting multiview streams
  */
 
-const MULTIVIEW_STORAGE_KEY = 'multiview_streams';
+const getAuthToken = () => {
+  return localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+};
 
 /**
- * Get all multiview streams from localStorage
- * @returns {Array} Array of stream objects
+ * Get all multiview streams from API
+ * @returns {Promise<Array>} Array of stream objects
  */
-export const getMultiviewStreams = () => {
+export const getMultiviewStreams = async () => {
   try {
-    const stored = localStorage.getItem(MULTIVIEW_STORAGE_KEY);
-    return stored ? JSON.parse(stored) : [];
+    const token = getAuthToken();
+    if (!token) {
+      console.error('No auth token found for multiview');
+      return [];
+    }
+
+    const response = await fetch('/api/multiview', {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      return data.streams || [];
+    }
+
+    console.error('Failed to load multiview streams:', data.error);
+    return [];
   } catch (error) {
     console.error('Error reading multiview streams:', error);
     return [];
@@ -19,84 +38,124 @@ export const getMultiviewStreams = () => {
 };
 
 /**
- * Save multiview streams to localStorage
- * @param {Array} streams - Array of stream objects to save
- */
-export const saveMultiviewStreams = (streams) => {
-  try {
-    localStorage.setItem(MULTIVIEW_STORAGE_KEY, JSON.stringify(streams));
-  } catch (error) {
-    console.error('Error saving multiview streams:', error);
-  }
-};
-
-/**
  * Add a stream to multiview
  * @param {Object} channel - Channel object to add
- * @returns {Array} Updated streams array
+ * @returns {Promise<boolean>} Success status
  */
-export const addToMultiview = (channel) => {
-  const streams = getMultiviewStreams();
+export const addToMultiview = async (channel) => {
+  try {
+    const token = getAuthToken();
+    if (!token) {
+      console.error('No auth token found for multiview');
+      return false;
+    }
 
-  // Check if stream already exists (avoid duplicates)
-  const exists = streams.some(
-    stream => stream.id === channel.id && stream.sourceId === channel.sourceId
-  );
+    // Normalize channel data
+    const normalizedChannel = {
+      id: channel.id,
+      name: channel.name,
+      logo: channel.logo || channel.tvgLogo,
+      url: channel.url,
+      sourceId: channel.sourceId || channel.source_id,
+      sourceType: channel.sourceType || channel.source_type,
+      sourceUrl: channel.sourceUrl || channel.source_url,
+      sourceUsername: channel.sourceUsername || channel.source_username,
+      sourcePassword: channel.sourcePassword || channel.source_password,
+      sourceMac: channel.sourceMac || channel.source_mac,
+      sourceName: channel.sourceName || channel.source_name,
+      espnEventId: channel.espnEventId,
+      espnEventName: channel.espnEventName
+    };
 
-  if (exists) {
-    console.log('[MultiView] Stream already in multiview');
-    return streams;
+    const response = await fetch('/api/multiview', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ channel: normalizedChannel })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      console.log(`[MultiView] Added stream: ${channel.name}`);
+      return true;
+    }
+
+    console.error('Failed to add to multiview:', data.error);
+    return false;
+  } catch (error) {
+    console.error('Error adding to multiview:', error);
+    return false;
   }
-
-  // Add new stream
-  const newStream = {
-    id: channel.id,
-    name: channel.name,
-    logo: channel.logo || channel.tvgLogo,
-    url: channel.url,
-    sourceId: channel.sourceId || channel.source_id,
-    sourceType: channel.sourceType || channel.source_type,
-    sourceUrl: channel.sourceUrl || channel.source_url,
-    sourceUsername: channel.sourceUsername || channel.source_username,
-    sourcePassword: channel.sourcePassword || channel.source_password,
-    sourceMac: channel.sourceMac || channel.source_mac,
-    sourceName: channel.sourceName || channel.source_name,
-    // ESPN event data for reliable matching
-    espnEventId: channel.espnEventId,
-    espnEventName: channel.espnEventName,
-    addedAt: Date.now()
-  };
-
-  const updatedStreams = [...streams, newStream];
-  saveMultiviewStreams(updatedStreams);
-
-  console.log(`[MultiView] Added stream: ${channel.name} (Total: ${updatedStreams.length})`);
-  return updatedStreams;
 };
 
 /**
  * Remove a stream from multiview
  * @param {string} id - Channel ID
  * @param {string} sourceId - Source ID
- * @returns {Array} Updated streams array
+ * @returns {Promise<boolean>} Success status
  */
-export const removeFromMultiview = (id, sourceId) => {
-  const streams = getMultiviewStreams();
-  const updatedStreams = streams.filter(
-    stream => !(stream.id === id && stream.sourceId === sourceId)
-  );
+export const removeFromMultiview = async (id, sourceId) => {
+  try {
+    const token = getAuthToken();
+    if (!token) {
+      console.error('No auth token found for multiview');
+      return false;
+    }
 
-  saveMultiviewStreams(updatedStreams);
-  console.log(`[MultiView] Removed stream (Remaining: ${updatedStreams.length})`);
-  return updatedStreams;
+    const response = await fetch(`/api/multiview/${encodeURIComponent(id)}/${encodeURIComponent(sourceId)}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      console.log(`[MultiView] Removed stream`);
+      return true;
+    }
+
+    console.error('Failed to remove from multiview:', data.error);
+    return false;
+  } catch (error) {
+    console.error('Error removing from multiview:', error);
+    return false;
+  }
 };
 
 /**
  * Clear all multiview streams
+ * @returns {Promise<boolean>} Success status
  */
-export const clearMultiview = () => {
-  saveMultiviewStreams([]);
-  console.log('[MultiView] Cleared all streams');
+export const clearMultiview = async () => {
+  try {
+    const token = getAuthToken();
+    if (!token) {
+      console.error('No auth token found for multiview');
+      return false;
+    }
+
+    const response = await fetch('/api/multiview', {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      console.log('[MultiView] Cleared all streams');
+      return true;
+    }
+
+    console.error('Failed to clear multiview:', data.error);
+    return false;
+  } catch (error) {
+    console.error('Error clearing multiview:', error);
+    return false;
+  }
 };
 
 /**

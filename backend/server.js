@@ -358,6 +358,7 @@ const iptvSourcesRoutes = require('./routes/iptvSources');
 const userEpgSourcesRoutes = require('./routes/userEpgSources');
 const epgRefreshRoutes = require('./routes/epgRefresh');
 const liveEventsRoutes = require('./routes/liveEvents');
+const multiviewRoutes = require('./routes/multiview');
 const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
 
@@ -407,6 +408,7 @@ app.use('/api/iptv', iptvSourcesRoutes); // Multi-IPTV source management
 app.use('/api/user-epg-sources', userEpgSourcesRoutes); // User EPG sources management
 app.use('/api/epg-refresh', epgRefreshRoutes); // EPG refresh management
 app.use('/api/live-events', liveEventsRoutes); // Live sports events management
+app.use('/api/multiview', multiviewRoutes); // Multiview streams management
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 
