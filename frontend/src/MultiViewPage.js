@@ -7,7 +7,8 @@ import {
   getMultiviewStreams,
   removeFromMultiview,
   clearMultiview,
-  calculateLayout
+  calculateLayout,
+  addToMultiview
 } from './utils/multiviewManager';
 
 /**
@@ -21,6 +22,49 @@ const MultiViewPage = ({ sessionId }) => {
   const [streamQualities, setStreamQualities] = useState({});
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [mutedStreams, setMutedStreams] = useState(new Set()); // Track which streams are muted
+
+  // Random stream state
+  const [showSportDropdown, setShowSportDropdown] = useState(false);
+  const [liveSports, setLiveSports] = useState([]);
+  const [loadingSports, setLoadingSports] = useState(false);
+  const [searchingStream, setSearchingStream] = useState(false);
+  const [searchAbortController, setSearchAbortController] = useState(null);
+
+  // Blacklist state
+  const [blacklistedChannels, setBlacklistedChannels] = useState([]);
+  const [showBlacklistModal, setShowBlacklistModal] = useState(false);
+  const [loadingBlacklist, setLoadingBlacklist] = useState(true);
+
+  // Load blacklist from API on mount
+  useEffect(() => {
+    loadBlacklist();
+  }, []);
+
+  const loadBlacklist = async () => {
+    try {
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+      if (!token) {
+        console.error('No auth token found');
+        setLoadingBlacklist(false);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/blacklist', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setBlacklistedChannels(data.blacklist.map(item => item.channel_name));
+      }
+    } catch (error) {
+      console.error('Failed to load blacklist:', error);
+    } finally {
+      setLoadingBlacklist(false);
+    }
+  };
 
   // Load streams from localStorage on mount
   useEffect(() => {
@@ -37,7 +81,30 @@ const MultiViewPage = ({ sessionId }) => {
 
     // Also listen for custom event when streams are added in same tab
     const handleMultiviewUpdate = () => {
-      loadStreams();
+      // Only add new streams, don't reload existing ones to prevent video refresh
+      setStreams(prevStreams => {
+        const currentStreamKeys = new Set(prevStreams.map(s => `${s.sourceId}_${s.id}`));
+        const allStreams = getMultiviewStreams();
+        const newStreams = allStreams.filter(s => !currentStreamKeys.has(`${s.sourceId}_${s.id}`));
+
+        if (newStreams.length > 0) {
+          // Mute new streams by default
+          setMutedStreams(prev => {
+            const updated = new Set(prev);
+            newStreams.forEach(s => updated.add(`${s.sourceId}_${s.id}`));
+            return updated;
+          });
+
+          // Add new streams to existing array
+          return [...prevStreams, ...newStreams];
+        } else if (allStreams.length < prevStreams.length) {
+          // Stream was removed, reload all
+          loadStreams();
+          return prevStreams;
+        }
+
+        return prevStreams;
+      });
     };
 
     window.addEventListener('multiviewUpdate', handleMultiviewUpdate);
@@ -103,6 +170,262 @@ const MultiViewPage = ({ sessionId }) => {
     }));
   };
 
+  // Random stream handlers
+  const handleRandomStreamClick = async () => {
+    if (showSportDropdown) {
+      setShowSportDropdown(false);
+      return;
+    }
+
+    setShowSportDropdown(true);
+    setLoadingSports(true);
+
+    try {
+      // Get current event IDs and source IDs to exclude
+      const currentEventIds = streams
+        .map(s => s.espnEventId)
+        .filter(id => id);
+
+      const currentSourceIds = streams
+        .map(s => s.sourceId)
+        .filter(id => id);
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        console.error('[Random Stream] No authentication token found');
+        setLiveSports([]);
+        setLoadingSports(false);
+        return;
+      }
+
+      const queryParams = currentEventIds.length > 0
+        ? `?excludeEventIds=${currentEventIds.join('&excludeEventIds=')}`
+        : '';
+
+      console.log('[Random Stream] Fetching from:', `/api/live-events/live-sports-summary${queryParams}`);
+
+      const response = await fetch(`/api/live-events/live-sports-summary${queryParams}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      console.log('[Random Stream] Response status:', response.status);
+
+      const data = await response.json();
+
+      console.log('[Random Stream] API Response:', JSON.stringify(data));
+
+      if (data.success) {
+        console.log('[Random Stream] Setting sports:', JSON.stringify(data.sports), 'Length:', data.sports?.length);
+        setLiveSports(data.sports || []);
+      } else {
+        console.error('[Random Stream] Failed to fetch live sports:', data.error);
+        setLiveSports([]);
+      }
+    } catch (error) {
+      console.error('Error fetching live sports:', error);
+      setLiveSports([]);
+    } finally {
+      setLoadingSports(false);
+    }
+  };
+
+  const handleCancelSearch = () => {
+    if (searchAbortController) {
+      searchAbortController.abort();
+      setSearchAbortController(null);
+    }
+    setSearchingStream(false);
+  };
+
+  const handleBlacklistChannel = async (channelName) => {
+    if (blacklistedChannels.includes(channelName)) {
+      return;
+    }
+
+    try {
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+      const response = await fetch('/api/live-events/blacklist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ channelName })
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setBlacklistedChannels(prev => [...prev, channelName]);
+      } else {
+        console.error('Failed to blacklist channel:', data.error);
+      }
+    } catch (error) {
+      console.error('Failed to blacklist channel:', error);
+    }
+  };
+
+  const handleRemoveFromBlacklist = async (channelName) => {
+    try {
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+      const response = await fetch(`/api/live-events/blacklist/${encodeURIComponent(channelName)}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setBlacklistedChannels(prev => prev.filter(name => name !== channelName));
+      } else {
+        console.error('Failed to remove from blacklist:', data.error);
+      }
+    } catch (error) {
+      console.error('Failed to remove from blacklist:', error);
+    }
+  };
+
+  const handleRandomAnyChannel = async () => {
+    setSearchingStream(true);
+
+    // Create new AbortController for this search
+    const abortController = new AbortController();
+    setSearchAbortController(abortController);
+
+    try {
+      const currentSourceIds = streams
+        .map(s => s.sourceId)
+        .filter(id => id);
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        console.error('[Random Channel] No authentication token found');
+        setSearchingStream(false);
+        setSearchAbortController(null);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/random-any-channel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          excludeSourceIds: currentSourceIds
+        }),
+        signal: abortController.signal
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        // Add the channel to multiview
+        addToMultiview(data.channel);
+
+        // Trigger reload
+        window.dispatchEvent(new Event('multiviewUpdate'));
+      } else {
+        console.error(data.message || 'No working channels found');
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.log('Channel search cancelled by user');
+      } else {
+        console.error('Error finding random channel:', error);
+      }
+    } finally {
+      setSearchingStream(false);
+      setSearchAbortController(null);
+    }
+  };
+
+  const handleSportSelect = async (sportType, leagueName) => {
+    setSearchingStream(true);
+    setShowSportDropdown(false);
+
+    // Create new AbortController for this search
+    const abortController = new AbortController();
+    setSearchAbortController(abortController);
+
+    try {
+      // Get current event IDs and source IDs to exclude
+      const currentEventIds = streams
+        .map(s => s.espnEventId)
+        .filter(id => id);
+
+      const currentSourceIds = streams
+        .map(s => s.sourceId)
+        .filter(id => id);
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        console.error('[Random Stream] No authentication token found');
+        setSearchingStream(false);
+        setSearchAbortController(null);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/random-working-stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          sportType,
+          leagueName,
+          excludeEventIds: currentEventIds,
+          excludeSourceIds: currentSourceIds
+        }),
+        signal: abortController.signal
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        // Add the channel to multiview
+        addToMultiview(data.channel);
+
+        // Trigger reload
+        window.dispatchEvent(new Event('multiviewUpdate'));
+      } else {
+        console.error(data.message || 'No working streams found');
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        console.log('Stream search cancelled by user');
+      } else {
+        console.error('Error finding random stream:', error);
+      }
+    } finally {
+      setSearchingStream(false);
+      setSearchAbortController(null);
+    }
+  };
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (showSportDropdown && !e.target.closest('.random-stream-dropdown')) {
+        setShowSportDropdown(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showSportDropdown]);
+
+  // Debug: Log when liveSports changes
+  useEffect(() => {
+    console.log('[Random Stream] liveSports state changed:', liveSports, 'count:', liveSports.length);
+  }, [liveSports]);
+
   return (
     <div className="flex flex-col h-screen bg-slate-950">
       {/* Header */}
@@ -119,6 +442,121 @@ const MultiViewPage = ({ sessionId }) => {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
+              {/* Random Stream Icon Expansion */}
+              <div className="flex items-center gap-2 random-stream-dropdown">
+                {/* Main Random Button */}
+                <button
+                  onClick={handleRandomStreamClick}
+                  disabled={searchingStream}
+                  className={`inline-flex items-center justify-center w-8 h-8 rounded-lg border transition ${
+                    searchingStream
+                      ? 'border-slate-600 bg-slate-800/50 text-slate-500 cursor-not-allowed'
+                      : showSportDropdown
+                      ? 'border-emerald-600 bg-emerald-900/40 text-emerald-300'
+                      : 'border-emerald-700 bg-emerald-900/20 text-emerald-300 hover:bg-emerald-900/40'
+                  }`}
+                  title="Add Random Live Stream"
+                >
+                  {searchingStream ? (
+                    <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                    </svg>
+                  )}
+                </button>
+
+                {/* Cancel Search Button */}
+                {searchingStream && (
+                  <button
+                    onClick={handleCancelSearch}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-red-700 bg-red-900/20 px-3 py-1.5 text-xs font-semibold text-red-300 transition hover:bg-red-900/40"
+                    title="Cancel Search"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    Cancel
+                  </button>
+                )}
+
+                {/* Expanded Sport Icons */}
+                {showSportDropdown && !loadingSports && (
+                  <>
+                    {/* Random (Any Sport) Icon */}
+                    <button
+                      onClick={() => handleSportSelect(null, null)}
+                      className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-emerald-600 bg-emerald-900/30 text-emerald-300 hover:bg-emerald-900/50 transition"
+                      title="Random (Any Sport)"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                      </svg>
+                    </button>
+
+                    {/* Sport Icons */}
+                    {console.log('[Random Stream] Rendering sports:', liveSports)}
+                    {liveSports.map((sport, index) => (
+                      <button
+                        key={index}
+                        onClick={() => handleSportSelect(sport.sport_type, sport.league_name)}
+                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-600 bg-blue-900/30 text-blue-300 hover:bg-blue-900/50 transition font-bold text-sm"
+                        title={`${sport.league_name} (${sport.event_count} live)`}
+                      >
+                        {sport.sport_type[0]}
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                {/* Loading Indicator */}
+                {showSportDropdown && loadingSports && (
+                  <div className="flex items-center px-2">
+                    <svg className="animate-spin h-5 w-5 text-emerald-400" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  </div>
+                )}
+              </div>
+
+              {/* Test Random Channel Button */}
+              <button
+                onClick={handleRandomAnyChannel}
+                disabled={searchingStream}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                  searchingStream
+                    ? 'border-slate-600 bg-slate-800/50 text-slate-500 cursor-not-allowed'
+                    : 'border-cyan-700 bg-cyan-900/20 text-cyan-300 hover:bg-cyan-900/40'
+                }`}
+                title="Find Random Channel (Test Blacklist)"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Test Random
+              </button>
+
+              {/* Blacklist Button */}
+              <button
+                onClick={() => setShowBlacklistModal(true)}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                  blacklistedChannels.length > 0
+                    ? 'border-yellow-700 bg-yellow-900/20 text-yellow-300 hover:bg-yellow-900/40'
+                    : 'border-slate-700 bg-slate-900/20 text-slate-400 hover:bg-slate-900/40'
+                }`}
+                title="Manage Blacklisted Channels"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                </svg>
+                Blacklist {blacklistedChannels.length > 0 && `(${blacklistedChannels.length})`}
+              </button>
+
               {streams.length > 0 && (
                 <>
                   <button
@@ -247,6 +685,16 @@ const MultiViewPage = ({ sessionId }) => {
                               </svg>
                             )}
                           </button>
+                          {/* Blacklist Button */}
+                          <button
+                            onClick={() => handleBlacklistChannel(stream.name)}
+                            className="p-0.5 rounded hover:bg-yellow-500/20 text-slate-400 hover:text-yellow-400 transition-colors"
+                            title="Blacklist this channel"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                            </svg>
+                          </button>
                           {/* Remove Button */}
                           <button
                             onClick={() => handleRemoveStream(stream.id, stream.sourceId)}
@@ -292,6 +740,78 @@ const MultiViewPage = ({ sessionId }) => {
         cancelText="Cancel"
         variant="danger"
       />
+
+      {/* Blacklist Management Modal */}
+      {showBlacklistModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-slate-700">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-slate-100">Blacklisted Channels</h2>
+                <button
+                  onClick={() => setShowBlacklistModal(false)}
+                  className="text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <p className="mt-1 text-sm text-slate-400">
+                These channels will be excluded from random stream searches
+              </p>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              {blacklistedChannels.length === 0 ? (
+                <div className="text-center py-12">
+                  <svg className="w-16 h-16 mx-auto text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                  </svg>
+                  <p className="text-slate-400">No blacklisted channels</p>
+                  <p className="text-sm text-slate-500 mt-1">
+                    Click the ban icon on a stream to blacklist it
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {blacklistedChannels.map((channelName, index) => (
+                    <div
+                      key={index}
+                      className="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-800/50 border border-slate-700 hover:border-slate-600 transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <svg className="w-5 h-5 text-yellow-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                        </svg>
+                        <span className="text-sm text-slate-200 truncate">{channelName}</span>
+                      </div>
+                      <button
+                        onClick={() => handleRemoveFromBlacklist(channelName)}
+                        className="flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-lg border border-emerald-700 bg-emerald-900/20 text-emerald-300 hover:bg-emerald-900/40 transition-colors"
+                      >
+                        Unblock
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-slate-700 bg-slate-900/50">
+              <button
+                onClick={() => setShowBlacklistModal(false)}
+                className="w-full px-4 py-2 text-sm font-semibold rounded-lg border border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
