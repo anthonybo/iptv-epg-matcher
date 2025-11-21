@@ -9,7 +9,8 @@ import {
   removeFromMultiview,
   clearMultiview,
   calculateLayout,
-  addToMultiview
+  addToMultiview,
+  updateMutedState
 } from './utils/multiviewManager';
 
 /**
@@ -22,7 +23,9 @@ const MultiViewPage = ({ sessionId }) => {
   const [layout, setLayout] = useState({ columns: 1, rows: 1 });
   const [streamQualities, setStreamQualities] = useState({});
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [mutedStreams, setMutedStreams] = useState(new Set()); // Track which streams are muted
+  // Initialize all streams as muted by default in multi-view to prevent audio chaos
+  // The actual muted state will be populated when streams load
+  const [mutedStreams, setMutedStreams] = useState(new Set());
 
   // Random stream state
   const [showSportDropdown, setShowSportDropdown] = useState(false);
@@ -77,11 +80,35 @@ const MultiViewPage = ({ sessionId }) => {
         setLoadingStreams(true);
         const loaded = await getMultiviewStreams();
         if (!ignore) {
-          setStreams(loaded);
+          // DEBUG: Log what we got from API
+          console.log('[MultiView] Raw loaded streams from API:', loaded);
 
-          // Mute all streams by default
-          const streamKeys = loaded.map(s => `${s.sourceId}_${s.id}`);
-          setMutedStreams(new Set(streamKeys));
+          // Build muted streams Set from database muted state
+          // Each stream now has a 'muted' property from the database
+          const mutedSet = new Set();
+          loaded.forEach(stream => {
+            // CRITICAL: Must match the streamKey format used in rendering (line 779)
+            // which includes _refreshKey: `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`
+            const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
+            console.log(`[MultiView] Stream ${stream.name}: muted=${stream.muted}, streamKey=${streamKey}`);
+            // If muted property is undefined or true, add to muted set (default muted)
+            if (stream.muted !== false) {
+              mutedSet.add(streamKey);
+            }
+          });
+
+          console.log('[MultiView] Loaded streams with muted states from DB:', mutedSet);
+
+          // Set muted streams first, then streams
+          setMutedStreams(mutedSet);
+
+          // Wait for next tick to ensure mutedStreams state is processed
+          await new Promise(resolve => setTimeout(resolve, 10));
+
+          if (!ignore) {
+            console.log('[MultiView] Setting streams, mutedStreams ready');
+            setStreams(loaded);
+          }
         }
       } catch (error) {
         if (!ignore) {
@@ -108,10 +135,17 @@ const MultiViewPage = ({ sessionId }) => {
             const newStreams = loaded.filter(s => !prevKeys.has(`${s.sourceId}_${s.id}`));
 
             if (newStreams.length > 0) {
-              // Mute newly added streams
+              // Add muted state for newly added streams from database
               setMutedStreams(prev => {
                 const updated = new Set(prev);
-                newStreams.forEach(s => updated.add(`${s.sourceId}_${s.id}`));
+                newStreams.forEach(s => {
+                  // CRITICAL: Must match the streamKey format used in rendering
+                  const streamKey = `${s.sourceId}_${s.id}_${s._refreshKey || ''}`;
+                  // New streams default to muted (muted !== false)
+                  if (s.muted !== false) {
+                    updated.add(streamKey);
+                  }
+                });
                 return updated;
               });
               return [...prevStreams, ...newStreams];
@@ -142,16 +176,77 @@ const MultiViewPage = ({ sessionId }) => {
     setLayout(newLayout);
   }, [streams.length]);
 
-  const toggleMute = (streamKey) => {
+  const toggleMute = async (streamKey) => {
+    // Parse streamKey to get channelId and sourceId
+    // streamKey format: "sourceId_channelId" or "sourceId_channelId_refreshKey"
+    const parts = streamKey.split('_');
+
+    // Handle both formats: "sourceId_channelId" and "sourceId_channelId_refreshKey"
+    let sourceId, channelId;
+    if (parts.length >= 2) {
+      sourceId = parts[0];
+      // Join remaining parts except last if it's a timestamp (refreshKey)
+      const lastPart = parts[parts.length - 1];
+      const isTimestamp = /^\d{13}$/.test(lastPart);
+
+      if (isTimestamp && parts.length > 2) {
+        channelId = parts.slice(1, -1).join('_');
+      } else {
+        channelId = parts.slice(1).join('_');
+      }
+    } else {
+      console.error('[MultiView] Invalid streamKey format:', streamKey);
+      return;
+    }
+
+    // Update UI immediately for responsiveness
+    const wasMuted = mutedStreams.has(streamKey);
+    const newMutedState = !wasMuted;
+
     setMutedStreams(prev => {
       const newSet = new Set(prev);
-      if (newSet.has(streamKey)) {
+      if (wasMuted) {
         newSet.delete(streamKey);
       } else {
         newSet.add(streamKey);
       }
       return newSet;
     });
+
+    // Persist to database
+    const success = await updateMutedState(channelId, sourceId, newMutedState);
+
+    if (!success) {
+      // Revert on failure
+      setMutedStreams(prev => {
+        const newSet = new Set(prev);
+        if (wasMuted) {
+          newSet.add(streamKey);
+        } else {
+          newSet.delete(streamKey);
+        }
+        return newSet;
+      });
+      showToast('Failed to update mute state', 'error');
+    }
+  };
+
+  const handleRefreshStream = (id, sourceId) => {
+    // Force re-render of the stream by adding a refresh timestamp
+    setStreams(prevStreams => {
+      return prevStreams.map(stream => {
+        if (stream.id === id && stream.sourceId === sourceId) {
+          // Add a refresh timestamp to force React to remount
+          return {
+            ...stream,
+            _refreshKey: Date.now()
+          };
+        }
+        return stream;
+      });
+    });
+
+    showToast('Stream refreshed', 'success');
   };
 
   const handleRemoveStream = async (id, sourceId) => {
@@ -684,7 +779,7 @@ const MultiViewPage = ({ sessionId }) => {
             }}
           >
             {streams.map((stream) => {
-              const streamKey = `${stream.sourceId}_${stream.id}`;
+              const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
               return (
                 <div
                   key={streamKey}
@@ -742,6 +837,16 @@ const MultiViewPage = ({ sessionId }) => {
                               </svg>
                             )}
                           </button>
+                          {/* Refresh Button */}
+                          <button
+                            onClick={() => handleRefreshStream(stream.id, stream.sourceId)}
+                            className="p-0.5 rounded hover:bg-blue-500/20 text-slate-400 hover:text-blue-400 transition-colors"
+                            title="Refresh stream"
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                          </button>
                           {/* Blacklist Button */}
                           <button
                             onClick={() => handleBlacklistChannel(stream.name)}
@@ -775,7 +880,11 @@ const MultiViewPage = ({ sessionId }) => {
                       playbackMethod="mpegts-player"
                       matchedChannels={{}}
                       theatreMode={true}
-                      muted={mutedStreams.has(streamKey)}
+                      muted={(() => {
+                        const isMuted = mutedStreams.has(streamKey);
+                        console.log(`[MultiView] Rendering IPTVPlayer for ${streamKey}: muted=${isMuted}, mutedStreams has key:`, mutedStreams.has(streamKey), 'mutedStreams:', Array.from(mutedStreams));
+                        return isMuted;
+                      })()}
                       onQualityDetected={(quality) => handleQualityDetected(streamKey, quality)}
                     />
                   </div>

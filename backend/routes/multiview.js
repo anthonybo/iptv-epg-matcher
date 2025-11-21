@@ -39,6 +39,7 @@ router.get('/', async (req, res) => {
         source_name as "sourceName",
         espn_event_id as "espnEventId",
         espn_event_name as "espnEventName",
+        muted,
         EXTRACT(EPOCH FROM added_at) * 1000 as "addedAt"
        FROM multiview_streams
        WHERE user_id = $1
@@ -138,6 +139,47 @@ router.post('/', async (req, res) => {
     });
   } catch (error) {
     logger.error('Add to multiview failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * PATCH /api/multiview/:channelId/:sourceId/mute
+ * Toggle mute state for a stream
+ */
+router.patch('/:channelId/:sourceId/mute', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const { channelId, sourceId } = req.params;
+    const { muted } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (typeof muted !== 'boolean') {
+      return res.status(400).json({ error: 'Invalid muted value' });
+    }
+
+    const postgresService = require('../services/postgresService');
+
+    const result = await postgresService.query(
+      'UPDATE multiview_streams SET muted = $1 WHERE user_id = $2 AND channel_id = $3 AND source_id = $4',
+      [muted, userId, channelId, parseInt(sourceId)]
+    );
+
+    logger.info(`User ${userId} ${muted ? 'muted' : 'unmuted'} stream: ${channelId}`);
+
+    res.json({
+      success: true,
+      message: `Stream ${muted ? 'muted' : 'unmuted'}`,
+      updated: result.rowCount > 0
+    });
+  } catch (error) {
+    logger.error('Update mute state failed:', error);
     res.status(500).json({
       success: false,
       error: error.message

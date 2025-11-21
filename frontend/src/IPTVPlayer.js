@@ -49,6 +49,7 @@ const IPTVPlayer = ({
   // State - use external state in theatre mode, internal state otherwise
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [recoveryStatus, setRecoveryStatus] = useState(null); // Separate state for recovery messages
   const [logs, setLogs] = useState([]);
   const [internalShowDebug, setInternalShowDebug] = useState(false);
   const [internalShowChannelInfo, setInternalShowChannelInfo] = useState(false);
@@ -77,11 +78,35 @@ const IPTVPlayer = ({
   const lastKnownCurrentTimeRef = useRef(0);
   const videoElementRef = useRef(null);
   const isInitializingRef = useRef(false); // Prevent race conditions from rapid re-renders
+  const freshStartCountRef = useRef(0); // Track complete reinitialization attempts
+  const lastErrorTimeRef = useRef(0); // Track when last error occurred
+  const isRecoveringRef = useRef(false); // Prevent multiple simultaneous recovery attempts
+  const recoveryTimeoutRef = useRef(null); // Timeout to detect if recovery attempt failed
+
+  // Global recovery rate limiter (shared across all instances)
+  if (typeof window.iptvRecoveryQueue === 'undefined') {
+    window.iptvRecoveryQueue = {
+      lastRecoveryTime: 0,
+      queue: []
+    };
+  }
   
-  // Enhanced logging function
+  // Enhanced logging function - optimized for multi-view performance
   const log = (level, message, data = null) => {
+    // In theatre mode, only skip non-critical logs to prevent performance issues
+    // But allow critical initialization/error logs
+    const isCritical = message.includes('Initializing') || message.includes('player error') || level === 'error';
+
+    if (theatreMode && !isCritical) {
+      return;
+    }
+
     const timestamp = new Date().toISOString();
-    console.log(`[${level.toUpperCase()}] ${message}`, data || '');
+
+    // Only log to console in development
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[${level.toUpperCase()}] ${message}`, data || '');
+    }
 
     setLogs(prev => [
       ...prev,
@@ -307,6 +332,12 @@ const IPTVPlayer = ({
       retryTimerRef.current = null;
     }
 
+    // Clear recovery timeout
+    if (recoveryTimeoutRef.current) {
+      clearTimeout(recoveryTimeoutRef.current);
+      recoveryTimeoutRef.current = null;
+    }
+
     // Clear stall detection timer
     if (stallTimerRef.current) {
       clearTimeout(stallTimerRef.current);
@@ -319,21 +350,54 @@ const IPTVPlayer = ({
       healthCheckIntervalRef.current = null;
     }
 
+    // Reset timing refs to prevent false stall detection on new stream
+    // These will be set properly when new stream starts playing
+    lastPlayingTimeRef.current = Date.now(); // Reset to now so stall detection doesn't fire immediately
+    lastKnownCurrentTimeRef.current = 0;
+
+    // DON'T reset isRecoveringRef here - let recovery logic manage it
+    // Otherwise we get into infinite recovery loops
+
+    // CRITICAL: Immediately stop video element before destroying player
+    // This prevents video decoder from continuing to run
+    if (videoElementRef.current) {
+      try {
+        videoElementRef.current.pause();
+        videoElementRef.current.src = '';
+        videoElementRef.current.load(); // Force video element to release resources
+      } catch (e) {
+        // Ignore errors during emergency cleanup
+      }
+    }
+
     if (playerInstanceRef.current) {
       log('info', 'Destroying player instance');
       try {
-        // CRITICAL: mpegts.js requires proper cleanup sequence to prevent memory leaks
-        // Must call unload() → detachMediaElement() → destroy() in this order
+        // CRITICAL: mpegts.js official cleanup sequence from documentation
+        // Must call pause() → unload() → detachMediaElement() → destroy() in this order
+
+        // Step 1: Pause (stops playback immediately)
+        if (typeof playerInstanceRef.current.pause === 'function') {
+          try {
+            playerInstanceRef.current.pause();
+          } catch (e) {
+            // Ignore pause errors
+          }
+        }
+
+        // Step 2: Unload (releases media source)
         if (typeof playerInstanceRef.current.unload === 'function') {
           log('info', 'Unloading mpegts player');
           playerInstanceRef.current.unload();
         }
 
+        // Step 3: Detach media element
         if (typeof playerInstanceRef.current.detachMediaElement === 'function') {
           log('info', 'Detaching media element from mpegts player');
           playerInstanceRef.current.detachMediaElement();
         }
 
+        // Step 4: Destroy player instance
         playerInstanceRef.current.destroy();
         log('info', 'Player destroyed successfully');
       } catch (e) {
@@ -350,6 +414,202 @@ const IPTVPlayer = ({
     videoElementRef.current = null;
   };
 
+  // Unified recovery mechanism with progressive backoff
+  const attemptRecovery = (errorContext = '') => {
+    console.log(`[Recovery] attemptRecovery called for channel ${getChannelId()}, context: ${errorContext}`);
+
+    // Prevent multiple simultaneous recovery attempts
+    if (isRecoveringRef.current) {
+      log('warn', 'Recovery already in progress, skipping duplicate attempt');
+      console.log('[Recovery] Already recovering, skipping');
+      return;
+    }
+
+    // Don't recover if channel has changed
+    if (getChannelId() !== currentChannelIdRef.current) {
+      log('info', 'Channel changed, aborting recovery');
+      console.log('[Recovery] Channel changed, aborting');
+      return;
+    }
+
+    const now = Date.now();
+    const timeSinceLastError = now - lastErrorTimeRef.current;
+    console.log(`[Recovery] Time since last error: ${timeSinceLastError}ms, retry count: ${retryCountRef.current}`);
+
+    // Reset retry count if it's been a while since last error (successful recovery)
+    if (timeSinceLastError > 30000) {
+      retryCountRef.current = 0;
+      freshStartCountRef.current = 0;
+      log('info', 'Resetting retry counters after successful playback period');
+    }
+
+    // Set recovery flag IMMEDIATELY to prevent duplicate attempts
+    isRecoveringRef.current = true;
+    lastErrorTimeRef.current = now;
+
+    // In theatre mode (multi-view), stagger recovery attempts to prevent CPU overload
+    // Only allow one recovery every 100ms across all streams
+    if (theatreMode) {
+      const timeSinceLastGlobalRecovery = now - window.iptvRecoveryQueue.lastRecoveryTime;
+      if (timeSinceLastGlobalRecovery < 100) {
+        // Delay this recovery attempt slightly
+        const delayMs = 100 - timeSinceLastGlobalRecovery + Math.random() * 100;
+        console.log(`[Recovery] Rate limiting - delaying ${delayMs}ms`);
+        // Reset flag before recursive call, will be set again in recursive call
+        isRecoveringRef.current = false;
+        setTimeout(() => attemptRecovery(errorContext), delayMs);
+        return;
+      }
+      window.iptvRecoveryQueue.lastRecoveryTime = now;
+    }
+
+    const MAX_RETRIES = 6; // More retry attempts with progressive backoff
+    const MAX_FRESH_STARTS = 3; // Complete reinitialization attempts
+    const retryCount = retryCountRef.current;
+
+    if (retryCount < MAX_RETRIES) {
+      // Aggressive fast recovery in multi-view: 200ms, 500ms, 1s, 1.5s, 2s, 3s (total: ~8s)
+      // Moderate recovery in single view: 500ms, 1s, 2s, 3s, 5s, 8s (total: ~19.5s)
+      const delays = theatreMode
+        ? [200, 500, 1000, 1500, 2000, 3000]
+        : [500, 1000, 2000, 3000, 5000, 8000];
+      const retryDelay = delays[Math.min(retryCount, delays.length - 1)];
+
+      retryCountRef.current++;
+      const attemptNum = retryCount + 1;
+
+      log('info', `${errorContext} - Attempting recovery (${attemptNum}/${MAX_RETRIES}) in ${retryDelay/1000}s...`);
+      console.log(`[Recovery] Scheduling retry ${attemptNum}/${MAX_RETRIES} in ${retryDelay}ms`);
+      setRecoveryStatus(`Reconnecting (${attemptNum}/${MAX_RETRIES})...`);
+      setLoading(false); // Don't show loading spinner during recovery
+
+      retryTimerRef.current = setTimeout(() => {
+        console.log(`[Recovery] Executing retry ${attemptNum}/${MAX_RETRIES}`);
+        // Double-check channel hasn't changed during the delay
+        if (getChannelId() !== currentChannelIdRef.current) {
+          log('info', 'Channel changed during retry delay, aborting');
+          isRecoveringRef.current = false;
+          setRecoveryStatus(null);
+          return;
+        }
+
+        log('info', `Executing recovery attempt ${attemptNum}`);
+        setRecoveryStatus(`Reconnecting (${attemptNum}/${MAX_RETRIES})...`);
+        cleanupPlayer();
+
+        // Reinitialize based on playback method
+        // DON'T clear isRecoveringRef here - let 'playing' event clear it when stream actually starts
+        // BUT set a safety timeout in case player never starts (errors before 'playing' event)
+
+        // Clear any existing recovery timeout first
+        if (recoveryTimeoutRef.current) {
+          clearTimeout(recoveryTimeoutRef.current);
+        }
+
+        recoveryTimeoutRef.current = setTimeout(() => {
+          if (isRecoveringRef.current) {
+            console.log('[Recovery] Timeout - player did not start within 10s, triggering next recovery attempt');
+            isRecoveringRef.current = false;
+            // Trigger next recovery attempt since this one failed
+            attemptRecovery('Recovery timeout - player did not start');
+          }
+        }, 10000); // 10 second timeout
+
+        switch (playbackMethod) {
+          case 'mpegts-player':
+            initializeMpegtsPlayer();
+            break;
+          case 'hls-player':
+            initializeClapprPlayer();
+            break;
+          case 'vlc-link':
+            initializeVlcLink();
+            break;
+          case 'test-video':
+            initializeTestVideo();
+            break;
+          default:
+            log('error', 'Unknown playback method during recovery', { method: playbackMethod });
+            clearTimeout(recoveryTimeoutRef.current);
+            recoveryTimeoutRef.current = null;
+            isRecoveringRef.current = false; // Clear on error
+        }
+      }, retryDelay);
+    } else if (freshStartCountRef.current < MAX_FRESH_STARTS) {
+      // Max retries exceeded - attempt a complete fresh start
+      freshStartCountRef.current++;
+      const freshStartNum = freshStartCountRef.current;
+
+      log('info', `Max retries exceeded. Attempting fresh start (${freshStartNum}/${MAX_FRESH_STARTS})...`);
+      setRecoveryStatus(`Fresh restart (${freshStartNum}/${MAX_FRESH_STARTS})...`);
+      setLoading(false); // Don't show loading spinner during recovery
+
+      // Reset retry counter for the fresh start
+      retryCountRef.current = 0;
+
+      // Wait longer before fresh start
+      const freshStartDelay = 5000;
+
+      retryTimerRef.current = setTimeout(() => {
+        if (getChannelId() !== currentChannelIdRef.current) {
+          log('info', 'Channel changed during fresh start delay, aborting');
+          isRecoveringRef.current = false;
+          setRecoveryStatus(null);
+          return;
+        }
+
+        log('info', `Executing fresh start ${freshStartNum}`);
+        setRecoveryStatus(`Fresh restart (${freshStartNum}/${MAX_FRESH_STARTS})...`);
+
+        // Complete cleanup including refs
+        cleanupPlayer();
+        isInitializingRef.current = false;
+
+        // Reinitialize from scratch based on playback method
+        // DON'T clear isRecoveringRef here - let 'playing' event clear it when stream actually starts
+        // BUT set a safety timeout in case player never starts
+
+        // Clear any existing recovery timeout first
+        if (recoveryTimeoutRef.current) {
+          clearTimeout(recoveryTimeoutRef.current);
+        }
+
+        recoveryTimeoutRef.current = setTimeout(() => {
+          if (isRecoveringRef.current) {
+            console.log('[Recovery] Fresh start timeout - player did not start within 10s, triggering next attempt');
+            isRecoveringRef.current = false;
+            attemptRecovery('Fresh start timeout - player did not start');
+          }
+        }, 10000); // 10 second timeout
+
+        switch (playbackMethod) {
+          case 'mpegts-player':
+            initializeMpegtsPlayer();
+            break;
+          case 'hls-player':
+            initializeClapprPlayer();
+            break;
+          case 'vlc-link':
+            initializeVlcLink();
+            break;
+          case 'test-video':
+            initializeTestVideo();
+            break;
+          default:
+            log('error', 'Unknown playback method during fresh start', { method: playbackMethod });
+            clearTimeout(recoveryTimeoutRef.current);
+            recoveryTimeoutRef.current = null;
+            isRecoveringRef.current = false; // Clear on error
+        }
+      }, freshStartDelay);
+    } else {
+      // All recovery attempts exhausted
+      log('error', `Stream failed after ${MAX_RETRIES} retries and ${MAX_FRESH_STARTS} fresh starts`);
+      setError('Stream unavailable. Please try another channel or refresh the page.');
+      isRecoveringRef.current = false;
+    }
+  };
+
   // Start proactive health check to detect frozen video
   const startHealthCheck = () => {
     // Clear any existing health check
@@ -357,7 +617,13 @@ const IPTVPlayer = ({
       clearInterval(healthCheckIntervalRef.current);
     }
 
-    // Check every 5 seconds if video is progressing
+    // More aggressive health checks: 1 second in theatre mode, 2 seconds in single view
+    const checkInterval = theatreMode ? 1000 : 2000;
+    // Freeze threshold: trigger recovery immediately after 1 check detects no progress
+    // This means recovery triggers after 1-2 seconds in theatre mode, 2-4 seconds in single view
+    const freezeThreshold = checkInterval;
+
+    // Check periodically if video is progressing
     healthCheckIntervalRef.current = setInterval(() => {
       const videoEl = videoElementRef.current;
 
@@ -373,32 +639,9 @@ const IPTVPlayer = ({
       // For live streams, being in 'ended' state is a problem - trigger recovery
       if (videoEl.ended) {
         log('error', 'Video in ended state - live stream should never end');
-
-        const MAX_RETRIES = 3;
-        const retryCount = retryCountRef.current;
-
-        if (retryCount < MAX_RETRIES) {
-          retryCountRef.current++;
-          log('info', `Recovering from ended state (${retryCount + 1}/${MAX_RETRIES})...`);
-          setError(`Stream ended - reconnecting (${retryCount + 1}/${MAX_RETRIES})...`);
-
-          // Clear interval before cleanup
-          clearInterval(healthCheckIntervalRef.current);
-          healthCheckIntervalRef.current = null;
-
-          // Trigger recovery based on playback method
-          cleanupPlayer();
-          if (playbackMethod === 'mpegts-player') {
-            initializeMpegtsPlayer();
-          } else if (playbackMethod === 'hls-player') {
-            initializeClapprPlayer();
-          }
-        } else {
-          log('error', `Stream ended after ${MAX_RETRIES} recovery attempts`);
-          setError('Stream disconnected and cannot be recovered. Try another channel or refresh the page.');
-          clearInterval(healthCheckIntervalRef.current);
-          healthCheckIntervalRef.current = null;
-        }
+        clearInterval(healthCheckIntervalRef.current);
+        healthCheckIntervalRef.current = null;
+        attemptRecovery('Stream ended');
         return;
       }
 
@@ -413,47 +656,24 @@ const IPTVPlayer = ({
       const lastKnownTime = lastKnownCurrentTimeRef.current;
 
       // Check if video has progressed at all
-      if (currentTime === lastKnownTime && lastKnownTime > 0) {
-        // Video hasn't progressed - it's frozen
+      // CRITICAL FIX: Also check if we've been stuck at 0 for too long (stream never started)
+      if (currentTime === lastKnownTime) {
         const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
 
-        if (timeSinceLastPlaying > 10000) { // Frozen for more than 10 seconds
+        if (timeSinceLastPlaying > freezeThreshold) {
           log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`);
-
-          const MAX_RETRIES = 3;
-          const retryCount = retryCountRef.current;
-
-          if (retryCount < MAX_RETRIES) {
-            retryCountRef.current++;
-            log('info', `Recovering from freeze (${retryCount + 1}/${MAX_RETRIES})...`);
-            setError(`Stream frozen - recovering (${retryCount + 1}/${MAX_RETRIES})...`);
-
-            // Clear interval before cleanup
-            clearInterval(healthCheckIntervalRef.current);
-            healthCheckIntervalRef.current = null;
-
-            // Trigger recovery based on playback method
-            cleanupPlayer();
-            if (playbackMethod === 'mpegts-player') {
-              initializeMpegtsPlayer();
-            } else if (playbackMethod === 'hls-player') {
-              initializeClapprPlayer();
-            }
-          } else {
-            log('error', `Stream frozen after ${MAX_RETRIES} recovery attempts`);
-            setError('Stream is frozen and cannot be recovered. Try another channel or refresh the page.');
-            clearInterval(healthCheckIntervalRef.current);
-            healthCheckIntervalRef.current = null;
-          }
+          clearInterval(healthCheckIntervalRef.current);
+          healthCheckIntervalRef.current = null;
+          attemptRecovery('Stream frozen');
         }
       } else {
         // Video is progressing normally - update last known time
         lastKnownCurrentTimeRef.current = currentTime;
         lastPlayingTimeRef.current = Date.now();
       }
-    }, 5000); // Check every 5 seconds
+    }, checkInterval);
 
-    log('info', 'Health check started');
+    log('info', `Health check started (interval: ${checkInterval}ms, freeze threshold: ${freezeThreshold}ms)`);
   };
 
   // Initialize the appropriate player
@@ -471,7 +691,10 @@ const IPTVPlayer = ({
     log('info', 'Starting player initialization', { channelId: newChannelId });
 
     cleanupPlayer();
-    retryCountRef.current = 0; // Reset retry count when changing channels
+    // Reset all recovery counters when changing channels
+    retryCountRef.current = 0;
+    freshStartCountRef.current = 0;
+    lastErrorTimeRef.current = 0;
     currentChannelIdRef.current = newChannelId; // Track current channel
 
     if (!containerRef.current) {
@@ -596,8 +819,20 @@ const IPTVPlayer = ({
         log('info', 'Playback started');
         setLoading(false);
         setError(null);
-        retryCountRef.current = 0; // Reset retry count on successful playback
+        setRecoveryStatus(null); // Clear recovery status on initial playback
+
+        // Cancel recovery timeout if it exists
+        if (recoveryTimeoutRef.current) {
+          clearTimeout(recoveryTimeoutRef.current);
+          recoveryTimeoutRef.current = null;
+        }
+
+        // DON'T reset retry counters here - only reset after sustained playback
+        // The attemptRecovery function already handles this (resets after 30s of no errors)
+        // Resetting here causes infinite loops because stream might stall immediately after 'playing'
+
         lastPlayingTimeRef.current = Date.now();
+        isRecoveringRef.current = false; // Allow new recovery if needed
 
         // CRITICAL: Reset initialization lock when player successfully starts
         isInitializingRef.current = false;
@@ -640,6 +875,10 @@ const IPTVPlayer = ({
           clearTimeout(stallTimerRef.current);
         }
 
+        // Reduced stall timeout - rely more on health check for freeze detection
+        // This is just for initial buffering issues
+        const stallTimeout = theatreMode ? 8000 : 10000;
+
         // Set a timer to detect if we're stuck
         stallTimerRef.current = setTimeout(() => {
           // Don't recover if channel has changed
@@ -650,25 +889,11 @@ const IPTVPlayer = ({
 
           const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
 
-          if (timeSinceLastPlaying > 10000) { // Stalled for more than 10 seconds
-            log('error', `Clappr stalled for ${timeSinceLastPlaying}ms - attempting recovery`);
-
-            const MAX_RETRIES = 3;
-            const retryCount = retryCountRef.current;
-
-            if (retryCount < MAX_RETRIES) {
-              retryCountRef.current++;
-              log('info', `Recovering from stall (${retryCount + 1}/${MAX_RETRIES})...`);
-              setError(`Stream stalled - recovering (${retryCount + 1}/${MAX_RETRIES})...`);
-
-              cleanupPlayer();
-              initializeClapprPlayer();
-            } else {
-              log('error', `Stream stalled after ${MAX_RETRIES} recovery attempts`);
-              setError('Stream appears to be frozen. Try selecting another channel or refresh the page.');
-            }
+          if (timeSinceLastPlaying > 5000) { // Stalled for more than 5 seconds
+            log('error', `Clappr stalled for ${timeSinceLastPlaying}ms`);
+            attemptRecovery('Stream stalled');
           }
-        }, 12000); // Check after 12 seconds of waiting/stalling
+        }, stallTimeout);
       };
 
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_BUFFERING, () => handleClapprStall('buffering'));
@@ -681,46 +906,19 @@ const IPTVPlayer = ({
       });
 
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_ERROR, (error) => {
-        log('error', 'Player error', { error });
+        log('error', 'Clappr player error', { error });
         setLoading(false);
 
         // CRITICAL: Reset initialization lock on error
         isInitializingRef.current = false;
 
-        // Attempt auto-recovery with exponential backoff
-        const MAX_RETRIES = 3;
-        const retryCount = retryCountRef.current;
-        const errorChannelId = getChannelId();
-
         // Don't retry if channel has changed (e.g., during auto-test)
-        if (errorChannelId !== currentChannelIdRef.current) {
+        if (getChannelId() !== currentChannelIdRef.current) {
           log('info', 'Channel changed, skipping retry');
           return;
         }
 
-        if (retryCount < MAX_RETRIES) {
-          const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 8000); // Max 8 seconds
-          retryCountRef.current++;
-
-          log('info', `Stream error - attempting recovery (${retryCount + 1}/${MAX_RETRIES}) in ${retryDelay/1000}s...`);
-          setError(`Stream error - retrying (${retryCount + 1}/${MAX_RETRIES})...`);
-
-          retryTimerRef.current = setTimeout(() => {
-            // Double-check channel hasn't changed during the delay
-            if (getChannelId() !== currentChannelIdRef.current) {
-              log('info', 'Channel changed during retry delay, aborting');
-              return;
-            }
-            log('info', 'Retrying stream...');
-            cleanupPlayer();
-            initializeClapprPlayer();
-          }, retryDelay);
-          return;
-        }
-
-        // Max retries exceeded - show error
-        log('error', `Stream failed after ${MAX_RETRIES} retry attempts`);
-        setError('Error playing stream. Try another method.');
+        attemptRecovery('Player error');
       });
       
     } catch (e) {
@@ -792,6 +990,8 @@ const IPTVPlayer = ({
     if (selectedChannel?.sourceId) {
       baseTsUrl += `&source_id=${selectedChannel.sourceId}`;
     }
+    // Add cache buster to force fresh stream request on every retry
+    baseTsUrl += `&_t=${Date.now()}`;
     let proxyTsUrl = addAuthToStreamUrl(baseTsUrl);
 
     // Validate the URL before using it
@@ -813,7 +1013,7 @@ const IPTVPlayer = ({
       videoEl.style.width = '100%';
       videoEl.style.height = '100%';
       videoEl.controls = !theatreMode; // Hide controls in theatre mode
-      videoEl.muted = muted; // Set muted state
+      videoEl.muted = muted; // Use the prop value
       containerRef.current.appendChild(videoEl);
 
       // Store video element reference for health checks
@@ -847,55 +1047,26 @@ const IPTVPlayer = ({
           // CRITICAL: Reset initialization lock on error
           isInitializingRef.current = false;
 
-          // Attempt auto-recovery with exponential backoff
-          const MAX_RETRIES = 3;
-          const retryCount = retryCountRef.current;
-          const errorChannelId = getChannelId();
-
           // Don't retry if channel has changed (e.g., during auto-test)
-          if (errorChannelId !== currentChannelIdRef.current) {
+          if (getChannelId() !== currentChannelIdRef.current) {
             log('info', 'Channel changed, skipping retry');
             return;
           }
 
-          if (retryCount < MAX_RETRIES) {
-            const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 8000); // Max 8 seconds
-            retryCountRef.current++;
-
-            log('info', `Stream error - attempting recovery (${retryCount + 1}/${MAX_RETRIES}) in ${retryDelay/1000}s...`);
-            setError(`Stream error - retrying (${retryCount + 1}/${MAX_RETRIES})...`);
-
-            retryTimerRef.current = setTimeout(() => {
-              // Double-check channel hasn't changed during the delay
-              if (getChannelId() !== currentChannelIdRef.current) {
-                log('info', 'Channel changed during retry delay, aborting');
-                return;
-              }
-              log('info', 'Retrying stream...');
-              cleanupPlayer();
-              initializeMpegtsPlayer();
-            }, retryDelay);
-            return;
-          }
-
-          // Max retries exceeded - show error
-          log('error', `Stream failed after ${MAX_RETRIES} retry attempts`);
-
-          // Handle specific error types
+          // Determine error context for better logging
+          let errorContext = 'Stream error';
           if (errorType === window.mpegts.ErrorTypes.NETWORK_ERROR) {
             if (errorDetail === window.mpegts.ErrorDetails.NETWORK_STATUS_CODE_INVALID) {
-              // HTTP error (like 404)
               const statusCode = errorInfo?.code || 'unknown';
-              const message = errorInfo?.msg || 'Unknown error';
-              setError(`Channel not found or unavailable (HTTP ${statusCode}: ${message}). Try selecting a different channel or checking your IPTV source.`);
+              errorContext = `Network error (HTTP ${statusCode})`;
             } else {
-              setError(`Network error loading stream: ${errorDetail}. Check your connection and try again.`);
+              errorContext = `Network error (${errorDetail})`;
             }
           } else if (errorType === window.mpegts.ErrorTypes.MEDIA_ERROR) {
-            setError(`Media error: The stream format is not supported or the stream is corrupted. Try another channel.`);
-          } else {
-            setError(`Stream playback error. Try another channel or player method.`);
+            errorContext = `Media error (${errorDetail})`;
           }
+
+          attemptRecovery(errorContext);
         });
 
         player.load();
@@ -917,9 +1088,21 @@ const IPTVPlayer = ({
           log('info', 'Video playing');
           setLoading(false);
           setError(null);
-          retryCountRef.current = 0; // Reset retry count on successful playback
+          setRecoveryStatus(null); // Clear recovery status on initial playback
+
+          // Cancel recovery timeout if it exists
+          if (recoveryTimeoutRef.current) {
+            clearTimeout(recoveryTimeoutRef.current);
+            recoveryTimeoutRef.current = null;
+          }
+
+          // DON'T reset retry counters here - only reset after sustained playback
+          // The attemptRecovery function already handles this (resets after 30s of no errors)
+          // Resetting here causes infinite loops because stream might stall immediately after 'playing'
+
           lastPlayingTimeRef.current = Date.now();
           lastKnownCurrentTimeRef.current = videoEl.currentTime;
+          isRecoveringRef.current = false; // Allow new recovery if needed
 
           // CRITICAL: Reset initialization lock when player successfully starts
           isInitializingRef.current = false;
@@ -956,12 +1139,15 @@ const IPTVPlayer = ({
         // Stall detection - when video stops buffering/loading
         const handleStall = (eventType) => {
           log('warn', `Video ${eventType} - checking for stall`);
-          const stallChannelId = getChannelId();
 
           // Clear any existing stall timer
           if (stallTimerRef.current) {
             clearTimeout(stallTimerRef.current);
           }
+
+          // Reduced stall timeout - rely more on health check for freeze detection
+          // This is just for initial buffering issues
+          const stallTimeout = theatreMode ? 8000 : 10000;
 
           // Set a timer to detect if we're stuck
           stallTimerRef.current = setTimeout(() => {
@@ -973,25 +1159,11 @@ const IPTVPlayer = ({
 
             const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
 
-            if (timeSinceLastPlaying > 10000) { // Stalled for more than 10 seconds
-              log('error', `Video stalled for ${timeSinceLastPlaying}ms - attempting recovery`);
-
-              const MAX_RETRIES = 3;
-              const retryCount = retryCountRef.current;
-
-              if (retryCount < MAX_RETRIES) {
-                retryCountRef.current++;
-                log('info', `Recovering from stall (${retryCount + 1}/${MAX_RETRIES})...`);
-                setError(`Stream stalled - recovering (${retryCount + 1}/${MAX_RETRIES})...`);
-
-                cleanupPlayer();
-                initializeMpegtsPlayer();
-              } else {
-                log('error', `Stream stalled after ${MAX_RETRIES} recovery attempts`);
-                setError('Stream appears to be frozen. Try selecting another channel or refresh the page.');
-              }
+            if (timeSinceLastPlaying > 5000) { // Stalled for more than 5 seconds
+              log('error', `Video stalled for ${timeSinceLastPlaying}ms`);
+              attemptRecovery('Stream stalled');
             }
-          }, 12000); // Check after 12 seconds of waiting/stalling
+          }, stallTimeout);
         };
 
         videoEl.addEventListener('waiting', () => handleStall('waiting'));
@@ -999,14 +1171,21 @@ const IPTVPlayer = ({
 
         videoEl.addEventListener('error', () => {
           log('error', 'Video error', { error: videoEl.error });
-          setError('Error playing video. Try another method or channel.');
           setLoading(false);
           isInitializingRef.current = false;
+
+          // Don't recover if channel has changed
+          if (getChannelId() !== currentChannelIdRef.current) {
+            log('info', 'Channel changed, skipping recovery on video error');
+            return;
+          }
+
+          attemptRecovery('Video element error');
         });
 
         // Handle unexpected stream end for live streams
         videoEl.addEventListener('ended', () => {
-          log('warn', 'Live stream ended unexpectedly - attempting recovery');
+          log('warn', 'Live stream ended unexpectedly');
 
           // Don't recover if channel has changed
           if (getChannelId() !== currentChannelIdRef.current) {
@@ -1014,27 +1193,7 @@ const IPTVPlayer = ({
             return;
           }
 
-          const MAX_RETRIES = 3;
-          const retryCount = retryCountRef.current;
-
-          if (retryCount < MAX_RETRIES) {
-            retryCountRef.current++;
-            log('info', `Recovering from stream end (${retryCount + 1}/${MAX_RETRIES})...`);
-            setError(`Stream ended - reconnecting (${retryCount + 1}/${MAX_RETRIES})...`);
-
-            // Wait a moment before retrying
-            setTimeout(() => {
-              if (getChannelId() !== currentChannelIdRef.current) {
-                log('info', 'Channel changed during retry delay, aborting');
-                return;
-              }
-              cleanupPlayer();
-              initializeMpegtsPlayer();
-            }, 2000);
-          } else {
-            log('error', `Stream ended after ${MAX_RETRIES} recovery attempts`);
-            setError('Stream disconnected and cannot be recovered. Try another channel or refresh the page.');
-          }
+          attemptRecovery('Stream ended');
         });
 
         player.play().catch(e => {
@@ -1532,39 +1691,40 @@ const formatTime = (date) => {
         </div>
       )}
       
-      {/* Error message */}
-      {error && (
+      {/* Recovery status banner - thin bar at bottom of video */}
+      {recoveryStatus && (
         <div style={{
           position: 'absolute',
-          top: '50px',
-          left: '10px',
-          right: showDebug ? '270px' : '10px',
-          padding: '10px 15px',
-          backgroundColor: 'rgba(220, 53, 69, 0.85)',
+          bottom: '0',
+          left: '0',
+          right: '0',
+          padding: '6px 12px',
+          backgroundColor: 'rgba(59, 130, 246, 0.95)', // Blue
           color: 'white',
-          borderRadius: '8px',
-          zIndex: 40,
+          zIndex: 45,
           display: 'flex',
           alignItems: 'center',
-          gap: '10px',
-          backdropFilter: 'blur(5px)'
+          justifyContent: 'center',
+          gap: '8px',
+          backdropFilter: 'blur(5px)',
+          borderTop: '1px solid rgba(96, 165, 250, 0.3)',
+          fontSize: '13px',
+          fontWeight: '500'
         }}>
-          <svg 
-            xmlns="http://www.w3.org/2000/svg" 
-            width="18" 
-            height="18" 
-            viewBox="0 0 24 24" 
-            fill="none" 
-            stroke="currentColor" 
-            strokeWidth="2" 
-            strokeLinecap="round" 
-            strokeLinejoin="round"
+          <svg
+            className="animate-spin"
+            style={{
+              animation: 'spin 1s linear infinite',
+              width: '14px',
+              height: '14px'
+            }}
+            fill="none"
+            viewBox="0 0 24 24"
           >
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="12" y1="8" x2="12" y2="12"></line>
-            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
-          <span>{error}</span>
+          <span>{recoveryStatus}</span>
         </div>
       )}
       
@@ -1637,7 +1797,7 @@ const formatTime = (date) => {
         }}
       />
 
-      {/* Error notification overlay */}
+      {/* Error notification overlay - Only show for permanent errors */}
       {error && (
         <div style={{
           position: 'absolute',

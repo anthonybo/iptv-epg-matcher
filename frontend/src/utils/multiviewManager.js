@@ -7,6 +7,44 @@ const getAuthToken = () => {
 };
 
 /**
+ * Update muted state for a stream
+ * @param {string} channelId - Channel ID
+ * @param {string} sourceId - Source ID
+ * @param {boolean} muted - Muted state
+ * @returns {Promise<boolean>} Success status
+ */
+export const updateMutedState = async (channelId, sourceId, muted) => {
+  try {
+    const token = getAuthToken();
+    if (!token) {
+      console.error('No auth token found for updating muted state');
+      return false;
+    }
+
+    const response = await fetch(`/api/multiview/${encodeURIComponent(channelId)}/${encodeURIComponent(sourceId)}/mute`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ muted })
+    });
+
+    const data = await response.json();
+    if (data.success) {
+      console.log(`[MultiView] Updated muted state for ${channelId}: ${muted}`);
+      return true;
+    }
+
+    console.error('Failed to update muted state:', data.error);
+    return false;
+  } catch (error) {
+    console.error('Error updating muted state:', error);
+    return false;
+  }
+};
+
+/**
  * Get all multiview streams from API
  * @returns {Promise<Array>} Array of stream objects
  */
