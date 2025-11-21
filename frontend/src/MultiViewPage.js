@@ -102,9 +102,23 @@ const MultiViewPage = ({ sessionId }) => {
       try {
         const loaded = await getMultiviewStreams();
         if (!ignore) {
-          setStreams(loaded);
-          const streamKeys = loaded.map(s => `${s.sourceId}_${s.id}`);
-          setMutedStreams(new Set(streamKeys));
+          // Only add new streams, don't replace existing ones
+          setStreams(prevStreams => {
+            const prevKeys = new Set(prevStreams.map(s => `${s.sourceId}_${s.id}`));
+            const newStreams = loaded.filter(s => !prevKeys.has(`${s.sourceId}_${s.id}`));
+
+            if (newStreams.length > 0) {
+              // Mute newly added streams
+              setMutedStreams(prev => {
+                const updated = new Set(prev);
+                newStreams.forEach(s => updated.add(`${s.sourceId}_${s.id}`));
+                return updated;
+              });
+              return [...prevStreams, ...newStreams];
+            }
+
+            return prevStreams;
+          });
         }
       } catch (error) {
         if (!ignore) {
