@@ -129,8 +129,25 @@ const MultiViewPage = ({ sessionId }) => {
       try {
         const loaded = await getMultiviewStreams();
         if (!ignore) {
-          // Only add new streams, don't replace existing ones
           setStreams(prevStreams => {
+            // If database has fewer streams than UI, something was deleted - sync with database
+            if (loaded.length < prevStreams.length) {
+              console.log('[MultiView] Streams were deleted, syncing with database');
+
+              // Rebuild muted streams Set from database
+              const mutedSet = new Set();
+              loaded.forEach(stream => {
+                const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
+                if (stream.muted !== false) {
+                  mutedSet.add(streamKey);
+                }
+              });
+              setMutedStreams(mutedSet);
+
+              return loaded;
+            }
+
+            // Otherwise, only add new streams (don't replace existing ones)
             const prevKeys = new Set(prevStreams.map(s => `${s.sourceId}_${s.id}`));
             const newStreams = loaded.filter(s => !prevKeys.has(`${s.sourceId}_${s.id}`));
 
@@ -477,6 +494,63 @@ const MultiViewPage = ({ sessionId }) => {
     }
   };
 
+  const handleRandomSportsChannel = async () => {
+    console.log('[Random Sports Channel] Button clicked!');
+    setSearchingStream(true);
+    setShowSportDropdown(false);
+
+    try {
+      // Get current source IDs to exclude (avoid duplicates)
+      const currentSourceIds = streams
+        .map(s => s.sourceId)
+        .filter(id => id);
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        console.error('[Random Sports Channel] No authentication token found');
+        showToast('Authentication required', 'error');
+        setSearchingStream(false);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/random-sports-channel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          excludeSourceIds: currentSourceIds
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        console.log('[Random Sports Channel] Found channel:', data.channel);
+
+        // Add to multiview
+        const success = await addToMultiview(data.channel);
+
+        if (success) {
+          showToast(`Added ${data.channel.name}`, 'success');
+          // Trigger update event for this tab
+          window.dispatchEvent(new Event('multiviewUpdate'));
+        } else {
+          showToast('Failed to add channel to multiview', 'error');
+        }
+      } else {
+        showToast(data.error || 'No sports channels found', 'error');
+      }
+    } catch (error) {
+      console.error('[Random Sports Channel] Error:', error);
+      showToast('Failed to find random sports channel', 'error');
+    } finally {
+      setSearchingStream(false);
+    }
+  };
+
   const handleSportSelect = async (sportType, leagueName) => {
     setSearchingStream(true);
     setShowSportDropdown(false);
@@ -634,6 +708,18 @@ const MultiViewPage = ({ sessionId }) => {
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                      </svg>
+                    </button>
+
+                    {/* Random Sports Channel (General) Icon */}
+                    <button
+                      onClick={handleRandomSportsChannel}
+                      className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-orange-600 bg-orange-900/30 text-orange-300 hover:bg-orange-900/50 transition"
+                      title="Random Sports Channel"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
                     </button>
 
