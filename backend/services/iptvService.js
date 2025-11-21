@@ -26,12 +26,13 @@ async function processM3UForSession(sessionId, m3uData, options = {}) {
         await iptvDbService.connect();
         
         // Save source to database
-        const sourceId = await iptvDbService.saveSource(sourceInfo);
+        const savedSource = await iptvDbService.saveSource(sourceInfo);
+        const sourceId = savedSource.id || savedSource;
         logger.info(`Saved M3U source to database with ID ${sourceId}`);
-        
+
         // Generate categories from channels
         const categories = generateCategoriesFromChannels(channels);
-        
+
         // Save categories to database
         await iptvDbService.saveCategories(sourceId, categories.map(cat => ({
             id: cat.id || cat.name,
@@ -76,9 +77,10 @@ async function processXtreamForSession(sessionId, xtreamData, options = {}) {
         await iptvDbService.connect();
         
         // Save source to database
-        const sourceId = await iptvDbService.saveSource(sourceInfo);
+        const savedSource = await iptvDbService.saveSource(sourceInfo);
+        const sourceId = savedSource.id || savedSource;
         logger.info(`Saved Xtream source to database with ID ${sourceId}`);
-        
+
         // Fetch channels from API
         const { channels, categories } = await fetchXtreamData(xtreamData);
         

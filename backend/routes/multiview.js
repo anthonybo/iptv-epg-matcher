@@ -78,6 +78,32 @@ router.post('/', async (req, res) => {
 
     const postgresService = require('../services/postgresService');
 
+    // If source metadata is missing, look it up from the iptv_sources table
+    let sourceType = channel.sourceType || channel.source_type;
+    let sourceUrl = channel.sourceUrl || channel.source_url;
+    let sourceUsername = channel.sourceUsername || channel.source_username;
+    let sourcePassword = channel.sourcePassword || channel.source_password;
+    let sourceMac = channel.sourceMac || channel.source_mac;
+    let sourceName = channel.sourceName || channel.source_name;
+
+    if (!sourceType && (channel.sourceId || channel.source_id)) {
+      // Look up source metadata from iptv_sources table
+      const sourceResult = await postgresService.query(
+        'SELECT type, url, username, password, mac_address, name FROM iptv_sources WHERE id = $1',
+        [channel.sourceId || channel.source_id]
+      );
+
+      if (sourceResult.rows.length > 0) {
+        const source = sourceResult.rows[0];
+        sourceType = source.type;
+        sourceUrl = source.url;
+        sourceUsername = source.username;
+        sourcePassword = source.password;
+        sourceMac = source.mac_address;
+        sourceName = source.name;
+      }
+    }
+
     // Insert or ignore if already exists
     await postgresService.query(
       `INSERT INTO multiview_streams (
@@ -93,12 +119,12 @@ router.post('/', async (req, res) => {
         channel.logo || null,
         channel.url,
         channel.sourceId || channel.source_id,
-        channel.sourceType || channel.source_type,
-        channel.sourceUrl || channel.source_url || null,
-        channel.sourceUsername || channel.source_username || null,
-        channel.sourcePassword || channel.source_password || null,
-        channel.sourceMac || channel.source_mac || null,
-        channel.sourceName || channel.source_name || null,
+        sourceType,
+        sourceUrl || null,
+        sourceUsername || null,
+        sourcePassword || null,
+        sourceMac || null,
+        sourceName || null,
         channel.espnEventId || null,
         channel.espnEventName || null
       ]

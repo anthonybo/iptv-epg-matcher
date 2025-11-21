@@ -269,8 +269,8 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
             logger.warn(`Source ${sourceId} not found in database`);
         }
 
-        await iptvDatabaseService.deleteUserSource(userId, sourceId);
-        logger.info(`Deleted user preference for user ${userId}, source ${sourceId}`);
+        await iptvDatabaseService.deleteSource(sourceId, userId);
+        logger.info(`Deleted source ${sourceId} for user ${userId}`);
 
         res.json({
             success: true,

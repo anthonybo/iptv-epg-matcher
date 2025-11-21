@@ -46,7 +46,7 @@ async function saveChannelsToDatabase(sessionId, channels, sourceInfo, userId = 
 
     // Create or update source
     const { url, username, password, type = 'm3u', name, nickname, mac_address } = sourceInfo;
-    const sourceId = await iptvDatabaseService.saveSource({
+    const savedSource = await iptvDatabaseService.saveSource({
       user_id: userId,
       name: name || `Source for ${sessionId}`,
       url: url || sessionId,
@@ -56,17 +56,25 @@ async function saveChannelsToDatabase(sessionId, channels, sourceInfo, userId = 
       type
     });
 
+    const sourceId = savedSource.id || savedSource; // Handle both object and ID return types
     logger.info(`Source saved with ID: ${sourceId}`);
 
-    // Transform channels to match database format
+    // Transform channels to match database format with source metadata
     const dbChannels = channels.map(ch => ({
       id: ch.tvgId || ch.id || ch.name,
       name: ch.name,
       logo: ch.tvgLogo || ch.logo || '',
       url: ch.url,
-      group: { title: ch.groupTitle || ch.group?.title || '' },
-      tvg: { id: ch.tvgId || '' },
-      categories: ch.categories || []
+      group_title: ch.groupTitle || ch.group?.title || ch.group_title || '',
+      tvg_id: ch.epgChannelId || ch.tvgId || '',
+      tvg_name: ch.name,
+      categories: ch.categories || [],
+      // Add source metadata for multiview
+      source_type: type,
+      source_url: url || sessionId,
+      source_username: username || null,
+      source_password: password || null,
+      source_mac: mac_address || null
     }));
 
     // Save channels in batches

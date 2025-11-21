@@ -397,18 +397,26 @@ async function processChannels(sessionId, channels, userId = null, options = {})
       }
 
       // Save source
-      const sourceId = await iptvDatabaseService.saveSource(sourceInfo);
-      logger.info(`Source saved with ID: ${sourceId}`);
+      const savedSource = await iptvDatabaseService.saveSource(sourceInfo);
+      const sourceId = savedSource.id || savedSource; // Handle both object and ID return types
+      logger.info(`Source saved with ID: ${sourceId}`, { savedSource });
 
-      // Transform and save channels
+      // Transform and save channels with source metadata
       const dbChannels = channels.map(ch => ({
         id: ch.tvgId || ch.id || ch.name,
         name: ch.name,
         logo: ch.tvgLogo || ch.logo || '',
         url: ch.url,
-        group: { title: ch.groupTitle || ch.group?.title || '' },
-        tvg: { id: ch.tvgId || '' },
-        categories: ch.categories || []
+        group_title: ch.groupTitle || ch.group?.title || ch.group_title || '',
+        tvg_id: ch.epgChannelId || ch.tvgId || '',
+        tvg_name: ch.name,
+        categories: ch.categories || [],
+        // Add source metadata for multiview
+        source_type: sourceInfo.type,
+        source_url: sourceInfo.url,
+        source_username: sourceInfo.username || null,
+        source_password: sourceInfo.password || null,
+        source_mac: sourceInfo.mac_address || null
       }));
 
       await iptvDatabaseService.saveChannels(sourceId, dbChannels);

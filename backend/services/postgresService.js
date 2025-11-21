@@ -159,10 +159,13 @@ async function updateLastLogin(userId) {
 // ============================================================================
 
 async function saveSource(sourceData) {
+    // Remove id if present - we use database-generated IDs only
+    const { id, ...cleanSourceData } = sourceData;
+
     const {
         user_id, session_id, name, type, url, username, password, mac_address,
         exp_date, max_connections, active_connections, account_status, is_trial, account_created_at
-    } = sourceData;
+    } = cleanSourceData;
 
     // Check for existing source
     let checkQuery;
@@ -293,16 +296,21 @@ async function saveChannels(channels, sourceId) {
             const offset = idx * 14;
             values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14})`);
 
+            // Handle both camelCase (from parsers) and snake_case (from transforms)
+            const groupTitle = channel.groupTitle || channel.group_title || '';
+            const tvgId = channel.tvgId || channel.tvg_id || '';
+            const tvgName = channel.tvgName || channel.tvg_name || channel.name || '';
+
             params.push(
                 channel.id,
                 sourceId,
                 channel.name,
                 channel.url,
                 channel.logo,
-                channel.category || channel.group_title,
-                channel.tvg_id,
-                channel.tvg_name,
-                channel.group_title,
+                channel.category || groupTitle,
+                tvgId,
+                tvgName,
+                groupTitle,
                 channel.source_type,
                 channel.source_username,
                 channel.source_password,
