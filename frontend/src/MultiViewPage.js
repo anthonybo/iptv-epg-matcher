@@ -44,13 +44,27 @@ const MultiViewPage = ({ sessionId }) => {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [autoFillSettings, setAutoFillSettings] = useState(() => {
     const saved = localStorage.getItem('multiview_autofill_settings');
-    return saved ? JSON.parse(saved) : {
+    const defaults = {
       maxSlots: 4,
       avoidDuplicateSources: true,
-      avoidDuplicateEvents: true
+      avoidDuplicateEvents: true,
+      minQuality: 0  // 0 = any, 480, 720, 1080
     };
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      return { ...defaults, ...parsed };
+    }
+    return defaults;
   });
   const [autoFillProgress, setAutoFillProgress] = useState(null);
+
+  // Search state
+  const [showSearchInput, setShowSearchInput] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+
+  // Find alternative stream state
+  const [findingAlternativeFor, setFindingAlternativeFor] = useState(null); // streamKey of stream being replaced
 
   // Load blacklist from API on mount
   useEffect(() => {
@@ -701,7 +715,8 @@ const MultiViewPage = ({ sessionId }) => {
           maxStreams: slotsToFill,
           excludeSourceIds: currentSourceIds,
           excludeEventIds: currentEventIds,
-          excludeChannelIds: currentChannelIds
+          excludeChannelIds: currentChannelIds,
+          minQuality: autoFillSettings.minQuality
         })
       });
 
@@ -736,6 +751,164 @@ const MultiViewPage = ({ sessionId }) => {
     }
   };
 
+  // Search channel handler
+  const handleSearchChannel = async (e) => {
+    e.preventDefault();
+
+    if (!searchQuery.trim() || searchQuery.trim().length < 2) {
+      showToast('Enter at least 2 characters to search', 'error');
+      return;
+    }
+
+    setIsSearching(true);
+
+    try {
+      // Get current source IDs and channel IDs to exclude
+      const currentSourceIds = autoFillSettings.avoidDuplicateSources
+        ? streams.map(s => s.sourceId).filter(id => id)
+        : [];
+      const currentChannelIds = streams.map(s => s.id).filter(id => id);
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        showToast('Authentication required', 'error');
+        setIsSearching(false);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/search-channel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          query: searchQuery.trim(),
+          excludeSourceIds: currentSourceIds,
+          excludeChannelIds: currentChannelIds,
+          minQuality: autoFillSettings.minQuality
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        // Add the channel to multiview
+        const success = await addToMultiview(data.channel);
+
+        if (success) {
+          window.dispatchEvent(new Event('multiviewUpdate'));
+          showToast(`Added "${data.channel.name}" to Multi-View`, 'success');
+          setSearchQuery('');
+          setShowSearchInput(false);
+        } else {
+          showToast('Failed to add channel to Multi-View', 'error');
+        }
+      } else {
+        showToast(data.message || 'No working channel found', 'error');
+      }
+    } catch (error) {
+      console.error('[Search] Error:', error);
+      showToast('Search failed', 'error');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Find alternative stream handler - replaces current stream with another one
+  const handleFindAlternative = async (stream) => {
+    const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
+    setFindingAlternativeFor(streamKey);
+
+    try {
+      // Build list of sources to exclude
+      let excludeSourceIds = [];
+
+      // Always exclude the current stream's source (we want a DIFFERENT provider)
+      if (stream.sourceId) {
+        excludeSourceIds.push(stream.sourceId);
+      }
+
+      // If "Avoid Duplicate Sources" is enabled, also exclude sources from other streams in multiview
+      if (autoFillSettings.avoidDuplicateSources) {
+        const otherSourceIds = streams
+          .filter(s => s.id !== stream.id || s.sourceId !== stream.sourceId)
+          .map(s => s.sourceId)
+          .filter(id => id && !excludeSourceIds.includes(id));
+        excludeSourceIds = [...excludeSourceIds, ...otherSourceIds];
+      }
+
+      // Only exclude the current channel ID (not other channels - we want similar channels)
+      const excludeChannelIds = stream.id ? [stream.id] : [];
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        showToast('Authentication required', 'error');
+        setFindingAlternativeFor(null);
+        return;
+      }
+
+      // Extract a cleaner search term from the channel name
+      // Remove common prefixes and suffixes to get the core channel name
+      let searchName = stream.name
+        .replace(/^[A-Z]{2,}\s*[\|:]\s*/gi, '')  // Remove prefixes like "SLING| ", "USA| ", "NHL: "
+        .replace(/^[A-Z]{2,}\s+TEAM\s*[\|:]?\s*/gi, '')  // Remove "NHL TEAM| " style prefixes
+        .replace(/\s*(ᴿᴬᵂ|ᴴᴰ|ᶠᴴᴰ|HD|FHD|SD|4K|UHD)\s*/gi, '')  // Remove quality markers
+        .replace(/\s*ALTERNATE\s*/gi, '')  // Remove "ALTERNATE"
+        .replace(/\s*\(.*?\)\s*/g, '')  // Remove parenthetical content
+        .replace(/\s+/g, ' ')  // Normalize spaces
+        .trim();
+
+      // If the name is too short after cleaning, use original
+      if (searchName.length < 3) {
+        searchName = stream.name;
+      }
+
+      console.log(`[Find Alternative] Original name: "${stream.name}", Search query: "${searchName}"`);
+
+      const response = await fetch('/api/live-events/search-channel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          query: searchName,
+          excludeSourceIds: excludeSourceIds,
+          excludeChannelIds: excludeChannelIds,
+          minQuality: autoFillSettings.minQuality
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        // First remove the old stream
+        await removeFromMultiview(stream.id, stream.sourceId);
+
+        // Then add the new channel
+        const success = await addToMultiview(data.channel);
+
+        if (success) {
+          window.dispatchEvent(new Event('multiviewUpdate'));
+          const qualityText = data.channel.quality ? ` (${data.channel.quality}p)` : '';
+          showToast(`Replaced with "${data.channel.name}"${qualityText}`, 'success');
+        } else {
+          showToast('Failed to add replacement channel', 'error');
+        }
+      } else {
+        showToast(data.message || 'No alternative channel found', 'error');
+      }
+    } catch (error) {
+      console.error('[Find Alternative] Error:', error);
+      showToast('Failed to find alternative', 'error');
+    } finally {
+      setFindingAlternativeFor(null);
+    }
+  };
+
   // Debug: Log when liveSports changes
   useEffect(() => {
     console.log('[Random Stream] liveSports state changed:', liveSports, 'count:', liveSports.length);
@@ -757,6 +930,74 @@ const MultiViewPage = ({ sessionId }) => {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
+              {/* Quick Search */}
+              <div className="flex items-center gap-2">
+                {showSearchInput ? (
+                  <form onSubmit={handleSearchChannel} className="flex items-center gap-2">
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search channel..."
+                        autoFocus
+                        disabled={isSearching}
+                        className="w-48 px-3 py-1.5 pl-8 text-xs rounded-lg border border-indigo-600 bg-slate-800/80 text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50"
+                      />
+                      <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={isSearching || !searchQuery.trim()}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition ${
+                        isSearching
+                          ? 'border-slate-600 bg-slate-800/50 text-slate-500 cursor-not-allowed'
+                          : 'border-indigo-600 bg-indigo-900/40 text-indigo-300 hover:bg-indigo-900/60'
+                      }`}
+                    >
+                      {isSearching ? (
+                        <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                      ) : (
+                        'Find'
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSearchInput(false);
+                        setSearchQuery('');
+                      }}
+                      className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-slate-600 bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300 transition"
+                      title="Close search"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </form>
+                ) : (
+                  <button
+                    onClick={() => setShowSearchInput(true)}
+                    disabled={searchingStream || isSearching}
+                    className={`inline-flex items-center justify-center w-8 h-8 rounded-lg border transition ${
+                      searchingStream || isSearching
+                        ? 'border-slate-600 bg-slate-800/50 text-slate-500 cursor-not-allowed'
+                        : 'border-indigo-600 bg-indigo-900/20 text-indigo-300 hover:bg-indigo-900/40'
+                    }`}
+                    title="Search for a channel"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+
               {/* Auto-fill progress indicator */}
               {autoFillProgress && (
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-900/30 border border-emerald-700 text-emerald-300 text-xs">
@@ -1055,6 +1296,28 @@ const MultiViewPage = ({ sessionId }) => {
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                             </svg>
                           </button>
+                          {/* Find Alternative Button */}
+                          <button
+                            onClick={() => handleFindAlternative(stream)}
+                            disabled={findingAlternativeFor === streamKey}
+                            className={`p-0.5 rounded transition-colors ${
+                              findingAlternativeFor === streamKey
+                                ? 'text-cyan-400 animate-pulse'
+                                : 'hover:bg-cyan-500/20 text-slate-400 hover:text-cyan-400'
+                            }`}
+                            title="Find another stream (if blacked out)"
+                          >
+                            {findingAlternativeFor === streamKey ? (
+                              <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                            ) : (
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                              </svg>
+                            )}
+                          </button>
                           {/* Blacklist Button */}
                           <button
                             onClick={() => handleBlacklistChannel(stream.name)}
@@ -1302,6 +1565,39 @@ const MultiViewPage = ({ sessionId }) => {
                     }`}
                   />
                 </button>
+              </div>
+
+              {/* Minimum Quality Setting */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Minimum Stream Quality
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {[
+                    { value: 0, label: 'Any' },
+                    { value: 480, label: '480p' },
+                    { value: 720, label: '720p' },
+                    { value: 1080, label: '1080p' }
+                  ].map((quality) => (
+                    <button
+                      key={quality.value}
+                      onClick={() => setAutoFillSettings(prev => ({ ...prev, minQuality: quality.value }))}
+                      className={`px-3 py-2 rounded-lg text-sm font-semibold transition ${
+                        autoFillSettings.minQuality === quality.value
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
+                      }`}
+                    >
+                      {quality.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  {autoFillSettings.minQuality === 0
+                    ? 'Accept any stream quality'
+                    : `Only accept streams ${autoFillSettings.minQuality}p or higher`
+                  }
+                </p>
               </div>
 
               {/* Current Status */}

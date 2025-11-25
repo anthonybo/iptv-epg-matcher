@@ -939,6 +939,250 @@ router.post('/random-any-channel', async (req, res) => {
 });
 
 /**
+ * POST /api/live-events/search-channel
+ * Search for a channel by name and return a working stream
+ * Avoids sources already in use in multiview
+ */
+router.post('/search-channel', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { query, excludeSourceIds = [], excludeChannelIds = [], minQuality = 0 } = req.body;
+
+    if (!query || typeof query !== 'string' || query.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'Search query must be at least 2 characters'
+      });
+    }
+
+    const searchQuery = query.trim();
+    const minHeight = parseInt(minQuality) || 0;
+    const postgresService = require('../services/postgresService');
+
+    // Fetch blacklisted channels
+    const blacklistResult = await postgresService.query(
+      'SELECT channel_name FROM blacklisted_channels WHERE user_id = $1',
+      [userId]
+    );
+    const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
+
+    logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
+
+    // Build query params
+    let queryParams = [userId, `%${searchQuery}%`];
+
+    // Build source exclusion clause
+    let sourceExclusion = '';
+    if (excludeSourceIds.length > 0) {
+      const sourceParamIndex = queryParams.length + 1;
+      const sourcePlaceholders = excludeSourceIds.map((_, i) => `$${sourceParamIndex + i}`).join(', ');
+      sourceExclusion = `AND s.id NOT IN (${sourcePlaceholders})`;
+      queryParams.push(...excludeSourceIds);
+    }
+
+    // Build channel exclusion clause
+    let channelExclusion = '';
+    if (excludeChannelIds.length > 0) {
+      const channelParamIndex = queryParams.length + 1;
+      const channelPlaceholders = excludeChannelIds.map((_, i) => `$${channelParamIndex + i}`).join(', ');
+      channelExclusion = `AND c.channel_id NOT IN (${channelPlaceholders})`;
+      queryParams.push(...excludeChannelIds);
+    }
+
+    // Build blacklist conditions
+    let blacklistConditions = '1=1';
+    if (blacklistedChannels.length > 0) {
+      const startParamIndex = queryParams.length + 1;
+      const blacklistPlaceholders = blacklistedChannels.map((name, i) => {
+        return `c.name != $${startParamIndex + i}`;
+      });
+      queryParams.push(...blacklistedChannels);
+      blacklistConditions = blacklistPlaceholders.join(' AND ');
+    }
+
+    // Search for matching channels - prioritize exact matches, then partial matches
+    const channelsResult = await postgresService.query(`
+      SELECT
+        c.channel_id as id,
+        c.name,
+        c.logo_url as logo,
+        c.stream_url as url,
+        c.tvg_id as epg_channel_id,
+        c.group_title as category,
+        s.id as source_id,
+        s.name as source_name,
+        s.type as source_type,
+        s.url as source_url,
+        s.username as source_username,
+        s.password as source_password,
+        s.mac_address as source_mac,
+        CASE
+          WHEN LOWER(c.name) = LOWER($2) THEN 1
+          WHEN LOWER(c.name) LIKE LOWER($2) THEN 2
+          ELSE 3
+        END as match_priority
+      FROM iptv_channels c
+      JOIN iptv_sources s ON c.source_id = s.id
+      WHERE s.user_id = $1
+        AND c.name ILIKE $2
+        ${sourceExclusion}
+        ${channelExclusion}
+        AND ${blacklistConditions}
+      ORDER BY match_priority, c.name
+      LIMIT 20
+    `, queryParams);
+
+    let channels = channelsResult.rows || [];
+
+    if (channels.length === 0) {
+      return res.json({
+        success: false,
+        error: 'No channels found',
+        message: `No channels found matching "${searchQuery}"`
+      });
+    }
+
+    logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams...`);
+
+    // Test streams using ffprobe validation
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+    const axios = require('axios');
+
+    for (const channel of channels) {
+      try {
+        logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+
+        let testUrl = channel.url;
+
+        // Build proper URL for XTREAM sources
+        if (channel.source_type === 'xtream' && channel.source_url && channel.source_username && channel.source_password) {
+          const baseUrl = channel.source_url.replace(/\/$/, '');
+          const streamId = channel.url.split('/').pop();
+          testUrl = `${baseUrl}/live/${channel.source_username}/${channel.source_password}/${streamId}`;
+        }
+
+        // Handle Stalker portals
+        if (channel.source_type === 'stalker' && testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
+          try {
+            const createLinkResponse = await axios.get(testUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+                'X-User-Agent': 'Model: MAG250; Link: WiFi',
+                'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
+              },
+              timeout: 10000
+            });
+
+            const linkData = createLinkResponse.data;
+            if (linkData?.js?.cmd) {
+              const freshCmd = linkData.js.cmd;
+              const match = freshCmd.match(/ffmpeg\s+(.+)/);
+              if (match && match[1]) {
+                let freshUrl = match[1];
+
+                // Fix empty stream parameter
+                const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
+                if (originalCmdMatch) {
+                  const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                  const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
+                  if (originalStreamMatch && (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/))) {
+                    freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamMatch[1]}$1`);
+                  }
+                }
+
+                testUrl = freshUrl;
+              }
+            }
+          } catch (stalkerError) {
+            logger.warn(`Stalker token refresh failed for ${channel.name}: ${stalkerError.message}`);
+            continue;
+          }
+        }
+
+        // Validate with ffprobe
+        const ffprobeArgs = [
+          '-v', 'error',
+          '-print_format', 'json',
+          '-show_streams',
+          '-read_intervals', '%+#1',
+          '-timeout', '8000000',
+          testUrl
+        ];
+
+        if (channel.source_type === 'stalker') {
+          ffprobeArgs.splice(ffprobeArgs.length - 1, 0, '-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`);
+        }
+
+        const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
+          timeout: 10000,
+          maxBuffer: 1024 * 1024
+        });
+
+        const probeData = JSON.parse(stdout);
+        const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
+        const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
+
+        if (videoStream || hasAudio) {
+          // Check video quality if minHeight is specified
+          const streamHeight = videoStream ? (videoStream.height || 0) : 0;
+
+          if (minHeight > 0 && streamHeight < minHeight) {
+            logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
+            continue;
+          }
+
+          logger.info(`✓ Found working channel: ${channel.name} (${streamHeight}p)`);
+
+          return res.json({
+            success: true,
+            channel: {
+              id: channel.id,
+              name: channel.name,
+              logo: channel.logo,
+              url: channel.url,
+              sourceId: channel.source_id,
+              sourceName: channel.source_name,
+              sourceType: channel.source_type,
+              sourceUrl: channel.source_url,
+              sourceUsername: channel.source_username,
+              sourcePassword: channel.source_password,
+              sourceMac: channel.source_mac,
+              category: channel.category,
+              quality: streamHeight
+            }
+          });
+        }
+      } catch (error) {
+        logger.info(`✗ Channel ${channel.name} failed: ${error.message}`);
+        continue;
+      }
+    }
+
+    return res.json({
+      success: false,
+      error: 'No working streams found',
+      message: minHeight > 0
+        ? `Found ${channels.length} channels matching "${searchQuery}" but none met the ${minHeight}p quality requirement`
+        : `Found ${channels.length} channels matching "${searchQuery}" but none were working`
+    });
+
+  } catch (error) {
+    logger.error('Search channel failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * GET /api/live-events/blacklist
  * Get all blacklisted channels for the current user
  */
@@ -1308,9 +1552,11 @@ router.post('/auto-fill-streams', async (req, res) => {
       maxStreams = 4,
       excludeSourceIds = [],
       excludeEventIds = [],
-      excludeChannelIds = []
+      excludeChannelIds = [],
+      minQuality = 0
     } = req.body;
 
+    const minHeight = parseInt(minQuality) || 0;
     const postgresService = require('../services/postgresService');
     const { execFile } = require('child_process');
     const { promisify } = require('util');
@@ -1324,7 +1570,7 @@ router.post('/auto-fill-streams', async (req, res) => {
     );
     const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
 
-    logger.info(`Auto-fill: Looking for ${maxStreams} streams (sport: ${sportType || 'any'}, league: ${leagueName || 'any'})`);
+    logger.info(`Auto-fill: Looking for ${maxStreams} streams (sport: ${sportType || 'any'}, league: ${leagueName || 'any'}, minQuality: ${minHeight}p)`);
     logger.info(`Auto-fill: Excluding ${excludeSourceIds.length} sources, ${excludeEventIds.length} events, ${excludeChannelIds.length} channels`);
 
     const foundChannels = [];
@@ -1369,7 +1615,7 @@ router.post('/auto-fill-streams', async (req, res) => {
 
     logger.info(`Auto-fill: Found ${events.length} matching live events`);
 
-    // Helper function to test a channel
+    // Helper function to test a channel - returns { valid: boolean, height: number }
     const testChannel = async (channel) => {
       let testUrl = channel.url;
 
@@ -1436,12 +1682,14 @@ router.post('/auto-fill-streams', async (req, res) => {
           throw new Error('No streams found');
         }
 
-        const hasVideo = probeData.streams.some(s => s.codec_type === 'video');
+        const videoStream = probeData.streams.find(s => s.codec_type === 'video');
         const hasAudio = probeData.streams.some(s => s.codec_type === 'audio');
 
-        if (!hasVideo && !hasAudio) {
+        if (!videoStream && !hasAudio) {
           throw new Error('No valid streams');
         }
+
+        return { valid: true, height: videoStream ? (videoStream.height || 0) : 0 };
       } else {
         // M3U/XTREAM validation
         const ffprobeArgs = [
@@ -1463,15 +1711,15 @@ router.post('/auto-fill-streams', async (req, res) => {
           throw new Error('No streams found');
         }
 
-        const hasVideo = probeData.streams.some(s => s.codec_type === 'video');
+        const videoStream = probeData.streams.find(s => s.codec_type === 'video');
         const hasAudio = probeData.streams.some(s => s.codec_type === 'audio');
 
-        if (!hasVideo && !hasAudio) {
+        if (!videoStream && !hasAudio) {
           throw new Error('No valid streams');
         }
-      }
 
-      return true;
+        return { valid: true, height: videoStream ? (videoStream.height || 0) : 0 };
+      }
     };
 
     // Clean team name helper
@@ -1598,9 +1846,15 @@ router.post('/auto-fill-streams', async (req, res) => {
 
         try {
           logger.info(`Auto-fill: Testing channel ${channel.name} for event ${event.event_name}`);
-          await testChannel(channel);
+          const result = await testChannel(channel);
 
-          logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING!`);
+          // Check quality requirement
+          if (minHeight > 0 && result.height < minHeight) {
+            logger.info(`Auto-fill: ✗ Channel ${channel.name} quality too low: ${result.height}p < ${minHeight}p`);
+            continue;
+          }
+
+          logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING! (${result.height}p)`);
 
           // Found a working channel
           foundChannels.push({
@@ -1616,7 +1870,8 @@ router.post('/auto-fill-streams', async (req, res) => {
             sourcePassword: channel.source_password,
             sourceMac: channel.source_mac,
             espnEventId: event.event_id,
-            espnEventName: event.event_name
+            espnEventName: event.event_name,
+            quality: result.height
           });
 
           // Mark source and event as used
@@ -1638,7 +1893,7 @@ router.post('/auto-fill-streams', async (req, res) => {
       success: true,
       channels: foundChannels,
       message: foundChannels.length === 0
-        ? 'No working streams found'
+        ? (minHeight > 0 ? `No streams found meeting ${minHeight}p quality requirement` : 'No working streams found')
         : `Found ${foundChannels.length} working stream${foundChannels.length !== 1 ? 's' : ''}`
     });
 
