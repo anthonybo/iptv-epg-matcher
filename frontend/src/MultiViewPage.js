@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo, memo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, memo, useRef } from 'react';
+import ReactDOM from 'react-dom';
 import IPTVPlayer from './IPTVPlayer';
 import VideoQualityBadge from './components/VideoQualityBadge';
 import ConfirmModal from './components/ConfirmModal';
@@ -12,9 +13,93 @@ import {
   addToMultiview,
   updateMutedState
 } from './utils/multiviewManager';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragOverlay
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  useSortable,
+  rectSortingStrategy
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
-// Memoized stream cell component to prevent unnecessary re-renders
-const StreamCell = memo(({
+// Layout mode configurations
+const LAYOUT_MODES = {
+  grid: {
+    id: 'grid',
+    name: 'Grid',
+    icon: (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+      </svg>
+    ),
+    description: 'Equal sized grid'
+  },
+  featured_bottom: {
+    id: 'featured_bottom',
+    name: 'Featured + Bottom',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <rect x="2" y="2" width="20" height="14" rx="1" strokeWidth="2"/>
+        <rect x="2" y="18" width="6" height="4" rx="0.5" strokeWidth="1.5"/>
+        <rect x="9" y="18" width="6" height="4" rx="0.5" strokeWidth="1.5"/>
+        <rect x="16" y="18" width="6" height="4" rx="0.5" strokeWidth="1.5"/>
+      </svg>
+    ),
+    description: 'One large, rest at bottom'
+  },
+  featured_right: {
+    id: 'featured_right',
+    name: 'Featured + Right',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <rect x="2" y="2" width="14" height="20" rx="1" strokeWidth="2"/>
+        <rect x="18" y="2" width="4" height="6" rx="0.5" strokeWidth="1.5"/>
+        <rect x="18" y="9" width="4" height="6" rx="0.5" strokeWidth="1.5"/>
+        <rect x="18" y="16" width="4" height="6" rx="0.5" strokeWidth="1.5"/>
+      </svg>
+    ),
+    description: 'One large, rest on right'
+  },
+  dual_bottom: {
+    id: 'dual_bottom',
+    name: 'Dual + Bottom',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <rect x="2" y="2" width="9.5" height="14" rx="1" strokeWidth="2"/>
+        <rect x="12.5" y="2" width="9.5" height="14" rx="1" strokeWidth="2"/>
+        <rect x="2" y="18" width="6" height="4" rx="0.5" strokeWidth="1.5"/>
+        <rect x="9" y="18" width="6" height="4" rx="0.5" strokeWidth="1.5"/>
+        <rect x="16" y="18" width="6" height="4" rx="0.5" strokeWidth="1.5"/>
+      </svg>
+    ),
+    description: 'Two large, rest at bottom'
+  },
+  dual_right: {
+    id: 'dual_right',
+    name: 'Dual + Right',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <rect x="2" y="2" width="14" height="9.5" rx="1" strokeWidth="2"/>
+        <rect x="2" y="12.5" width="14" height="9.5" rx="1" strokeWidth="2"/>
+        <rect x="18" y="2" width="4" height="6" rx="0.5" strokeWidth="1.5"/>
+        <rect x="18" y="9" width="4" height="6" rx="0.5" strokeWidth="1.5"/>
+        <rect x="18" y="16" width="4" height="6" rx="0.5" strokeWidth="1.5"/>
+      </svg>
+    ),
+    description: 'Two large stacked, rest on right'
+  }
+};
+
+// Inner stream cell component - contains the video player and is heavily memoized
+// This component should NEVER re-render due to drag/drop operations
+const StreamCellInner = memo(({
   stream,
   streamKey,
   sessionId,
@@ -27,11 +112,13 @@ const StreamCell = memo(({
   onFindAlternative,
   onBlacklist,
   onRemove,
-  onQualityDetected
+  onQualityDetected,
+  isFeatured,
+  dragHandleProps // Passed from parent sortable wrapper
 }) => {
   return (
     <div
-      className={`relative overflow-hidden ${
+      className={`relative overflow-hidden h-full ${
         isTheatreMode
           ? 'bg-black'
           : 'rounded-xl border border-slate-800/70 bg-slate-900/70 shadow-2xl shadow-slate-950/40'
@@ -41,6 +128,18 @@ const StreamCell = memo(({
       {!isTheatreMode && (
         <div className="absolute top-0 left-0 right-0 z-10 bg-gradient-to-b from-slate-900/95 via-slate-900/80 to-transparent p-2">
           <div className="flex items-center justify-between gap-2">
+            {/* Drag Handle */}
+            {dragHandleProps && (
+              <div
+                {...dragHandleProps}
+                className="p-1 rounded cursor-grab active:cursor-grabbing hover:bg-slate-700/50 text-slate-500 hover:text-slate-300 transition-colors flex-shrink-0"
+                title="Drag to reorder"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
+                </svg>
+              </div>
+            )}
             <div className="flex items-center gap-2 min-w-0 flex-1">
               {stream.logo && (
                 <img
@@ -148,6 +247,7 @@ const StreamCell = memo(({
   );
 }, (prevProps, nextProps) => {
   // Custom comparison - only re-render if these specific props change
+  // Callbacks and dragHandleProps are excluded - they don't affect video playback
   return (
     prevProps.streamKey === nextProps.streamKey &&
     prevProps.stream._refreshKey === nextProps.stream._refreshKey &&
@@ -157,6 +257,67 @@ const StreamCell = memo(({
     prevProps.isFindingAlternative === nextProps.isFindingAlternative
   );
 });
+
+// Sortable wrapper - handles drag and drop, re-renders freely without affecting video
+const SortableStreamCell = ({
+  stream,
+  streamKey,
+  sessionId,
+  isTheatreMode,
+  isMuted,
+  quality,
+  isFindingAlternative,
+  onToggleMute,
+  onRefresh,
+  onFindAlternative,
+  onBlacklist,
+  onRemove,
+  onQualityDetected,
+  isFeatured
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id: streamKey });
+
+  // Only apply transform during active dragging
+  const style = {
+    transform: isDragging ? CSS.Transform.toString(transform) : undefined,
+    transition: isDragging ? transition : undefined,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 1000 : 1,
+    height: '100%'
+  };
+
+  // Combine attributes and listeners for the drag handle
+  const dragHandleProps = { ...attributes, ...listeners };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <StreamCellInner
+        stream={stream}
+        streamKey={streamKey}
+        sessionId={sessionId}
+        isTheatreMode={isTheatreMode}
+        isMuted={isMuted}
+        quality={quality}
+        isFindingAlternative={isFindingAlternative}
+        onToggleMute={onToggleMute}
+        onRefresh={onRefresh}
+        onFindAlternative={onFindAlternative}
+        onBlacklist={onBlacklist}
+        onRemove={onRemove}
+        onQualityDetected={onQualityDetected}
+        isFeatured={isFeatured}
+        dragHandleProps={dragHandleProps}
+      />
+    </div>
+  );
+};
 
 /**
  * MultiViewPage - Display multiple streams in an auto-layout grid
@@ -210,6 +371,27 @@ const MultiViewPage = ({ sessionId }) => {
 
   // Find alternative stream state
   const [findingAlternativeFor, setFindingAlternativeFor] = useState(null); // streamKey of stream being replaced
+
+  // Layout mode state
+  const [layoutMode, setLayoutMode] = useState(() => {
+    const saved = localStorage.getItem('multiview_layout_mode');
+    return saved || 'grid';
+  });
+  const [showLayoutMenu, setShowLayoutMenu] = useState(false);
+  const [activeId, setActiveId] = useState(null); // For drag overlay
+  const layoutButtonRef = useRef(null); // Ref for positioning the portal dropdown
+  // Track visual order separately from streams array to prevent unmounting
+  // Key = streamKey, Value = order index
+  const [streamOrder, setStreamOrder] = useState({});
+
+  // Drag and drop sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8, // 8px of movement required before drag starts
+      },
+    })
+  );
 
   // Load blacklist from API on mount
   useEffect(() => {
@@ -784,6 +966,179 @@ const MultiViewPage = ({ sessionId }) => {
     localStorage.setItem('multiview_autofill_settings', JSON.stringify(autoFillSettings));
   }, [autoFillSettings]);
 
+  // Save layout mode to localStorage when it changes
+  useEffect(() => {
+    localStorage.setItem('multiview_layout_mode', layoutMode);
+  }, [layoutMode]);
+
+  // Drag and drop handlers
+  const handleDragStart = useCallback((event) => {
+    setActiveId(event.active.id);
+  }, []);
+
+  const handleDragEnd = useCallback((event) => {
+    const { active, over } = event;
+    setActiveId(null);
+
+    if (over && active.id !== over.id) {
+      // Instead of reordering the streams array (which causes unmount/remount),
+      // we update the visual order mapping and use CSS order property
+      setStreamOrder(currentOrder => {
+        const streamKeys = streams.map(s => `${s.sourceId}_${s.id}_${s._refreshKey || ''}`);
+
+        // Get current order indices (or default to array position)
+        const getOrder = (key) => currentOrder[key] ?? streamKeys.indexOf(key);
+
+        const activeOrder = getOrder(active.id);
+        const overOrder = getOrder(over.id);
+
+        // Create new order mapping
+        const newOrder = {};
+        streamKeys.forEach(key => {
+          const currentKeyOrder = getOrder(key);
+          if (key === active.id) {
+            // Dragged item gets the target position
+            newOrder[key] = overOrder;
+          } else if (activeOrder < overOrder) {
+            // Moving down: items between shift up
+            if (currentKeyOrder > activeOrder && currentKeyOrder <= overOrder) {
+              newOrder[key] = currentKeyOrder - 1;
+            } else {
+              newOrder[key] = currentKeyOrder;
+            }
+          } else {
+            // Moving up: items between shift down
+            if (currentKeyOrder >= overOrder && currentKeyOrder < activeOrder) {
+              newOrder[key] = currentKeyOrder + 1;
+            } else {
+              newOrder[key] = currentKeyOrder;
+            }
+          }
+        });
+
+        return newOrder;
+      });
+    }
+  }, [streams]);
+
+  // Close layout menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      // Check if click is on the button container or the portal dropdown
+      if (showLayoutMenu &&
+          !e.target.closest('.layout-menu-dropdown') &&
+          !e.target.closest('.layout-menu-portal')) {
+        setShowLayoutMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showLayoutMenu]);
+
+  // Get stream IDs for SortableContext - sorted by visual order
+  const streamIds = useMemo(() => {
+    const keys = streams.map(s => `${s.sourceId}_${s.id}_${s._refreshKey || ''}`);
+    // Sort by visual order if available, otherwise by original array position
+    return [...keys].sort((a, b) => {
+      const orderA = streamOrder[a] ?? keys.indexOf(a);
+      const orderB = streamOrder[b] ?? keys.indexOf(b);
+      return orderA - orderB;
+    });
+  }, [streams, streamOrder]);
+
+  // Get sorted streams for rendering in layout modes that depend on position
+  const sortedStreams = useMemo(() => {
+    const keys = streams.map(s => `${s.sourceId}_${s.id}_${s._refreshKey || ''}`);
+    return [...streams].sort((a, b) => {
+      const keyA = `${a.sourceId}_${a.id}_${a._refreshKey || ''}`;
+      const keyB = `${b.sourceId}_${b.id}_${b._refreshKey || ''}`;
+      const orderA = streamOrder[keyA] ?? keys.indexOf(keyA);
+      const orderB = streamOrder[keyB] ?? keys.indexOf(keyB);
+      return orderA - orderB;
+    });
+  }, [streams, streamOrder]);
+
+  // Memoize grid container style to prevent unnecessary recalculations
+  const gridContainerStyle = useMemo(() => {
+    const gap = isTheatreMode ? '0px' : '12px';
+    const secondarySize = isTheatreMode ? '120px' : '128px';
+    const sidebarSize = isTheatreMode ? '200px' : '192px';
+    const streamCount = streams.length;
+
+    switch (layoutMode) {
+      case 'grid':
+        return {
+          display: 'grid',
+          gridTemplateColumns: `repeat(${layout.columns}, 1fr)`,
+          gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
+          gap
+        };
+      case 'featured_bottom':
+        if (streamCount <= 1) {
+          return { display: 'grid', gridTemplateRows: '1fr', gap };
+        }
+        return {
+          display: 'grid',
+          gridTemplateColumns: `repeat(${Math.min(streamCount - 1, 5)}, 1fr)`,
+          gridTemplateRows: `1fr ${secondarySize}`,
+          gap
+        };
+      case 'featured_right':
+        if (streamCount <= 1) {
+          return { display: 'grid', gridTemplateColumns: '1fr', gap };
+        }
+        return {
+          display: 'grid',
+          gridTemplateColumns: `1fr ${sidebarSize}`,
+          gridTemplateRows: `repeat(${Math.min(streamCount - 1, 5)}, 1fr)`,
+          gap
+        };
+      case 'dual_bottom':
+        if (streamCount <= 2) {
+          return {
+            display: 'grid',
+            gridTemplateColumns: `repeat(${Math.min(streamCount, 2)}, 1fr)`,
+            gap
+          };
+        }
+        return {
+          display: 'grid',
+          gridTemplateColumns: `repeat(${Math.max(2, Math.min(streamCount - 2, 5))}, 1fr)`,
+          gridTemplateRows: `1fr 1fr ${secondarySize}`,
+          gap
+        };
+      case 'dual_right': {
+        if (streamCount <= 2) {
+          // Just 1-2 streams: stack them vertically, full width
+          return {
+            display: 'grid',
+            gridTemplateColumns: '1fr',
+            gridTemplateRows: `repeat(${Math.min(streamCount, 2)}, 1fr)`,
+            gap
+          };
+        }
+        // 3+ streams: two main on left (stacked), rest on right sidebar
+        // Rows = max of 2 (for main videos) or number of sidebar videos
+        const sidebarCount = streamCount - 2;
+        const rowCount = Math.max(2, sidebarCount);
+        return {
+          display: 'grid',
+          gridTemplateColumns: `1fr ${sidebarSize}`,
+          gridTemplateRows: `repeat(${rowCount}, 1fr)`,
+          gap
+        };
+      }
+      default:
+        return {
+          display: 'grid',
+          gridTemplateColumns: `repeat(${layout.columns}, 1fr)`,
+          gridTemplateRows: `repeat(${layout.rows}, 1fr)`,
+          gap
+        };
+    }
+  }, [layoutMode, isTheatreMode, streams.length, layout.columns, layout.rows]);
+
   // Auto-fill handler - fills multiple slots at once
   const handleAutoFill = async (sportType = null, leagueName = null) => {
     // Calculate how many slots to fill
@@ -1030,7 +1385,7 @@ const MultiViewPage = ({ sessionId }) => {
     <div className="flex flex-col h-screen bg-slate-950">
       {/* Header */}
       {!isTheatreMode && (
-        <div className="flex-shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm px-4 py-2">
+        <div className="flex-shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm px-4 py-2 relative z-[9999]">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0">
               <h1 className="text-lg font-bold text-slate-100">Multi-View</h1>
@@ -1242,6 +1597,65 @@ const MultiViewPage = ({ sessionId }) => {
                 <span className="text-slate-400">{autoFillSettings.maxSlots}</span>
               </button>
 
+              {/* Layout Mode Button */}
+              <div className="relative layout-menu-dropdown">
+                <button
+                  ref={layoutButtonRef}
+                  onClick={() => setShowLayoutMenu(!showLayoutMenu)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-700 bg-cyan-900/20 px-3 py-1.5 text-xs font-semibold text-cyan-300 transition hover:bg-cyan-900/40"
+                  title="Change Layout"
+                >
+                  {LAYOUT_MODES[layoutMode]?.icon}
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {/* Layout Mode Dropdown - Rendered via Portal to avoid z-index issues */}
+                {showLayoutMenu && layoutButtonRef.current && ReactDOM.createPortal(
+                  <div
+                    className="layout-menu-portal fixed w-56 rounded-xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden"
+                    style={{
+                      top: layoutButtonRef.current.getBoundingClientRect().bottom + 8,
+                      right: window.innerWidth - layoutButtonRef.current.getBoundingClientRect().right,
+                      zIndex: 99999
+                    }}
+                  >
+                    <div className="p-2">
+                      <p className="text-xs text-slate-500 font-medium px-2 py-1 mb-1">Layout Mode</p>
+                      {Object.values(LAYOUT_MODES).map((mode) => (
+                        <button
+                          key={mode.id}
+                          onClick={() => {
+                            setLayoutMode(mode.id);
+                            setShowLayoutMenu(false);
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition ${
+                            layoutMode === mode.id
+                              ? 'bg-cyan-900/40 text-cyan-300'
+                              : 'text-slate-300 hover:bg-slate-800'
+                          }`}
+                        >
+                          <span className={layoutMode === mode.id ? 'text-cyan-400' : 'text-slate-500'}>
+                            {mode.icon}
+                          </span>
+                          <div>
+                            <div className="text-sm font-medium">{mode.name}</div>
+                            <div className="text-xs text-slate-500">{mode.description}</div>
+                          </div>
+                          {layoutMode === mode.id && (
+                            <svg className="w-4 h-4 ml-auto text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>,
+                  document.body
+                )}
+              </div>
+
               {/* Blacklist Button */}
               <button
                 onClick={() => setShowBlacklistModal(true)}
@@ -1300,7 +1714,7 @@ const MultiViewPage = ({ sessionId }) => {
       )}
 
       {/* Grid Container */}
-      <div className={`flex-1 overflow-auto ${isTheatreMode ? 'p-0' : 'p-4'}`}>
+      <div className={`flex-1 ${isTheatreMode ? 'p-0 overflow-hidden' : 'p-4 overflow-auto'}`}>
         {loadingStreams ? (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
@@ -1332,35 +1746,128 @@ const MultiViewPage = ({ sessionId }) => {
             </div>
           </div>
         ) : (
-          <div
-            className={`grid h-full ${isTheatreMode ? 'gap-0' : 'gap-3'}`}
-            style={{
-              gridTemplateColumns: `repeat(${layout.columns}, 1fr)`,
-              gridTemplateRows: `repeat(${layout.rows}, 1fr)`
-            }}
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
           >
-            {streams.map((stream) => {
-              const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
-              return (
-                <StreamCell
-                  key={streamKey}
-                  stream={stream}
-                  streamKey={streamKey}
-                  sessionId={sessionId}
-                  isTheatreMode={isTheatreMode}
-                  isMuted={mutedStreams.has(streamKey)}
-                  quality={streamQualities[streamKey]}
-                  isFindingAlternative={findingAlternativeFor === streamKey}
-                  onToggleMute={() => toggleMute(streamKey)}
-                  onRefresh={() => handleRefreshStream(stream.id, stream.sourceId)}
-                  onFindAlternative={() => handleFindAlternative(stream)}
-                  onBlacklist={() => handleBlacklistChannel(stream.name)}
-                  onRemove={() => handleRemoveStream(stream.id, stream.sourceId)}
-                  onQualityDetected={(quality) => handleQualityDetected(streamKey, quality)}
-                />
-              );
-            })}
-          </div>
+            <SortableContext items={streamIds} strategy={rectSortingStrategy}>
+              {/* Unified Layout Container - streams rendered once, CSS controls layout */}
+              <div
+                className="h-full"
+                style={gridContainerStyle}
+              >
+                {streams.map((stream) => {
+                  const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
+                  // Get visual order for this stream (default to its position in streamIds)
+                  const visualOrder = streamOrder[streamKey] ?? streamIds.indexOf(streamKey);
+
+                  // Calculate grid position based on layout mode and VISUAL order (not array index)
+                  let gridColumn = undefined;
+                  let gridRow = undefined;
+
+                  if (layoutMode === 'featured_bottom') {
+                    if (visualOrder === 0 && streams.length > 1) {
+                      gridColumn = '1 / -1';
+                      gridRow = '1';
+                    } else if (visualOrder > 0) {
+                      gridRow = '2';
+                    }
+                  } else if (layoutMode === 'featured_right') {
+                    if (visualOrder === 0 && streams.length > 1) {
+                      gridColumn = '1';
+                      gridRow = '1 / -1';
+                    } else if (visualOrder > 0) {
+                      gridColumn = '2';
+                    }
+                  } else if (layoutMode === 'dual_bottom') {
+                    if (visualOrder < 2 && streams.length > 2) {
+                      const cols = Math.max(2, Math.min(streams.length - 2, 5));
+                      const halfCols = Math.ceil(cols / 2);
+                      gridColumn = visualOrder === 0 ? `1 / ${halfCols + 1}` : `${halfCols + 1} / -1`;
+                      gridRow = '1 / 3';
+                    } else if (visualOrder >= 2) {
+                      gridRow = '3';
+                    }
+                  } else if (layoutMode === 'dual_right') {
+                    const sidebarCount = streams.length - 2;
+                    const rowCount = Math.max(2, sidebarCount);
+
+                    if (visualOrder < 2 && streams.length > 2) {
+                      // Main videos: left column, each spans half the rows
+                      gridColumn = '1';
+                      const halfRows = Math.ceil(rowCount / 2);
+                      if (visualOrder === 0) {
+                        gridRow = `1 / ${halfRows + 1}`;
+                      } else {
+                        gridRow = `${halfRows + 1} / -1`;
+                      }
+                    } else if (visualOrder >= 2) {
+                      // Sidebar videos: right column, each in its own row
+                      gridColumn = '2';
+                      const sidebarIndex = visualOrder - 2;
+                      gridRow = String(sidebarIndex + 1);
+                    }
+                  }
+
+                  const isFeatured = layoutMode !== 'grid' && (
+                    (layoutMode.startsWith('featured') && visualOrder === 0) ||
+                    (layoutMode.startsWith('dual') && visualOrder < 2)
+                  );
+
+                  // Use CSS order property for grid layout ordering
+                  const style = {
+                    order: visualOrder,
+                    ...(gridColumn || gridRow ? { gridColumn, gridRow } : {})
+                  };
+
+                  return (
+                    <div
+                      key={streamKey}
+                      className="min-h-0 min-w-0"
+                      style={style}
+                    >
+                      <SortableStreamCell
+                        stream={stream}
+                        streamKey={streamKey}
+                        sessionId={sessionId}
+                        isTheatreMode={isTheatreMode}
+                        isMuted={mutedStreams.has(streamKey)}
+                        quality={streamQualities[streamKey]}
+                        isFindingAlternative={findingAlternativeFor === streamKey}
+                        onToggleMute={() => toggleMute(streamKey)}
+                        onRefresh={() => handleRefreshStream(stream.id, stream.sourceId)}
+                        onFindAlternative={() => handleFindAlternative(stream)}
+                        onBlacklist={() => handleBlacklistChannel(stream.name)}
+                        onRemove={() => handleRemoveStream(stream.id, stream.sourceId)}
+                        onQualityDetected={(quality) => handleQualityDetected(streamKey, quality)}
+                        isFeatured={isFeatured}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </SortableContext>
+
+            {/* Drag Overlay */}
+            <DragOverlay>
+              {activeId ? (() => {
+                const stream = streams.find(s => `${s.sourceId}_${s.id}_${s._refreshKey || ''}` === activeId);
+                if (!stream) return null;
+                return (
+                  <div className="bg-slate-900 rounded-xl border-2 border-cyan-500 shadow-2xl opacity-90 p-2">
+                    <div className="flex items-center gap-2 text-slate-200">
+                      {stream.logo && (
+                        <img src={stream.logo} alt="" className="w-6 h-6 rounded" />
+                      )}
+                      <span className="text-sm font-medium truncate">{stream.name}</span>
+                    </div>
+                  </div>
+                );
+              })() : null}
+            </DragOverlay>
+          </DndContext>
         )}
       </div>
 

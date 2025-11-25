@@ -118,6 +118,8 @@ const IPTVPlayer = ({
 
   // Initialize component
   useEffect(() => {
+    // Always log mount/unmount to console for debugging, even in theatre mode
+    console.log(`[IPTVPlayer] MOUNTING: ${selectedChannel?.name} (${selectedChannel?.id})`);
     log('info', 'IPTVPlayer component mounting');
 
     // Load required scripts
@@ -126,6 +128,7 @@ const IPTVPlayer = ({
     // Overlays are hidden by default - user can toggle them with the icons
 
     return () => {
+      console.log(`[IPTVPlayer] UNMOUNTING: ${selectedChannel?.name} (${selectedChannel?.id})`);
       log('info', 'IPTVPlayer component unmounting');
       cleanupPlayer();
     };
@@ -283,6 +286,13 @@ const IPTVPlayer = ({
     }
   };
 
+  // Extract stable identifiers from selectedChannel to use as dependencies
+  // This prevents the player from reinitializing when the channel object reference changes
+  // but the actual channel data (id, sourceId, refreshKey) stays the same
+  const channelId = selectedChannel?.id;
+  const channelSourceId = selectedChannel?.sourceId;
+  const channelRefreshKey = selectedChannel?._refreshKey;
+
   // Apply playback method when channel or method changes
   useEffect(() => {
     if (!sessionId || !selectedChannel) {
@@ -294,15 +304,16 @@ const IPTVPlayer = ({
       name: selectedChannel.name,
       id: getChannelId()
     });
-    
+
     setError(null);
     setLoading(true);
-    
+
     // Wait a brief moment for scripts to load if needed
     setTimeout(() => {
       initializePlayer();
     }, 100);
-  }, [sessionId, selectedChannel, playbackMethod]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, channelId, channelSourceId, channelRefreshKey, playbackMethod]);
 
   // Clean up player instance
   const cleanupPlayer = () => {

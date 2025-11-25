@@ -16,24 +16,26 @@ const os = require('os');
 const metricsService = require('../services/metricsService');
 
 // Connection pooling agents for efficient HTTP/HTTPS requests
-// This prevents opening too many concurrent connections and reuses existing ones
+// Increased limits to handle multi-view with many concurrent streams
 const httpAgent = new http.Agent({
   keepAlive: true,           // Reuse connections
-  maxSockets: 10,            // Max 10 concurrent connections per host
-  maxFreeSockets: 5,         // Keep 5 idle connections ready for reuse
-  timeout: 60000,            // 60 second timeout
-  keepAliveMsecs: 30000      // Send keep-alive packets every 30s
+  maxSockets: 50,            // Max 50 concurrent connections per host (increased for multi-view)
+  maxFreeSockets: 10,        // Keep 10 idle connections ready for reuse
+  timeout: 30000,            // 30 second socket timeout (reduced to release stuck sockets faster)
+  keepAliveMsecs: 10000,     // Send keep-alive packets every 10s
+  scheduling: 'fifo'         // First-in-first-out for fair socket allocation
 });
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 10,
-  maxFreeSockets: 5,
-  timeout: 60000,
-  keepAliveMsecs: 30000
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 30000,
+  keepAliveMsecs: 10000,
+  scheduling: 'fifo'
 });
 
-logger.info('HTTP/HTTPS connection pooling enabled (maxSockets: 10, keepAlive: true)');
+logger.info('HTTP/HTTPS connection pooling enabled (maxSockets: 50, keepAlive: true)');
 
 /**
  * GET /:sessionId/:channelId
@@ -498,10 +500,21 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             });
             
         } catch (streamError) {
+            // Handle aborted requests gracefully - these are normal when clients disconnect
+            // (e.g., user changes channel, closes player, or layout changes in multi-view)
+            if (streamError.name === 'AbortError' || streamError.message?.includes('aborted')) {
+                logger.info(`Stream request aborted for channel ${channelId} (client disconnected)`);
+                // Don't send error response - client is already gone
+                if (!res.headersSent) {
+                    res.status(499).end(); // 499 = Client Closed Request (nginx convention)
+                }
+                return;
+            }
+
             // Handle common stream errors
             let errorMessage = 'Error streaming content';
             let statusCode = 500;
-            
+
             // Adjust error message based on specific error types
             if (streamError.code === 'ENOTFOUND' || streamError.message.includes('ENOTFOUND')) {
                 errorMessage = 'Stream source cannot be found (DNS resolution failed)';
@@ -513,17 +526,17 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 errorMessage = 'Stream source connection was refused';
                 statusCode = 502;
             }
-            
-            logger.error(`${errorMessage}: ${streamError.message}`, { 
+
+            logger.error(`${errorMessage}: ${streamError.message}`, {
                 error: streamError.message,
                 stack: streamError.stack,
                 channelId,
                 url: channel.url
             });
-            
+
             // If streaming has already started, we can't send a JSON response
             if (!res.headersSent) {
-                return res.status(statusCode).json({ 
+                return res.status(statusCode).json({
                     error: errorMessage,
                     details: streamError.message
                 });
