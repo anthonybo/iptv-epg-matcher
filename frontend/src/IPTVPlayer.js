@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, memo, useCallback, useMemo } from 'react';
 import { addAuthToStreamUrl } from './utils/streamAuth';
 import { detectVideoQuality } from './utils/videoQuality';
 import { useCast } from './hooks/useCast';
@@ -31,16 +31,8 @@ const IPTVPlayer = ({
 }) => {
   // Helper to get channel ID from either 'id' or 'tvgId' field
   // CRITICAL: Use 'id' first (IPTV channel ID like xtream_1111) not 'tvgId' (EPG hint like AnimalPlanet.us)
-  // BUILD TIMESTAMP: 2025-11-10 16:40 PST
   const getChannelId = () => {
-    const channelId = selectedChannel?.id || selectedChannel?.tvgId;
-    console.log('[IPTVPlayer v16:40] getChannelId called:', {
-      id: selectedChannel?.id,
-      tvgId: selectedChannel?.tvgId,
-      returning: channelId,
-      fullChannel: selectedChannel
-    });
-    return channelId;
+    return selectedChannel?.id || selectedChannel?.tvgId;
   };
 
   // Helper to get group title from either 'groupTitle' or 'group.title' field
@@ -93,21 +85,18 @@ const IPTVPlayer = ({
   
   // Enhanced logging function - optimized for multi-view performance
   const log = (level, message, data = null) => {
-    // In theatre mode, only skip non-critical logs to prevent performance issues
-    // But allow critical initialization/error logs
-    const isCritical = message.includes('Initializing') || message.includes('player error') || level === 'error';
-
-    if (theatreMode && !isCritical) {
+    // In theatre mode (multi-view), skip ALL logging to prevent performance issues
+    // Debug panel isn't shown anyway, so no point in maintaining log state
+    if (theatreMode) {
       return;
     }
 
-    const timestamp = new Date().toISOString();
-
-    // Only log to console in development
+    // Only log to console in development for non-theatre mode
     if (process.env.NODE_ENV === 'development') {
       console.log(`[${level.toUpperCase()}] ${message}`, data || '');
     }
 
+    const timestamp = new Date().toISOString();
     setLogs(prev => [
       ...prev,
       {
@@ -130,7 +119,6 @@ const IPTVPlayer = ({
   // Initialize component
   useEffect(() => {
     log('info', 'IPTVPlayer component mounting');
-    console.log('[IPTVPlayer] Theatre mode prop:', theatreMode);
 
     // Load required scripts
     loadScripts();
@@ -143,30 +131,24 @@ const IPTVPlayer = ({
     };
   }, []);
 
-  // Debug theatre mode changes
-  useEffect(() => {
-    console.log('[IPTVPlayer] Theatre mode changed:', theatreMode);
-  }, [theatreMode]);
-
   // Try to load EPG data when channel changes
+  // Skip in theatre mode (multi-view) since EPG overlay is not shown
   useEffect(() => {
+    if (theatreMode) return; // Skip EPG fetch in multi-view for performance
+
     const channelId = getChannelId();
     if (sessionId && selectedChannel && channelId) {
-      console.log('[IPTVPlayer] Fetching EPG data for channel:', channelId);
-
-      // Always try to fetch EPG data - backend checks PostgreSQL for match
-      log('info', 'Fetching EPG data for channel', {
-        iptvChannelId: channelId
-      });
-
       // IMPORTANT: Pass the IPTV channel ID, NOT the EPG ID!
       // The backend expects the IPTV channel ID and will look up the match in PostgreSQL
       fetchEpgData(channelId);
     }
-  }, [sessionId, selectedChannel]);
+  }, [sessionId, selectedChannel, theatreMode]);
 
   // Listen for EPG match updates and refresh data immediately
+  // Skip in theatre mode (multi-view) for performance
   useEffect(() => {
+    if (theatreMode) return; // Skip EPG listener in multi-view
+
     const handleEpgMatchUpdate = (event) => {
       const { iptvChannelId, epgChannelId } = event.detail || {};
       const currentChannelId = getChannelId();
@@ -206,15 +188,13 @@ const IPTVPlayer = ({
     return () => {
       window.removeEventListener('epgMatchUpdated', handleEpgMatchUpdate);
     };
-  }, [sessionId, selectedChannel]);
+  }, [sessionId, selectedChannel, theatreMode]);
   
   // Fetch EPG data for the current channel using IPTV channel ID
   // IMPORTANT: This function expects the IPTV channel ID (e.g., 'stalker_066baa94_45447'),
   // NOT the EPG channel ID. The backend will look up the match.
   const fetchEpgData = async (iptvChannelId) => {
     if (!sessionId || !iptvChannelId) return;
-
-    console.log('[IPTVPlayer] fetchEpgData called with IPTV channel ID:', iptvChannelId);
 
     try {
       // If iptvChannelId is an object, extract the actual ID with multiple fallbacks
@@ -416,25 +396,18 @@ const IPTVPlayer = ({
 
   // Unified recovery mechanism with progressive backoff
   const attemptRecovery = (errorContext = '') => {
-    console.log(`[Recovery] attemptRecovery called for channel ${getChannelId()}, context: ${errorContext}`);
-
     // Prevent multiple simultaneous recovery attempts
     if (isRecoveringRef.current) {
-      log('warn', 'Recovery already in progress, skipping duplicate attempt');
-      console.log('[Recovery] Already recovering, skipping');
       return;
     }
 
     // Don't recover if channel has changed
     if (getChannelId() !== currentChannelIdRef.current) {
-      log('info', 'Channel changed, aborting recovery');
-      console.log('[Recovery] Channel changed, aborting');
       return;
     }
 
     const now = Date.now();
     const timeSinceLastError = now - lastErrorTimeRef.current;
-    console.log(`[Recovery] Time since last error: ${timeSinceLastError}ms, retry count: ${retryCountRef.current}`);
 
     // Reset retry count if it's been a while since last error (successful recovery)
     if (timeSinceLastError > 30000) {
@@ -448,13 +421,12 @@ const IPTVPlayer = ({
     lastErrorTimeRef.current = now;
 
     // In theatre mode (multi-view), stagger recovery attempts to prevent CPU overload
-    // Only allow one recovery every 100ms across all streams
+    // Only allow one recovery every 200ms across all streams (increased from 100ms)
     if (theatreMode) {
       const timeSinceLastGlobalRecovery = now - window.iptvRecoveryQueue.lastRecoveryTime;
-      if (timeSinceLastGlobalRecovery < 100) {
+      if (timeSinceLastGlobalRecovery < 200) {
         // Delay this recovery attempt slightly
-        const delayMs = 100 - timeSinceLastGlobalRecovery + Math.random() * 100;
-        console.log(`[Recovery] Rate limiting - delaying ${delayMs}ms`);
+        const delayMs = 200 - timeSinceLastGlobalRecovery + Math.random() * 200;
         // Reset flag before recursive call, will be set again in recursive call
         isRecoveringRef.current = false;
         setTimeout(() => attemptRecovery(errorContext), delayMs);
@@ -478,23 +450,17 @@ const IPTVPlayer = ({
       retryCountRef.current++;
       const attemptNum = retryCount + 1;
 
-      log('info', `${errorContext} - Attempting recovery (${attemptNum}/${MAX_RETRIES}) in ${retryDelay/1000}s...`);
-      console.log(`[Recovery] Scheduling retry ${attemptNum}/${MAX_RETRIES} in ${retryDelay}ms`);
       setRecoveryStatus(`Reconnecting (${attemptNum}/${MAX_RETRIES})...`);
       setLoading(false); // Don't show loading spinner during recovery
 
       retryTimerRef.current = setTimeout(() => {
-        console.log(`[Recovery] Executing retry ${attemptNum}/${MAX_RETRIES}`);
         // Double-check channel hasn't changed during the delay
         if (getChannelId() !== currentChannelIdRef.current) {
-          log('info', 'Channel changed during retry delay, aborting');
           isRecoveringRef.current = false;
           setRecoveryStatus(null);
           return;
         }
 
-        log('info', `Executing recovery attempt ${attemptNum}`);
-        setRecoveryStatus(`Reconnecting (${attemptNum}/${MAX_RETRIES})...`);
         cleanupPlayer();
 
         // Reinitialize based on playback method
@@ -508,7 +474,6 @@ const IPTVPlayer = ({
 
         recoveryTimeoutRef.current = setTimeout(() => {
           if (isRecoveringRef.current) {
-            console.log('[Recovery] Timeout - player did not start within 10s, triggering next recovery attempt');
             isRecoveringRef.current = false;
             // Trigger next recovery attempt since this one failed
             attemptRecovery('Recovery timeout - player did not start');
@@ -576,7 +541,6 @@ const IPTVPlayer = ({
 
         recoveryTimeoutRef.current = setTimeout(() => {
           if (isRecoveringRef.current) {
-            console.log('[Recovery] Fresh start timeout - player did not start within 10s, triggering next attempt');
             isRecoveringRef.current = false;
             attemptRecovery('Fresh start timeout - player did not start');
           }
@@ -617,11 +581,12 @@ const IPTVPlayer = ({
       clearInterval(healthCheckIntervalRef.current);
     }
 
-    // More aggressive health checks: 1 second in theatre mode, 2 seconds in single view
-    const checkInterval = theatreMode ? 1000 : 2000;
-    // Freeze threshold: allow some time for normal buffering before triggering recovery
-    // In theatre mode: 3 checks needed (3s), single view: 2 checks needed (4s)
-    const freezeThreshold = checkInterval * 3;
+    // Less aggressive health checks for multi-view to reduce CPU overhead
+    // Theatre mode: 3 seconds (was 1s), single view: 2 seconds
+    const checkInterval = theatreMode ? 3000 : 2000;
+    // Freeze threshold: allow time for normal buffering before triggering recovery
+    // Theatre mode: 2 checks (6s), single view: 2 checks (4s)
+    const freezeThreshold = checkInterval * 2;
 
     // Check periodically if video is progressing
     healthCheckIntervalRef.current = setInterval(() => {
@@ -847,17 +812,28 @@ const IPTVPlayer = ({
         detectQualityClappr('playing');
 
         // Listen for resolution changes (adaptive bitrate streams)
-        const videoEl = videoElementRef.current;
-        if (videoEl) {
-          videoEl.addEventListener('resize', () => {
-            detectQualityClappr('resize');
-          });
+        // Skip in theatre mode - initial detection is enough
+        if (!theatreMode) {
+          const videoEl = videoElementRef.current;
+          if (videoEl) {
+            videoEl.addEventListener('resize', () => {
+              detectQualityClappr('resize');
+            });
+          }
         }
       });
 
+      // Throttled timeupdate for Clappr
+      let lastClapprTimeUpdate = 0;
+      const clapprTimeUpdateThrottle = theatreMode ? 1000 : 250;
+
       playerInstanceRef.current.on(window.Clappr.Events.PLAYER_TIMEUPDATE, () => {
+        const now = Date.now();
+        if (now - lastClapprTimeUpdate < clapprTimeUpdateThrottle) return;
+        lastClapprTimeUpdate = now;
+
         // Update last playing time when video is progressing
-        lastPlayingTimeRef.current = Date.now();
+        lastPlayingTimeRef.current = now;
 
         // Clear stall timer on normal playback
         if (stallTimerRef.current) {
@@ -1020,18 +996,23 @@ const IPTVPlayer = ({
       videoElementRef.current = videoEl;
 
       if (window.mpegts.getFeatureList().mseLivePlayback) {
+        // Reduce buffer sizes in theatre mode (multi-view) to save memory
+        // 6 streams x 64MB = 384MB is too much
+        const bufferSize = theatreMode ? 16 * 1024 * 1024 : 32 * 1024 * 1024; // 16MB for multi-view, 32MB for single
+        const backBufferSize = theatreMode ? 8 * 1024 * 1024 : 16 * 1024 * 1024; // 8MB for multi-view, 16MB for single
+
         const player = window.mpegts.createPlayer({
           type: 'mse',
           url: proxyTsUrl,
           isLive: true,
           enableStashBuffer: false,
-          // Buffer management - increased for better handling
+          // Buffer management - optimized for multi-view
           liveBufferLatencyChasing: true,
-          maxBufferSize: 64 * 1024 * 1024, // 64MB - increased from 32MB
+          maxBufferSize: bufferSize,
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackBufferSize: 32 * 1024 * 1024, // Clean up old buffer
-          // Retry on error
-          enableWorker: false, // Disable worker to avoid threading issues
+          autoCleanupMaxBackBufferSize: backBufferSize,
+          // Disable worker to reduce CPU overhead
+          enableWorker: false,
           lazyLoad: false,
           lazyLoadMaxDuration: 3 * 60, // 3 minutes
           lazyLoadRecoverDuration: 30 // 30 seconds
@@ -1121,13 +1102,24 @@ const IPTVPlayer = ({
         });
 
         // Listen for resolution changes (adaptive bitrate streams)
-        videoEl.addEventListener('resize', () => {
-          detectQualityMpegts('resize');
-        });
+        // Skip in theatre mode - initial detection is enough, saves event processing
+        if (!theatreMode) {
+          videoEl.addEventListener('resize', () => {
+            detectQualityMpegts('resize');
+          });
+        }
+
+        // Throttled timeupdate handler - fires ~4x/sec per video, too frequent for multi-view
+        let lastTimeUpdate = 0;
+        const timeUpdateThrottle = theatreMode ? 1000 : 250; // 1s in multi-view, 250ms single
 
         videoEl.addEventListener('timeupdate', () => {
+          const now = Date.now();
+          if (now - lastTimeUpdate < timeUpdateThrottle) return;
+          lastTimeUpdate = now;
+
           // Update last playing time when video is progressing
-          lastPlayingTimeRef.current = Date.now();
+          lastPlayingTimeRef.current = now;
 
           // Clear stall timer on normal playback
           if (stallTimerRef.current) {
@@ -1424,14 +1416,9 @@ const formatTime = (date) => {
 
   // Render control buttons only in normal mode (not in theatre mode)
   const renderControlButtons = () => {
-    console.log('[IPTVPlayer] renderControlButtons called, theatreMode:', theatreMode, 'typeof:', typeof theatreMode);
-
     if (theatreMode === true || theatreMode === 'true') {
-      console.log('[IPTVPlayer] Skipping button render - in theatre mode');
       return null;
     }
-
-    console.log('[IPTVPlayer] Rendering control buttons - not in theatre mode');
     return (
       <div style={{
         position: 'absolute',
@@ -2034,4 +2021,18 @@ const formatTime = (date) => {
   );
 };
 
-export default IPTVPlayer;
+// Memoize to prevent unnecessary re-renders in multi-view
+// Only re-render when these specific props change
+export default memo(IPTVPlayer, (prevProps, nextProps) => {
+  // Return true if props are equal (should NOT re-render)
+  // Return false if props are different (should re-render)
+  return (
+    prevProps.sessionId === nextProps.sessionId &&
+    prevProps.selectedChannel?.id === nextProps.selectedChannel?.id &&
+    prevProps.selectedChannel?.sourceId === nextProps.selectedChannel?.sourceId &&
+    prevProps.selectedChannel?._refreshKey === nextProps.selectedChannel?._refreshKey &&
+    prevProps.playbackMethod === nextProps.playbackMethod &&
+    prevProps.theatreMode === nextProps.theatreMode &&
+    prevProps.muted === nextProps.muted
+  );
+});
