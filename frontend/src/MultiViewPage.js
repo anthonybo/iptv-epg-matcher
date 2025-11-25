@@ -40,6 +40,18 @@ const MultiViewPage = ({ sessionId }) => {
   const [loadingBlacklist, setLoadingBlacklist] = useState(true);
   const [loadingStreams, setLoadingStreams] = useState(true);
 
+  // Settings state
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [autoFillSettings, setAutoFillSettings] = useState(() => {
+    const saved = localStorage.getItem('multiview_autofill_settings');
+    return saved ? JSON.parse(saved) : {
+      maxSlots: 4,
+      avoidDuplicateSources: true,
+      avoidDuplicateEvents: true
+    };
+  });
+  const [autoFillProgress, setAutoFillProgress] = useState(null);
+
   // Load blacklist from API on mount
   useEffect(() => {
     loadBlacklist();
@@ -635,6 +647,95 @@ const MultiViewPage = ({ sessionId }) => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSportDropdown]);
 
+  // Save settings to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('multiview_autofill_settings', JSON.stringify(autoFillSettings));
+  }, [autoFillSettings]);
+
+  // Auto-fill handler - fills multiple slots at once
+  const handleAutoFill = async (sportType = null, leagueName = null) => {
+    // Calculate how many slots to fill
+    const currentStreamCount = streams.length;
+    const slotsToFill = Math.max(0, autoFillSettings.maxSlots - currentStreamCount);
+
+    if (slotsToFill === 0) {
+      showToast(`Already at max slots (${autoFillSettings.maxSlots})`, 'info');
+      return;
+    }
+
+    setSearchingStream(true);
+    setAutoFillProgress({ found: 0, target: slotsToFill, status: 'Searching...' });
+    setShowSportDropdown(false);
+
+    try {
+      // Get current event IDs, source IDs, and channel IDs to exclude
+      const currentEventIds = autoFillSettings.avoidDuplicateEvents
+        ? streams.map(s => s.espnEventId).filter(id => id)
+        : [];
+
+      const currentSourceIds = autoFillSettings.avoidDuplicateSources
+        ? streams.map(s => s.sourceId).filter(id => id)
+        : [];
+
+      const currentChannelIds = streams.map(s => s.id).filter(id => id);
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        console.error('[Auto-fill] No authentication token found');
+        showToast('Authentication required', 'error');
+        setSearchingStream(false);
+        setAutoFillProgress(null);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/auto-fill-streams', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          sportType,
+          leagueName,
+          maxStreams: slotsToFill,
+          excludeSourceIds: currentSourceIds,
+          excludeEventIds: currentEventIds,
+          excludeChannelIds: currentChannelIds
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channels && data.channels.length > 0) {
+        setAutoFillProgress({ found: data.channels.length, target: slotsToFill, status: 'Adding streams...' });
+
+        // Add all found channels to multiview
+        let addedCount = 0;
+        for (const channel of data.channels) {
+          const success = await addToMultiview(channel);
+          if (success) {
+            addedCount++;
+            setAutoFillProgress(prev => ({ ...prev, found: addedCount, status: `Added ${addedCount}/${data.channels.length}...` }));
+          }
+        }
+
+        // Trigger reload
+        window.dispatchEvent(new Event('multiviewUpdate'));
+
+        showToast(`Added ${addedCount} stream${addedCount !== 1 ? 's' : ''} to Multi-View`, 'success');
+      } else {
+        showToast(data.message || 'No working streams found', 'error');
+      }
+    } catch (error) {
+      console.error('[Auto-fill] Error:', error);
+      showToast('Failed to auto-fill streams', 'error');
+    } finally {
+      setSearchingStream(false);
+      setAutoFillProgress(null);
+    }
+  };
+
   // Debug: Log when liveSports changes
   useEffect(() => {
     console.log('[Random Stream] liveSports state changed:', liveSports, 'count:', liveSports.length);
@@ -656,6 +757,17 @@ const MultiViewPage = ({ sessionId }) => {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
+              {/* Auto-fill progress indicator */}
+              {autoFillProgress && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-900/30 border border-emerald-700 text-emerald-300 text-xs">
+                  <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span>{autoFillProgress.status}</span>
+                </div>
+              )}
+
               {/* Random Stream Icon Expansion */}
               <div className="flex items-center gap-2 random-stream-dropdown">
                 {/* Main Random Button */}
@@ -671,7 +783,7 @@ const MultiViewPage = ({ sessionId }) => {
                   }`}
                   title="Add Random Live Stream"
                 >
-                  {searchingStream ? (
+                  {searchingStream && !autoFillProgress ? (
                     <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -700,22 +812,32 @@ const MultiViewPage = ({ sessionId }) => {
                 {/* Expanded Sport Icons */}
                 {showSportDropdown && !loadingSports && (
                   <>
-                    {/* Random (Any Sport) Icon */}
+                    {/* Auto-fill (Any Sport) Button - Main new feature */}
+                    <button
+                      onClick={() => handleAutoFill(null, null)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-500 bg-emerald-900/40 text-emerald-200 hover:bg-emerald-900/60 transition text-xs font-semibold"
+                      title={`Auto-fill up to ${autoFillSettings.maxSlots} slots with any live sport`}
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      Fill {autoFillSettings.maxSlots - streams.length > 0 ? autoFillSettings.maxSlots - streams.length : 0}
+                    </button>
+
+                    {/* Single stream button */}
                     <button
                       onClick={() => handleSportSelect(null, null)}
                       className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-emerald-600 bg-emerald-900/30 text-emerald-300 hover:bg-emerald-900/50 transition"
-                      title="Random (Any Sport)"
+                      title="Add 1 Random Sport Stream"
                     >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
-                      </svg>
+                      <span className="text-xs font-bold">+1</span>
                     </button>
 
                     {/* Random Sports Channel (General) Icon */}
                     <button
                       onClick={handleRandomSportsChannel}
                       className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-orange-600 bg-orange-900/30 text-orange-300 hover:bg-orange-900/50 transition"
-                      title="Random Sports Channel"
+                      title="Random Sports Channel (any)"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -723,16 +845,21 @@ const MultiViewPage = ({ sessionId }) => {
                       </svg>
                     </button>
 
-                    {/* Sport Icons */}
-                    {console.log('[Random Stream] Rendering sports:', liveSports)}
+                    {/* Divider */}
+                    {liveSports.length > 0 && (
+                      <div className="w-px h-6 bg-slate-600"></div>
+                    )}
+
+                    {/* Sport Icons with auto-fill on click */}
                     {liveSports.map((sport, index) => (
                       <button
                         key={index}
-                        onClick={() => handleSportSelect(sport.sport_type, sport.league_name)}
-                        className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-blue-600 bg-blue-900/30 text-blue-300 hover:bg-blue-900/50 transition font-bold text-sm"
-                        title={`${sport.league_name} (${sport.event_count} live)`}
+                        onClick={() => handleAutoFill(sport.sport_type, sport.league_name)}
+                        className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-blue-600 bg-blue-900/30 text-blue-300 hover:bg-blue-900/50 transition font-bold text-xs"
+                        title={`Auto-fill ${sport.league_name} (${sport.event_count} live games)`}
                       >
-                        {sport.sport_type[0]}
+                        {sport.league_name}
+                        <span className="text-blue-400/70 font-normal">({sport.event_count})</span>
                       </button>
                     ))}
                   </>
@@ -749,22 +876,17 @@ const MultiViewPage = ({ sessionId }) => {
                 )}
               </div>
 
-              {/* Test Random Channel Button */}
+              {/* Settings Button */}
               <button
-                onClick={handleRandomAnyChannel}
-                disabled={searchingStream}
-                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
-                  searchingStream
-                    ? 'border-slate-600 bg-slate-800/50 text-slate-500 cursor-not-allowed'
-                    : 'border-cyan-700 bg-cyan-900/20 text-cyan-300 hover:bg-cyan-900/40'
-                }`}
-                title="Find Random Channel (Test Blacklist)"
+                onClick={() => setShowSettingsModal(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-600 bg-slate-800/50 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-slate-700/50 hover:border-slate-500"
+                title="Multi-View Settings"
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                 </svg>
-                Test Random
+                <span className="text-slate-400">{autoFillSettings.maxSlots}</span>
               </button>
 
               {/* Blacklist Button */}
@@ -1059,6 +1181,154 @@ const MultiViewPage = ({ sessionId }) => {
                 className="w-full px-4 py-2 text-sm font-semibold rounded-lg border border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 transition-colors"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-md w-full overflow-hidden">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-slate-700">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-slate-100">Multi-View Settings</h2>
+                <button
+                  onClick={() => setShowSettingsModal(false)}
+                  className="text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <p className="mt-1 text-sm text-slate-400">
+                Configure auto-fill behavior for quick stream population
+              </p>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 space-y-6">
+              {/* Max Slots Setting */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Max Auto-Fill Slots
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min="1"
+                    max="9"
+                    value={autoFillSettings.maxSlots}
+                    onChange={(e) => setAutoFillSettings(prev => ({ ...prev, maxSlots: parseInt(e.target.value) }))}
+                    className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                  />
+                  <span className="w-8 text-center text-lg font-bold text-emerald-400">
+                    {autoFillSettings.maxSlots}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  When you click a sport, auto-fill will add up to {autoFillSettings.maxSlots} stream{autoFillSettings.maxSlots !== 1 ? 's' : ''} total
+                </p>
+              </div>
+
+              {/* Quick Presets */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Quick Presets
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {[2, 4, 6, 9].map((num) => (
+                    <button
+                      key={num}
+                      onClick={() => setAutoFillSettings(prev => ({ ...prev, maxSlots: num }))}
+                      className={`px-3 py-2 rounded-lg text-sm font-semibold transition ${
+                        autoFillSettings.maxSlots === num
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
+                      }`}
+                    >
+                      {num} slots
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Avoid Duplicate Sources */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="block text-sm font-medium text-slate-300">
+                    Avoid Duplicate Sources
+                  </label>
+                  <p className="text-xs text-slate-500">
+                    Use different IPTV sources for each stream
+                  </p>
+                </div>
+                <button
+                  onClick={() => setAutoFillSettings(prev => ({ ...prev, avoidDuplicateSources: !prev.avoidDuplicateSources }))}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    autoFillSettings.avoidDuplicateSources ? 'bg-emerald-600' : 'bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      autoFillSettings.avoidDuplicateSources ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Avoid Duplicate Events */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="block text-sm font-medium text-slate-300">
+                    Avoid Duplicate Events
+                  </label>
+                  <p className="text-xs text-slate-500">
+                    Don't add the same game/event twice
+                  </p>
+                </div>
+                <button
+                  onClick={() => setAutoFillSettings(prev => ({ ...prev, avoidDuplicateEvents: !prev.avoidDuplicateEvents }))}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    autoFillSettings.avoidDuplicateEvents ? 'bg-emerald-600' : 'bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      autoFillSettings.avoidDuplicateEvents ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Current Status */}
+              <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700">
+                <div className="flex items-center gap-2 text-sm text-slate-400">
+                  <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>
+                    Currently: {streams.length} stream{streams.length !== 1 ? 's' : ''} active
+                    {streams.length < autoFillSettings.maxSlots && (
+                      <span className="text-emerald-400 ml-1">
+                        ({autoFillSettings.maxSlots - streams.length} slot{autoFillSettings.maxSlots - streams.length !== 1 ? 's' : ''} available)
+                      </span>
+                    )}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-slate-700 bg-slate-900/50">
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                className="w-full px-4 py-2 text-sm font-semibold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+              >
+                Done
               </button>
             </div>
           </div>

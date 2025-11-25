@@ -1289,4 +1289,366 @@ router.post('/random-sports-channel', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/live-events/auto-fill-streams
+ * Auto-fill multiview with multiple streams at once based on settings
+ * Avoids duplicate sources and duplicate events
+ */
+router.post('/auto-fill-streams', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const {
+      sportType,
+      leagueName,
+      maxStreams = 4,
+      excludeSourceIds = [],
+      excludeEventIds = [],
+      excludeChannelIds = []
+    } = req.body;
+
+    const postgresService = require('../services/postgresService');
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+    const axios = require('axios');
+
+    // Fetch blacklisted channels
+    const blacklistResult = await postgresService.query(
+      'SELECT channel_name FROM blacklisted_channels WHERE user_id = $1',
+      [userId]
+    );
+    const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
+
+    logger.info(`Auto-fill: Looking for ${maxStreams} streams (sport: ${sportType || 'any'}, league: ${leagueName || 'any'})`);
+    logger.info(`Auto-fill: Excluding ${excludeSourceIds.length} sources, ${excludeEventIds.length} events, ${excludeChannelIds.length} channels`);
+
+    const foundChannels = [];
+    const usedSourceIds = new Set(excludeSourceIds.map(id => parseInt(id)));
+    const usedEventIds = new Set(excludeEventIds);
+    const usedChannelIds = new Set(excludeChannelIds);
+
+    // Build query for currently live events (PostgreSQL)
+    const conditions = ['event_start <= $1', 'event_end >= $2'];
+    const params = [new Date().toISOString(), new Date().toISOString()];
+    let paramIndex = 3;
+
+    if (sportType) {
+      conditions.push(`sport_type = $${paramIndex}`);
+      params.push(sportType);
+      paramIndex++;
+    }
+
+    if (leagueName) {
+      conditions.push(`league_name = $${paramIndex}`);
+      params.push(leagueName);
+      paramIndex++;
+    }
+
+    // Get all matching live events
+    const eventsResult = await postgresService.query(`
+      SELECT * FROM live_events
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY RANDOM()
+    `, params);
+
+    const events = eventsResult.rows || [];
+
+    if (events.length === 0) {
+      logger.info('Auto-fill: No live events found');
+      return res.json({
+        success: true,
+        channels: [],
+        message: sportType ? `No live ${sportType} events available` : 'No live events available'
+      });
+    }
+
+    logger.info(`Auto-fill: Found ${events.length} matching live events`);
+
+    // Helper function to test a channel
+    const testChannel = async (channel) => {
+      let testUrl = channel.url;
+
+      // Build proper URL for XTREAM sources
+      if (channel.source_type === 'xtream' && channel.source_url && channel.source_username && channel.source_password) {
+        const baseUrl = channel.source_url.replace(/\/$/, '');
+        const streamId = channel.url.split('/').pop();
+        testUrl = `${baseUrl}/live/${channel.source_username}/${channel.source_password}/${streamId}`;
+      }
+
+      // Handle Stalker portal authentication
+      if (channel.source_type === 'stalker') {
+        if (testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
+          const createLinkResponse = await axios.get(testUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+              'X-User-Agent': 'Model: MAG250; Link: WiFi',
+              'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
+            },
+            timeout: 10000
+          });
+
+          const linkData = createLinkResponse.data;
+
+          if (linkData?.js?.cmd) {
+            const freshCmd = linkData.js.cmd;
+            const match = freshCmd.match(/ffmpeg\s+(.+)/);
+            if (match && match[1]) {
+              let freshUrl = match[1];
+
+              // Fix empty stream parameter if needed
+              const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
+              if (originalCmdMatch) {
+                const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
+                if (originalStreamMatch && (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/))) {
+                  freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamMatch[1]}$1`);
+                }
+              }
+
+              testUrl = freshUrl;
+            }
+          }
+        }
+
+        // Validate Stalker stream
+        const ffprobeArgs = [
+          '-v', 'error',
+          '-print_format', 'json',
+          '-show_streams',
+          '-read_intervals', '%+#1',
+          '-timeout', '8000000',
+          '-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`,
+          testUrl
+        ];
+
+        const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
+          timeout: 10000,
+          maxBuffer: 1024 * 1024
+        });
+
+        const probeData = JSON.parse(stdout);
+        if (!probeData.streams || probeData.streams.length === 0) {
+          throw new Error('No streams found');
+        }
+
+        const hasVideo = probeData.streams.some(s => s.codec_type === 'video');
+        const hasAudio = probeData.streams.some(s => s.codec_type === 'audio');
+
+        if (!hasVideo && !hasAudio) {
+          throw new Error('No valid streams');
+        }
+      } else {
+        // M3U/XTREAM validation
+        const ffprobeArgs = [
+          '-v', 'error',
+          '-print_format', 'json',
+          '-show_streams',
+          '-read_intervals', '%+#1',
+          '-timeout', '8000000',
+          testUrl
+        ];
+
+        const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
+          timeout: 10000,
+          maxBuffer: 1024 * 1024
+        });
+
+        const probeData = JSON.parse(stdout);
+        if (!probeData.streams || probeData.streams.length === 0) {
+          throw new Error('No streams found');
+        }
+
+        const hasVideo = probeData.streams.some(s => s.codec_type === 'video');
+        const hasAudio = probeData.streams.some(s => s.codec_type === 'audio');
+
+        if (!hasVideo && !hasAudio) {
+          throw new Error('No valid streams');
+        }
+      }
+
+      return true;
+    };
+
+    // Clean team name helper
+    const cleanTeamName = (teamName) => {
+      let cleaned = teamName
+        .replace(/^(FC|CF|US|AS|AC|SC|VfL|SV|TSG|1\.|RB|CD|UD)\s+/i, '')
+        .replace(/\s+(FC|CF|United|City|Town|Hotspur|Wanderers|Athletic|Rovers)$/i, '')
+        .trim();
+
+      cleaned = cleaned
+        .replace(/\s+(Aggies|Anteaters|Bears|Bruins|Bulldogs|Cardinals|Cougars|Crimson Tide|Ducks|Eagles|Falcons|Gators|Hawkeyes|Huskies|Jayhawks|Knights|Lions|Longhorns|Mountaineers|Musketeers|Nittany Lions|Panthers|Razorbacks|Rebels|Seminoles|Sooners|Spartans|Sun Devils|Tar Heels|Terrapins|Tigers|Trojans|Utes|Volunteers|Wildcats|Wolverines|Badgers|Buckeyes|Cornhuskers|Cyclones|Fighting Irish|Golden Bears|Hokies|Horned Frogs|Hurricanes|Orange|Orangemen|Red Raiders|Scarlet Knights|Demon Deacons|Blue Devils|Gamecocks|Hoosiers|Boilermakers|Golden Gophers|Huskers|Huskies|Thundering Herd|Mean Green|Fighting Hawks|Chanticleers|Ragin' Cajuns|Warhawks|Red Foxes|Gaels|Bruins|Leathernecks)$/i, '')
+        .trim();
+
+      return cleaned;
+    };
+
+    // Iterate through events trying to fill slots
+    for (const event of events) {
+      if (foundChannels.length >= maxStreams) {
+        break;
+      }
+
+      // Skip already used events
+      if (usedEventIds.has(event.event_id)) {
+        continue;
+      }
+
+      const homeTeam = event.home_team || '';
+      const awayTeam = event.away_team || '';
+
+      const homeTeamClean = homeTeam ? cleanTeamName(homeTeam) : '';
+      const awayTeamClean = awayTeam ? cleanTeamName(awayTeam) : '';
+
+      const searchTerms = [];
+      if (homeTeam) {
+        searchTerms.push(homeTeam);
+        if (homeTeamClean !== homeTeam) searchTerms.push(homeTeamClean);
+      }
+      if (awayTeam) {
+        searchTerms.push(awayTeam);
+        if (awayTeamClean !== awayTeam) searchTerms.push(awayTeamClean);
+      }
+
+      if (searchTerms.length === 0) {
+        continue;
+      }
+
+      // Build channel query
+      const channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+      const searchParams = searchTerms.map(term => `%${term}%`);
+      let queryParams = [userId, ...searchParams];
+
+      // Build source exclusion clause (exclude already used sources)
+      let sourceExclusion = '';
+      if (usedSourceIds.size > 0) {
+        const sourceParamIndex = queryParams.length + 1;
+        const sourcePlaceholders = Array.from(usedSourceIds).map((_, i) => `$${sourceParamIndex + i}`).join(', ');
+        sourceExclusion = `AND s.id NOT IN (${sourcePlaceholders})`;
+        queryParams.push(...Array.from(usedSourceIds));
+      }
+
+      // Build blacklist conditions
+      let blacklistConditions = '1=1';
+      if (blacklistedChannels.length > 0) {
+        blacklistConditions = blacklistedChannels.map((name, i) => {
+          const paramIndex = queryParams.length + 1 + i;
+          queryParams.push(name);
+          return `c.name != $${paramIndex}`;
+        }).join(' AND ');
+      }
+
+      // Build channel exclusion
+      let channelExclusion = '';
+      if (usedChannelIds.size > 0) {
+        const channelParamIndex = queryParams.length + 1;
+        const channelPlaceholders = Array.from(usedChannelIds).map((_, i) => `$${channelParamIndex + i}`).join(', ');
+        channelExclusion = `AND c.channel_id NOT IN (${channelPlaceholders})`;
+        queryParams.push(...Array.from(usedChannelIds));
+      }
+
+      const channelsResult = await postgresService.query(`
+        SELECT
+          c.channel_id as id,
+          c.name,
+          c.logo_url as logo,
+          c.stream_url as url,
+          c.tvg_id as epg_channel_id,
+          c.group_title as category,
+          s.id as source_id,
+          s.name as source_name,
+          s.type as source_type,
+          s.url as source_url,
+          s.username as source_username,
+          s.password as source_password,
+          s.mac_address as source_mac
+        FROM iptv_channels c
+        JOIN iptv_sources s ON c.source_id = s.id
+        WHERE s.user_id = $1 AND (${channelConditions}) ${sourceExclusion} ${channelExclusion} AND ${blacklistConditions}
+        ORDER BY RANDOM()
+        LIMIT 5
+      `, queryParams);
+
+      const channels = channelsResult.rows || [];
+
+      if (channels.length === 0) {
+        continue;
+      }
+
+      // Test channels for this event
+      for (const channel of channels) {
+        if (foundChannels.length >= maxStreams) {
+          break;
+        }
+
+        // Skip if source already used (double-check)
+        if (usedSourceIds.has(parseInt(channel.source_id))) {
+          continue;
+        }
+
+        // Skip if channel already used
+        if (usedChannelIds.has(channel.id)) {
+          continue;
+        }
+
+        try {
+          logger.info(`Auto-fill: Testing channel ${channel.name} for event ${event.event_name}`);
+          await testChannel(channel);
+
+          logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING!`);
+
+          // Found a working channel
+          foundChannels.push({
+            id: channel.id,
+            name: channel.name,
+            logo: channel.logo,
+            url: channel.url,
+            sourceId: channel.source_id,
+            sourceName: channel.source_name,
+            sourceType: channel.source_type,
+            sourceUrl: channel.source_url,
+            sourceUsername: channel.source_username,
+            sourcePassword: channel.source_password,
+            sourceMac: channel.source_mac,
+            espnEventId: event.event_id,
+            espnEventName: event.event_name
+          });
+
+          // Mark source and event as used
+          usedSourceIds.add(parseInt(channel.source_id));
+          usedEventIds.add(event.event_id);
+          usedChannelIds.add(channel.id);
+
+          break; // Move to next event
+        } catch (error) {
+          logger.info(`Auto-fill: ✗ Channel ${channel.name} failed: ${error.message}`);
+          continue;
+        }
+      }
+    }
+
+    logger.info(`Auto-fill: Found ${foundChannels.length} working channels`);
+
+    return res.json({
+      success: true,
+      channels: foundChannels,
+      message: foundChannels.length === 0
+        ? 'No working streams found'
+        : `Found ${foundChannels.length} working stream${foundChannels.length !== 1 ? 's' : ''}`
+    });
+
+  } catch (error) {
+    logger.error('Auto-fill streams failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;
