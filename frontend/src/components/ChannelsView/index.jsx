@@ -736,15 +736,35 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
   );
 };
 
-// Auto-Test PiP Player Component
-const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, onSkip, onStop, isActive, foundWorking = false }) => {
+// Auto-Test PiP Player Component - memoized to prevent unnecessary re-renders
+const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalChannels, onSkip, onStop, isActive, foundWorking = false }) => {
   const [isMinimized, setIsMinimized] = React.useState(false);
   const [videoQuality, setVideoQuality] = React.useState(null);
+  const [debouncedChannel, setDebouncedChannel] = React.useState(null);
+  const debounceTimerRef = React.useRef(null);
+
+  // Debounce channel changes to prevent rapid stream switching
+  React.useEffect(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    // Small delay to let React StrictMode double-mount settle
+    debounceTimerRef.current = setTimeout(() => {
+      setDebouncedChannel(channel);
+    }, 100);
+
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [channel?.id, channel?.sourceId]);
 
   // Reset quality when channel changes
   React.useEffect(() => {
     setVideoQuality(null);
-  }, [channel?.id]);
+  }, [debouncedChannel?.id]);
 
   const handleAddToMultiview = async () => {
     const success = await addToMultiview(channel);
@@ -757,7 +777,7 @@ const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, on
     }
   };
 
-  if (!channel) return null;
+  if (!channel || !debouncedChannel) return null;
 
   return (
     <div
@@ -881,8 +901,9 @@ const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, on
             `}</style>
             <div className="absolute inset-0">
               <IPTVPlayer
+                key={`autotest-${debouncedChannel.sourceId}-${debouncedChannel.id}`}
                 sessionId={sessionId}
-                selectedChannel={channel}
+                selectedChannel={debouncedChannel}
                 playbackMethod="mpegts-player"
                 matchedChannels={{}}
                 theatreMode={true}
@@ -894,6 +915,6 @@ const AutoTestPiPPlayer = ({ channel, sessionId, currentIndex, totalChannels, on
       </div>
     </div>
   );
-};
+});
 
 export default ChannelsView;

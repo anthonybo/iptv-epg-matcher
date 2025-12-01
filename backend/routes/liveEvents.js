@@ -7,6 +7,8 @@ const express = require('express');
 const router = express.Router();
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const http = require('http');
+const https = require('https');
 const axios = require('axios');
 const logger = require('../config/logger');
 const { authMiddleware } = require('../middleware/authMiddleware');
@@ -16,6 +18,26 @@ const iptvDatabaseService = require('../services/iptvDatabase');
 
 // Promisify execFile once at module load
 const execFileAsync = promisify(execFile);
+
+// Connection pooling for axios requests (Stalker token refresh, etc.)
+// This prevents socket exhaustion when testing multiple channels in parallel
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 10,        // Limit concurrent connections per host
+  maxFreeSockets: 5,
+  timeout: 10000,        // 10 second socket timeout
+  keepAliveMsecs: 5000
+});
+
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 10,
+  maxFreeSockets: 5,
+  timeout: 10000,
+  keepAliveMsecs: 5000
+});
+
+logger.info('[LiveEvents] HTTP/HTTPS connection pooling enabled (maxSockets: 10)');
 
 // Apply auth middleware to all routes
 router.use(authMiddleware);
@@ -393,7 +415,9 @@ router.post('/random-working-stream', async (req, res) => {
                   'X-User-Agent': 'Model: MAG250; Link: WiFi',
                   'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
                 },
-                timeout: 10000
+                timeout: 10000,
+                httpAgent,
+                httpsAgent
               });
 
               const linkData = createLinkResponse.data;
@@ -781,7 +805,7 @@ router.post('/random-any-channel', async (req, res) => {
     let totalTested = 0;
     const maxBatches = 5; // Reduced batches since we test in parallel now
     const batchSize = 20; // Smaller batches for parallel testing
-    const PARALLEL_TESTS = 5; // Test 5 channels at a time
+    const PARALLEL_TESTS = 3; // Test 3 channels at a time (reduced to prevent network saturation)
 
     // Helper function to test a single channel
     const testSingleChannel = async (channel) => {
@@ -797,7 +821,9 @@ router.post('/random-any-channel', async (req, res) => {
                 'X-User-Agent': 'Model: MAG250; Link: WiFi',
                 'Cookie': `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`
               },
-              timeout: 5000
+              timeout: 5000,
+              httpAgent,
+              httpsAgent
             });
 
             const linkData = createLinkResponse.data;
@@ -1083,7 +1109,7 @@ router.post('/search-channel', async (req, res) => {
     logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams in parallel...`);
 
     // Test streams using ffprobe validation
-    const PARALLEL_TESTS = 5; // Test 5 channels at a time
+    const PARALLEL_TESTS = 3; // Test 3 channels at a time (reduced to prevent network saturation)
 
     // Helper function to test a single channel
     const testSingleChannel = async (channel, index) => {
@@ -1106,7 +1132,9 @@ router.post('/search-channel', async (req, res) => {
                 'X-User-Agent': 'Model: MAG250; Link: WiFi',
                 'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
               },
-              timeout: 5000
+              timeout: 5000,
+              httpAgent,
+              httpsAgent
             });
 
             const linkData = createLinkResponse.data;
@@ -1462,7 +1490,9 @@ router.post('/random-sports-channel', async (req, res) => {
                 'X-User-Agent': 'Model: MAG250; Link: WiFi',
                 'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
               },
-              timeout: 10000
+              timeout: 10000,
+              httpAgent,
+              httpsAgent
             });
 
             const linkData = createLinkResponse.data;
@@ -1685,7 +1715,9 @@ router.post('/auto-fill-streams', async (req, res) => {
               'X-User-Agent': 'Model: MAG250; Link: WiFi',
               'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
             },
-            timeout: 10000
+            timeout: 10000,
+            httpAgent,
+            httpsAgent
           });
 
           const linkData = createLinkResponse.data;
