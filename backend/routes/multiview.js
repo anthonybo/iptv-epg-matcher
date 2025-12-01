@@ -39,6 +39,8 @@ router.get('/', async (req, res) => {
         source_name as "sourceName",
         espn_event_id as "espnEventId",
         espn_event_name as "espnEventName",
+        search_query as "searchQuery",
+        search_offset as "searchOffset",
         muted,
         EXTRACT(EPOCH FROM added_at) * 1000 as "addedAt"
        FROM multiview_streams
@@ -110,8 +112,8 @@ router.post('/', async (req, res) => {
       `INSERT INTO multiview_streams (
         user_id, channel_id, name, logo, url,
         source_id, source_type, source_url, source_username, source_password, source_mac, source_name,
-        espn_event_id, espn_event_name
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        espn_event_id, espn_event_name, search_query, search_offset
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       ON CONFLICT (user_id, channel_id, source_id) DO NOTHING`,
       [
         userId,
@@ -127,7 +129,9 @@ router.post('/', async (req, res) => {
         sourceMac || null,
         sourceName || null,
         channel.espnEventId || null,
-        channel.espnEventName || null
+        channel.espnEventName || null,
+        channel.searchQuery || null,
+        channel.searchOffset || null
       ]
     );
 

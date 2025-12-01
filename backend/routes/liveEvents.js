@@ -741,7 +741,8 @@ router.post('/random-any-channel', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const { excludeSourceIds = [] } = req.body;
+    const { excludeSourceIds = [], minQuality = 0 } = req.body;
+    const minHeight = parseInt(minQuality) || 0;
 
     const postgresService = require('../services/postgresService');
 
@@ -752,7 +753,7 @@ router.post('/random-any-channel', async (req, res) => {
     );
     const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
 
-    logger.info(`Finding random channel from all channels (excludedSources: ${excludeSourceIds.length}, blacklistedChannels: ${blacklistedChannels.length})`);
+    logger.info(`Finding random channel from all channels (excludedSources: ${excludeSourceIds.length}, blacklistedChannels: ${blacklistedChannels.length}, minQuality: ${minHeight}p)`);
 
     // Build source exclusion clause
     let sourceExclusion = '';
@@ -768,49 +769,14 @@ router.post('/random-any-channel', async (req, res) => {
     // Build blacklist conditions
     let blacklistConditions = '1=1';
     if (blacklistedChannels.length > 0) {
+      const blacklistParamIndex = queryParams.length + 1;
       blacklistConditions = blacklistedChannels.map((name, i) => {
-        const paramIndex = queryParams.length + 1 + i;
-        queryParams.push(name);
-        return `c.name != $${paramIndex}`;
+        return `c.name != $${blacklistParamIndex + i}`;
       }).join(' AND ');
+      queryParams.push(...blacklistedChannels);
 
       logger.info(`Blacklisting ${blacklistedChannels.length} channels`);
     }
-
-    // Get random channels
-    const channelsResult = await postgresService.query(`
-      SELECT
-        c.channel_id as id,
-        c.name,
-        c.logo_url as logo,
-        c.stream_url as url,
-        c.tvg_id as epg_channel_id,
-        c.group_title as category,
-        s.id as source_id,
-        s.name as source_name,
-        s.type as source_type,
-        s.url as source_url,
-        s.username as source_username,
-        s.password as source_password,
-        s.mac_address as source_mac
-      FROM iptv_channels c
-      JOIN iptv_sources s ON c.source_id = s.id
-      WHERE s.user_id = $1 ${sourceExclusion} AND ${blacklistConditions}
-      ORDER BY RANDOM()
-      LIMIT 50
-    `, queryParams);
-
-    let channels = channelsResult.rows || [];
-
-    if (channels.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No channels found',
-        message: 'No channels available after filtering'
-      });
-    }
-
-    logger.info(`Found ${channels.length} channels, testing streams...`);
 
     // Test streams using same validation logic as random-working-stream
     const { execFile } = require('child_process');
@@ -818,116 +784,180 @@ router.post('/random-any-channel', async (req, res) => {
     const execFileAsync = promisify(execFile);
     const axios = require('axios');
 
-    for (const channel of channels) {
-      try {
-        logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+    // Track tested channel IDs to avoid duplicates across batches
+    const testedChannelIds = new Set();
+    let totalTested = 0;
+    const maxBatches = 10; // Try up to 10 batches (500 channels max)
+    const batchSize = 50;
 
-        let testUrl = channel.url;
+    for (let batch = 0; batch < maxBatches; batch++) {
+      // Get random channels
+      const channelsResult = await postgresService.query(`
+        SELECT
+          c.channel_id as id,
+          c.name,
+          c.logo_url as logo,
+          c.stream_url as url,
+          c.tvg_id as epg_channel_id,
+          c.group_title as category,
+          s.id as source_id,
+          s.name as source_name,
+          s.type as source_type,
+          s.url as source_url,
+          s.username as source_username,
+          s.password as source_password,
+          s.mac_address as source_mac
+        FROM iptv_channels c
+        JOIN iptv_sources s ON c.source_id = s.id
+        WHERE s.user_id = $1 ${sourceExclusion} AND ${blacklistConditions}
+        ORDER BY RANDOM()
+        LIMIT ${batchSize}
+      `, queryParams);
 
-        // Handle Stalker portals - need to refresh token
-        if (channel.source_type === 'stalker' && testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
-          logger.info(`Stalker portal detected, refreshing token for channel: ${channel.name}`);
+      let channels = channelsResult.rows || [];
 
-          try {
-            const createLinkResponse = await axios.get(testUrl, {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C)',
-                'X-User-Agent': 'Model: MAG250; Link: WiFi',
-                'Cookie': `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`
-              },
-              timeout: 5000
-            });
-
-            const linkData = createLinkResponse.data;
-            if (!linkData.js || !linkData.js.cmd) {
-              logger.warn(`Invalid Stalker response for ${channel.name}: ${JSON.stringify(linkData)}`);
-              continue;
-            }
-
-            const freshCmd = linkData.js.cmd;
-            const cmdMatch = freshCmd.match(/ffmpeg\s+(.+)/);
-            if (!cmdMatch) {
-              logger.warn(`Could not extract stream URL from Stalker cmd: ${freshCmd}`);
-              continue;
-            }
-
-            let freshUrl = cmdMatch[1];
-
-            // Fix empty stream parameter bug
-            const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
-            if (originalCmdMatch) {
-              const originalCmd = decodeURIComponent(originalCmdMatch[1]);
-              const streamIdMatch = originalCmd.match(/stream=([^&]+)/);
-              if (streamIdMatch && streamIdMatch[1]) {
-                const originalStreamId = streamIdMatch[1];
-                if (freshUrl.includes('stream=&')) {
-                  freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
-                  logger.info(`Fixed empty stream parameter: stream=${originalStreamId}`);
-                }
-              }
-            }
-
-            testUrl = freshUrl;
-            logger.info(`Using refreshed Stalker URL: ${testUrl.substring(0, 100)}...`);
-          } catch (stalkerError) {
-            logger.error(`Stalker token refresh failed for ${channel.name}:`, stalkerError.message);
-            continue;
-          }
-        }
-
-        // Validate stream with ffprobe
-        const ffprobeArgs = [
-          '-v', 'error',
-          '-print_format', 'json',
-          '-show_streams',
-          '-read_intervals', '%+#1',
-          '-timeout', '8000000',
-          testUrl
-        ];
-
-        try {
-          const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
-            timeout: 10000,
-            maxBuffer: 1024 * 1024
+      if (channels.length === 0) {
+        if (batch === 0) {
+          return res.status(404).json({
+            success: false,
+            error: 'No channels found',
+            message: 'No channels available after filtering'
           });
+        }
+        break; // No more channels to test
+      }
 
-          const probeData = JSON.parse(stdout);
-          const hasVideo = probeData.streams && probeData.streams.some(s => s.codec_type === 'video');
-          const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
+      logger.info(`Batch ${batch + 1}/${maxBatches}: Found ${channels.length} channels, testing streams... (totalTested so far: ${totalTested})`);
 
-          if (hasVideo || hasAudio) {
-            logger.info(`✓ Stream validated for ${channel.name} (video: ${hasVideo}, audio: ${hasAudio})`);
-
-            return res.json({
-              success: true,
-              channel: {
-                id: channel.id,
-                name: channel.name,
-                logo: channel.logo,
-                url: channel.url,
-                sourceId: channel.source_id,
-                sourceName: channel.source_name,
-                sourceType: channel.source_type,
-                category: channel.category
-              }
-            });
-          } else {
-            logger.warn(`✗ No video/audio streams found for ${channel.name}`);
-          }
-        } catch (ffprobeError) {
-          logger.warn(`✗ ffprobe validation failed for ${channel.name}:`, ffprobeError.message);
+      for (const channel of channels) {
+        // Skip if we already tested this channel in a previous batch
+        if (testedChannelIds.has(channel.id)) {
           continue;
         }
-      } catch (error) {
-        logger.error(`Error testing channel ${channel.name}:`, error.message);
-        continue;
+        testedChannelIds.add(channel.id);
+        totalTested++;
+
+        try {
+          logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+
+          let testUrl = channel.url;
+
+          // Handle Stalker portals - need to refresh token
+          if (channel.source_type === 'stalker' && testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
+            try {
+              const createLinkResponse = await axios.get(testUrl, {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C)',
+                  'X-User-Agent': 'Model: MAG250; Link: WiFi',
+                  'Cookie': `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`
+                },
+                timeout: 5000
+              });
+
+              const linkData = createLinkResponse.data;
+              if (!linkData.js || !linkData.js.cmd) {
+                logger.info(`✗ Channel ${channel.name}: Stalker token refresh - no cmd in response`);
+                continue;
+              }
+
+              const freshCmd = linkData.js.cmd;
+              const cmdMatch = freshCmd.match(/ffmpeg\s+(.+)/);
+              if (!cmdMatch) {
+                logger.info(`✗ Channel ${channel.name}: Stalker token refresh - could not parse cmd`);
+                continue;
+              }
+
+              let freshUrl = cmdMatch[1];
+
+              // Fix empty stream parameter bug
+              const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
+              if (originalCmdMatch) {
+                const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                const streamIdMatch = originalCmd.match(/stream=([^&]+)/);
+                if (streamIdMatch && streamIdMatch[1]) {
+                  const originalStreamId = streamIdMatch[1];
+                  if (freshUrl.includes('stream=&')) {
+                    freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
+                  }
+                }
+              }
+
+              testUrl = freshUrl;
+            } catch (stalkerError) {
+              logger.info(`✗ Channel ${channel.name}: Stalker token refresh failed - ${stalkerError.message}`);
+              continue;
+            }
+          }
+
+          // Validate stream with ffprobe
+          const ffprobeArgs = [
+            '-v', 'error',
+            '-print_format', 'json',
+            '-show_streams',
+            '-read_intervals', '%+#1',
+            '-timeout', '8000000'
+          ];
+
+          // Add headers for Stalker streams
+          if (channel.source_type === 'stalker' && channel.source_mac) {
+            ffprobeArgs.push('-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`);
+          }
+
+          ffprobeArgs.push(testUrl);
+
+          try {
+            const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
+              timeout: 10000,
+              maxBuffer: 1024 * 1024
+            });
+
+            const probeData = JSON.parse(stdout);
+            const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
+            const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
+
+            if (videoStream || hasAudio) {
+              const streamHeight = videoStream ? (videoStream.height || 0) : 0;
+
+              // Check quality requirement
+              if (minHeight > 0 && streamHeight < minHeight) {
+                logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
+                continue;
+              }
+
+              logger.info(`✓ Stream validated for ${channel.name} (${streamHeight}p, audio: ${hasAudio})`);
+
+              return res.json({
+                success: true,
+                channel: {
+                  id: channel.id,
+                  name: channel.name,
+                  logo: channel.logo,
+                  url: channel.url,
+                  sourceId: channel.source_id,
+                  sourceName: channel.source_name,
+                  sourceType: channel.source_type,
+                  category: channel.category,
+                  quality: streamHeight
+                }
+              });
+            }
+          } catch (ffprobeError) {
+            logger.info(`✗ Channel ${channel.name} failed: ${ffprobeError.message.split('\n')[0]}`);
+            continue;
+          }
+        } catch (error) {
+          continue;
+        }
       }
     }
 
+    logger.info(`Random any channel: Finished testing ${totalTested} channels across ${maxBatches} batches, no working streams found`);
     return res.status(404).json({
       success: false,
       error: 'No working streams found',
-      message: `Tested ${channels.length} channels but none were working`
+      message: minHeight > 0
+        ? `Tested ${totalTested} channels but none met the ${minHeight}p quality requirement`
+        : `Tested ${totalTested} channels but none were working`
     });
   } catch (error) {
     logger.error('Random any channel failed:', error);
@@ -951,7 +981,7 @@ router.post('/search-channel', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const { query, excludeSourceIds = [], excludeChannelIds = [], minQuality = 0 } = req.body;
+    const { query, excludeSourceIds = [], excludeChannelIds = [], minQuality = 0, searchOffset = 0 } = req.body;
 
     if (!query || typeof query !== 'string' || query.trim().length < 2) {
       return res.status(400).json({
@@ -962,6 +992,7 @@ router.post('/search-channel', async (req, res) => {
 
     const searchQuery = query.trim();
     const minHeight = parseInt(minQuality) || 0;
+    const offset = parseInt(searchOffset) || 0;
     const postgresService = require('../services/postgresService');
 
     // Fetch blacklisted channels
@@ -1034,7 +1065,7 @@ router.post('/search-channel', async (req, res) => {
         ${channelExclusion}
         AND ${blacklistConditions}
       ORDER BY match_priority, c.name
-      LIMIT 20
+      LIMIT 20 OFFSET ${offset}
     `, queryParams);
 
     let channels = channelsResult.rows || [];
@@ -1140,6 +1171,11 @@ router.post('/search-channel', async (req, res) => {
 
           logger.info(`✓ Found working channel: ${channel.name} (${streamHeight}p)`);
 
+          // Calculate the index of this channel in the current batch
+          const channelIndexInBatch = channels.indexOf(channel);
+          // Next offset = current offset + position in batch + 1 (to skip this one next time)
+          const nextSearchOffset = offset + channelIndexInBatch + 1;
+
           return res.json({
             success: true,
             channel: {
@@ -1155,7 +1191,10 @@ router.post('/search-channel', async (req, res) => {
               sourcePassword: channel.source_password,
               sourceMac: channel.source_mac,
               category: channel.category,
-              quality: streamHeight
+              quality: streamHeight,
+              // Include search metadata for "find alternative" feature
+              searchQuery: searchQuery,
+              searchOffset: nextSearchOffset
             }
           });
         }
@@ -1736,16 +1775,24 @@ router.post('/auto-fill-streams', async (req, res) => {
       return cleaned;
     };
 
-    // Iterate through events trying to fill slots
-    for (const event of events) {
-      if (foundChannels.length >= maxStreams) {
-        break;
-      }
+    // Track which events we've exhausted all channels for
+    const exhaustedEvents = new Set();
 
-      // Skip already used events
-      if (usedEventIds.has(event.event_id)) {
-        continue;
-      }
+    // Do multiple passes through events until we fill all slots or exhaust all options
+    const maxPasses = 5; // Try up to 5 passes through the events
+
+    for (let pass = 0; pass < maxPasses && foundChannels.length < maxStreams; pass++) {
+      logger.info(`Auto-fill: Pass ${pass + 1}/${maxPasses} - ${foundChannels.length}/${maxStreams} streams found`);
+
+      for (const event of events) {
+        if (foundChannels.length >= maxStreams) {
+          break;
+        }
+
+        // Skip already used events (when avoidDuplicateEvents is on) or exhausted events
+        if (usedEventIds.has(event.event_id) || exhaustedEvents.has(event.event_id)) {
+          continue;
+        }
 
       const homeTeam = event.home_team || '';
       const awayTeam = event.away_team || '';
@@ -1784,11 +1831,11 @@ router.post('/auto-fill-streams', async (req, res) => {
       // Build blacklist conditions
       let blacklistConditions = '1=1';
       if (blacklistedChannels.length > 0) {
+        const blacklistParamIndex = queryParams.length + 1;
         blacklistConditions = blacklistedChannels.map((name, i) => {
-          const paramIndex = queryParams.length + 1 + i;
-          queryParams.push(name);
-          return `c.name != $${paramIndex}`;
+          return `c.name != $${blacklistParamIndex + i}`;
         }).join(' AND ');
+        queryParams.push(...blacklistedChannels);
       }
 
       // Build channel exclusion
@@ -1819,75 +1866,90 @@ router.post('/auto-fill-streams', async (req, res) => {
         JOIN iptv_sources s ON c.source_id = s.id
         WHERE s.user_id = $1 AND (${channelConditions}) ${sourceExclusion} ${channelExclusion} AND ${blacklistConditions}
         ORDER BY RANDOM()
-        LIMIT 5
+        LIMIT 20
       `, queryParams);
 
-      const channels = channelsResult.rows || [];
+        const channels = channelsResult.rows || [];
 
-      if (channels.length === 0) {
-        continue;
-      }
-
-      // Test channels for this event
-      for (const channel of channels) {
-        if (foundChannels.length >= maxStreams) {
-          break;
-        }
-
-        // Skip if source already used (double-check)
-        if (usedSourceIds.has(parseInt(channel.source_id))) {
+        if (channels.length === 0) {
+          // No more channels for this event, mark as exhausted
+          exhaustedEvents.add(event.event_id);
           continue;
         }
 
-        // Skip if channel already used
-        if (usedChannelIds.has(channel.id)) {
-          continue;
-        }
+        let foundForThisEvent = false;
 
-        try {
-          logger.info(`Auto-fill: Testing channel ${channel.name} for event ${event.event_name}`);
-          const result = await testChannel(channel);
+        // Test channels for this event
+        for (const channel of channels) {
+          if (foundChannels.length >= maxStreams) {
+            break;
+          }
 
-          // Check quality requirement
-          if (minHeight > 0 && result.height < minHeight) {
-            logger.info(`Auto-fill: ✗ Channel ${channel.name} quality too low: ${result.height}p < ${minHeight}p`);
+          // Skip if source already used (double-check)
+          if (usedSourceIds.has(parseInt(channel.source_id))) {
             continue;
           }
 
-          logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING! (${result.height}p)`);
+          // Skip if channel already used
+          if (usedChannelIds.has(channel.id)) {
+            continue;
+          }
 
-          // Found a working channel
-          foundChannels.push({
-            id: channel.id,
-            name: channel.name,
-            logo: channel.logo,
-            url: channel.url,
-            sourceId: channel.source_id,
-            sourceName: channel.source_name,
-            sourceType: channel.source_type,
-            sourceUrl: channel.source_url,
-            sourceUsername: channel.source_username,
-            sourcePassword: channel.source_password,
-            sourceMac: channel.source_mac,
-            espnEventId: event.event_id,
-            espnEventName: event.event_name,
-            quality: result.height
-          });
+          try {
+            logger.info(`Auto-fill: Testing channel ${channel.name} for event ${event.event_name}`);
+            const result = await testChannel(channel);
 
-          // Mark source and event as used
-          usedSourceIds.add(parseInt(channel.source_id));
-          usedEventIds.add(event.event_id);
-          usedChannelIds.add(channel.id);
+            // Check quality requirement
+            if (minHeight > 0 && result.height < minHeight) {
+              logger.info(`Auto-fill: ✗ Channel ${channel.name} quality too low: ${result.height}p < ${minHeight}p`);
+              // Mark channel as tested so we skip it next pass
+              usedChannelIds.add(channel.id);
+              continue;
+            }
 
-          break; // Move to next event
-        } catch (error) {
-          logger.info(`Auto-fill: ✗ Channel ${channel.name} failed: ${error.message}`);
-          continue;
+            logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING! (${result.height}p)`);
+
+            // Found a working channel
+            foundChannels.push({
+              id: channel.id,
+              name: channel.name,
+              logo: channel.logo,
+              url: channel.url,
+              sourceId: channel.source_id,
+              sourceName: channel.source_name,
+              sourceType: channel.source_type,
+              sourceUrl: channel.source_url,
+              sourceUsername: channel.source_username,
+              sourcePassword: channel.source_password,
+              sourceMac: channel.source_mac,
+              espnEventId: event.event_id,
+              espnEventName: event.event_name,
+              quality: result.height
+            });
+
+            // Mark source and event as used
+            usedSourceIds.add(parseInt(channel.source_id));
+            usedEventIds.add(event.event_id);
+            usedChannelIds.add(channel.id);
+            foundForThisEvent = true;
+
+            break; // Move to next event
+          } catch (error) {
+            logger.info(`Auto-fill: ✗ Channel ${channel.name} failed: ${error.message}`);
+            // Mark channel as tested so we skip it next pass
+            usedChannelIds.add(channel.id);
+            continue;
+          }
+        }
+
+        // If we tested all channels and found nothing, mark event as exhausted
+        if (!foundForThisEvent && channels.length < 20) {
+          exhaustedEvents.add(event.event_id);
         }
       }
     }
 
-    logger.info(`Auto-fill: Found ${foundChannels.length} working channels`);
+    logger.info(`Auto-fill: Completed - Found ${foundChannels.length} working channels after ${maxPasses} passes`);
 
     return res.json({
       success: true,

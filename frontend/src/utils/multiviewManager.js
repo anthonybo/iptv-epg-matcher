@@ -102,7 +102,10 @@ export const addToMultiview = async (channel) => {
       sourceMac: channel.sourceMac || channel.source_mac,
       sourceName: channel.sourceName || channel.source_name,
       espnEventId: channel.espnEventId,
-      espnEventName: channel.espnEventName
+      espnEventName: channel.espnEventName,
+      // Store search metadata for "find alternative" feature
+      searchQuery: channel.searchQuery,
+      searchOffset: channel.searchOffset
     };
 
     const response = await fetch('/api/multiview', {
