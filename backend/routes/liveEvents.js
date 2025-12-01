@@ -5,9 +5,17 @@
 
 const express = require('express');
 const router = express.Router();
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const axios = require('axios');
 const logger = require('../config/logger');
 const { authMiddleware } = require('../middleware/authMiddleware');
 const liveEventsService = require('../services/liveEventsService');
+const postgresService = require('../services/postgresService');
+const iptvDatabaseService = require('../services/iptvDatabase');
+
+// Promisify execFile once at module load
+const execFileAsync = promisify(execFile);
 
 // Apply auth middleware to all routes
 router.use(authMiddleware);
@@ -95,7 +103,6 @@ router.get('/upcoming', async (req, res) => {
     }
 
     const hoursAhead = parseInt(req.query.hours) || 24;
-    const iptvDatabaseService = require('../services/iptvDatabase');
     const db = await iptvDatabaseService.connect();
 
     const now = new Date().toISOString();
@@ -147,8 +154,6 @@ router.get('/live-sports-summary', async (req, res) => {
       : [];
 
     logger.info(`Getting live sports summary (excluding ${excludeEventIds.length} events)`);
-
-    const postgresService = require('../services/postgresService');
 
     // Build exclusion clause for PostgreSQL
     const exclusionClause = excludeEventIds.length > 0
@@ -205,8 +210,6 @@ router.post('/random-working-stream', async (req, res) => {
     }
 
     const { sportType, leagueName, excludeEventIds = [], excludeSourceIds = [] } = req.body;
-
-    const postgresService = require('../services/postgresService');
 
     // Fetch blacklisted channels from database
     const blacklistResult = await postgresService.query(
@@ -362,10 +365,6 @@ router.post('/random-working-stream', async (req, res) => {
 
       // Validate streams using ffprobe for M3U/XTREAM (industry standard for IPTV validation)
       // For Stalker, use simpler HTTP validation since ffprobe struggles with portal auth
-      const { execFile } = require('child_process');
-      const { promisify } = require('util');
-      const execFileAsync = promisify(execFile);
-      const axios = require('axios');
 
       for (const channel of channels) {
         try {
@@ -571,7 +570,6 @@ router.get('/:eventId/channels', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const iptvDatabaseService = require('../services/iptvDatabase');
     const db = await iptvDatabaseService.connect();
 
     // Get the event details
@@ -744,8 +742,6 @@ router.post('/random-any-channel', async (req, res) => {
     const { excludeSourceIds = [], minQuality = 0 } = req.body;
     const minHeight = parseInt(minQuality) || 0;
 
-    const postgresService = require('../services/postgresService');
-
     // Fetch blacklisted channels from database
     const blacklistResult = await postgresService.query(
       'SELECT channel_name FROM blacklisted_channels WHERE user_id = $1',
@@ -779,16 +775,98 @@ router.post('/random-any-channel', async (req, res) => {
     }
 
     // Test streams using same validation logic as random-working-stream
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
-    const axios = require('axios');
 
     // Track tested channel IDs to avoid duplicates across batches
     const testedChannelIds = new Set();
     let totalTested = 0;
-    const maxBatches = 10; // Try up to 10 batches (500 channels max)
-    const batchSize = 50;
+    const maxBatches = 5; // Reduced batches since we test in parallel now
+    const batchSize = 20; // Smaller batches for parallel testing
+    const PARALLEL_TESTS = 5; // Test 5 channels at a time
+
+    // Helper function to test a single channel
+    const testSingleChannel = async (channel) => {
+      try {
+        let testUrl = channel.url;
+
+        // Handle Stalker portals - need to refresh token
+        if (channel.source_type === 'stalker' && testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
+          try {
+            const createLinkResponse = await axios.get(testUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C)',
+                'X-User-Agent': 'Model: MAG250; Link: WiFi',
+                'Cookie': `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`
+              },
+              timeout: 5000
+            });
+
+            const linkData = createLinkResponse.data;
+            if (!linkData.js || !linkData.js.cmd) {
+              return { success: false, reason: 'Stalker token refresh - no cmd' };
+            }
+
+            const freshCmd = linkData.js.cmd;
+            const cmdMatch = freshCmd.match(/ffmpeg\s+(.+)/);
+            if (!cmdMatch) {
+              return { success: false, reason: 'Stalker token refresh - could not parse cmd' };
+            }
+
+            let freshUrl = cmdMatch[1];
+
+            // Fix empty stream parameter bug
+            const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
+            if (originalCmdMatch) {
+              const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+              const streamIdMatch = originalCmd.match(/stream=([^&]+)/);
+              if (streamIdMatch && streamIdMatch[1]) {
+                const originalStreamId = streamIdMatch[1];
+                if (freshUrl.includes('stream=&')) {
+                  freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
+                }
+              }
+            }
+
+            testUrl = freshUrl;
+          } catch (stalkerError) {
+            return { success: false, reason: `Stalker token refresh failed - ${stalkerError.message}` };
+          }
+        }
+
+        // Validate stream with ffprobe
+        const ffprobeArgs = [
+          '-v', 'error',
+          '-print_format', 'json',
+          '-show_streams',
+          '-read_intervals', '%+#1',
+          '-timeout', '8000000'
+        ];
+
+        // Add headers for Stalker streams
+        if (channel.source_type === 'stalker' && channel.source_mac) {
+          ffprobeArgs.push('-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`);
+        }
+
+        ffprobeArgs.push(testUrl);
+
+        const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
+          timeout: 8000, // Reduced timeout for faster testing
+          maxBuffer: 1024 * 1024
+        });
+
+        const probeData = JSON.parse(stdout);
+        const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
+        const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
+
+        if (videoStream || hasAudio) {
+          const streamHeight = videoStream ? (videoStream.height || 0) : 0;
+          return { success: true, height: streamHeight, hasAudio, channel };
+        }
+
+        return { success: false, reason: 'No video or audio streams' };
+      } catch (error) {
+        return { success: false, reason: error.message.split('\n')[0] };
+      }
+    };
 
     for (let batch = 0; batch < maxBatches; batch++) {
       // Get random channels
@@ -827,126 +905,52 @@ router.post('/random-any-channel', async (req, res) => {
         break; // No more channels to test
       }
 
-      logger.info(`Batch ${batch + 1}/${maxBatches}: Found ${channels.length} channels, testing streams... (totalTested so far: ${totalTested})`);
+      // Filter out already tested channels
+      channels = channels.filter(ch => !testedChannelIds.has(ch.id));
+      channels.forEach(ch => testedChannelIds.add(ch.id));
 
-      for (const channel of channels) {
-        // Skip if we already tested this channel in a previous batch
-        if (testedChannelIds.has(channel.id)) {
-          continue;
-        }
-        testedChannelIds.add(channel.id);
-        totalTested++;
+      logger.info(`Batch ${batch + 1}/${maxBatches}: Testing ${channels.length} channels in parallel... (totalTested so far: ${totalTested})`);
 
-        try {
+      // Test channels in parallel with concurrency limit
+      for (let i = 0; i < channels.length; i += PARALLEL_TESTS) {
+        const chunk = channels.slice(i, i + PARALLEL_TESTS);
+        const results = await Promise.all(chunk.map(async (channel) => {
+          totalTested++;
           logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+          const result = await testSingleChannel(channel);
+          return { channel, result };
+        }));
 
-          let testUrl = channel.url;
+        // Check results for a working channel
+        for (const { channel, result } of results) {
+          if (result.success) {
+            const streamHeight = result.height;
 
-          // Handle Stalker portals - need to refresh token
-          if (channel.source_type === 'stalker' && testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
-            try {
-              const createLinkResponse = await axios.get(testUrl, {
-                headers: {
-                  'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C)',
-                  'X-User-Agent': 'Model: MAG250; Link: WiFi',
-                  'Cookie': `mac=${channel.source_mac}; stb_lang=en; timezone=America/New_York`
-                },
-                timeout: 5000
-              });
-
-              const linkData = createLinkResponse.data;
-              if (!linkData.js || !linkData.js.cmd) {
-                logger.info(`✗ Channel ${channel.name}: Stalker token refresh - no cmd in response`);
-                continue;
-              }
-
-              const freshCmd = linkData.js.cmd;
-              const cmdMatch = freshCmd.match(/ffmpeg\s+(.+)/);
-              if (!cmdMatch) {
-                logger.info(`✗ Channel ${channel.name}: Stalker token refresh - could not parse cmd`);
-                continue;
-              }
-
-              let freshUrl = cmdMatch[1];
-
-              // Fix empty stream parameter bug
-              const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
-              if (originalCmdMatch) {
-                const originalCmd = decodeURIComponent(originalCmdMatch[1]);
-                const streamIdMatch = originalCmd.match(/stream=([^&]+)/);
-                if (streamIdMatch && streamIdMatch[1]) {
-                  const originalStreamId = streamIdMatch[1];
-                  if (freshUrl.includes('stream=&')) {
-                    freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
-                  }
-                }
-              }
-
-              testUrl = freshUrl;
-            } catch (stalkerError) {
-              logger.info(`✗ Channel ${channel.name}: Stalker token refresh failed - ${stalkerError.message}`);
+            // Check quality requirement
+            if (minHeight > 0 && streamHeight < minHeight) {
+              logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
               continue;
             }
-          }
 
-          // Validate stream with ffprobe
-          const ffprobeArgs = [
-            '-v', 'error',
-            '-print_format', 'json',
-            '-show_streams',
-            '-read_intervals', '%+#1',
-            '-timeout', '8000000'
-          ];
+            logger.info(`✓ Stream validated for ${channel.name} (${streamHeight}p, audio: ${result.hasAudio})`);
 
-          // Add headers for Stalker streams
-          if (channel.source_type === 'stalker' && channel.source_mac) {
-            ffprobeArgs.push('-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`);
-          }
-
-          ffprobeArgs.push(testUrl);
-
-          try {
-            const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
-              timeout: 10000,
-              maxBuffer: 1024 * 1024
-            });
-
-            const probeData = JSON.parse(stdout);
-            const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
-            const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
-
-            if (videoStream || hasAudio) {
-              const streamHeight = videoStream ? (videoStream.height || 0) : 0;
-
-              // Check quality requirement
-              if (minHeight > 0 && streamHeight < minHeight) {
-                logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
-                continue;
+            return res.json({
+              success: true,
+              channel: {
+                id: channel.id,
+                name: channel.name,
+                logo: channel.logo,
+                url: channel.url,
+                sourceId: channel.source_id,
+                sourceName: channel.source_name,
+                sourceType: channel.source_type,
+                category: channel.category,
+                quality: streamHeight
               }
-
-              logger.info(`✓ Stream validated for ${channel.name} (${streamHeight}p, audio: ${hasAudio})`);
-
-              return res.json({
-                success: true,
-                channel: {
-                  id: channel.id,
-                  name: channel.name,
-                  logo: channel.logo,
-                  url: channel.url,
-                  sourceId: channel.source_id,
-                  sourceName: channel.source_name,
-                  sourceType: channel.source_type,
-                  category: channel.category,
-                  quality: streamHeight
-                }
-              });
-            }
-          } catch (ffprobeError) {
-            logger.info(`✗ Channel ${channel.name} failed: ${ffprobeError.message.split('\n')[0]}`);
-            continue;
+            });
+          } else {
+            logger.info(`✗ Channel ${channel.name} failed: ${result.reason}`);
           }
-        } catch (error) {
-          continue;
         }
       }
     }
@@ -993,8 +997,6 @@ router.post('/search-channel', async (req, res) => {
     const searchQuery = query.trim();
     const minHeight = parseInt(minQuality) || 0;
     const offset = parseInt(searchOffset) || 0;
-    const postgresService = require('../services/postgresService');
-
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(
       'SELECT channel_name FROM blacklisted_channels WHERE user_id = $1',
@@ -1078,18 +1080,14 @@ router.post('/search-channel', async (req, res) => {
       });
     }
 
-    logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams...`);
+    logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams in parallel...`);
 
     // Test streams using ffprobe validation
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
-    const axios = require('axios');
+    const PARALLEL_TESTS = 5; // Test 5 channels at a time
 
-    for (const channel of channels) {
+    // Helper function to test a single channel
+    const testSingleChannel = async (channel, index) => {
       try {
-        logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
-
         let testUrl = channel.url;
 
         // Build proper URL for XTREAM sources
@@ -1108,7 +1106,7 @@ router.post('/search-channel', async (req, res) => {
                 'X-User-Agent': 'Model: MAG250; Link: WiFi',
                 'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
               },
-              timeout: 10000
+              timeout: 5000
             });
 
             const linkData = createLinkResponse.data;
@@ -1132,8 +1130,7 @@ router.post('/search-channel', async (req, res) => {
               }
             }
           } catch (stalkerError) {
-            logger.warn(`Stalker token refresh failed for ${channel.name}: ${stalkerError.message}`);
-            continue;
+            return { success: false, reason: `Stalker refresh failed: ${stalkerError.message}`, index };
           }
         }
 
@@ -1143,16 +1140,17 @@ router.post('/search-channel', async (req, res) => {
           '-print_format', 'json',
           '-show_streams',
           '-read_intervals', '%+#1',
-          '-timeout', '8000000',
-          testUrl
+          '-timeout', '8000000'
         ];
 
         if (channel.source_type === 'stalker') {
-          ffprobeArgs.splice(ffprobeArgs.length - 1, 0, '-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`);
+          ffprobeArgs.push('-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`);
         }
 
+        ffprobeArgs.push(testUrl);
+
         const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
-          timeout: 10000,
+          timeout: 8000,
           maxBuffer: 1024 * 1024
         });
 
@@ -1161,46 +1159,72 @@ router.post('/search-channel', async (req, res) => {
         const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
 
         if (videoStream || hasAudio) {
-          // Check video quality if minHeight is specified
           const streamHeight = videoStream ? (videoStream.height || 0) : 0;
-
-          if (minHeight > 0 && streamHeight < minHeight) {
-            logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
-            continue;
-          }
-
-          logger.info(`✓ Found working channel: ${channel.name} (${streamHeight}p)`);
-
-          // Calculate the index of this channel in the current batch
-          const channelIndexInBatch = channels.indexOf(channel);
-          // Next offset = current offset + position in batch + 1 (to skip this one next time)
-          const nextSearchOffset = offset + channelIndexInBatch + 1;
-
-          return res.json({
-            success: true,
-            channel: {
-              id: channel.id,
-              name: channel.name,
-              logo: channel.logo,
-              url: channel.url,
-              sourceId: channel.source_id,
-              sourceName: channel.source_name,
-              sourceType: channel.source_type,
-              sourceUrl: channel.source_url,
-              sourceUsername: channel.source_username,
-              sourcePassword: channel.source_password,
-              sourceMac: channel.source_mac,
-              category: channel.category,
-              quality: streamHeight,
-              // Include search metadata for "find alternative" feature
-              searchQuery: searchQuery,
-              searchOffset: nextSearchOffset
-            }
-          });
+          return { success: true, height: streamHeight, hasAudio, channel, index };
         }
+
+        return { success: false, reason: 'No video or audio streams', index };
       } catch (error) {
-        logger.info(`✗ Channel ${channel.name} failed: ${error.message}`);
-        continue;
+        return { success: false, reason: error.message.split('\n')[0], index };
+      }
+    };
+
+    // Test channels in parallel with concurrency limit
+    for (let i = 0; i < channels.length; i += PARALLEL_TESTS) {
+      const chunk = channels.slice(i, i + PARALLEL_TESTS);
+      const results = await Promise.all(chunk.map((channel, chunkIndex) => {
+        const globalIndex = i + chunkIndex;
+        logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+        return testSingleChannel(channel, globalIndex);
+      }));
+
+      // Check results for a working channel (prioritize by original index order)
+      const successfulResults = results.filter(r => r.success).sort((a, b) => a.index - b.index);
+
+      for (const result of successfulResults) {
+        const channel = result.channel;
+        const streamHeight = result.height;
+
+        // Check quality requirement
+        if (minHeight > 0 && streamHeight < minHeight) {
+          logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
+          continue;
+        }
+
+        logger.info(`✓ Found working channel: ${channel.name} (${streamHeight}p)`);
+
+        // Next offset = current offset + position in list + 1 (to skip this one next time)
+        const nextSearchOffset = offset + result.index + 1;
+
+        return res.json({
+          success: true,
+          channel: {
+            id: channel.id,
+            name: channel.name,
+            logo: channel.logo,
+            url: channel.url,
+            sourceId: channel.source_id,
+            sourceName: channel.source_name,
+            sourceType: channel.source_type,
+            sourceUrl: channel.source_url,
+            sourceUsername: channel.source_username,
+            sourcePassword: channel.source_password,
+            sourceMac: channel.source_mac,
+            category: channel.category,
+            quality: streamHeight,
+            // Include search metadata for "find alternative" feature
+            searchQuery: searchQuery,
+            searchOffset: nextSearchOffset
+          }
+        });
+      }
+
+      // Log failed results
+      for (const result of results) {
+        if (!result.success) {
+          const channel = channels[result.index];
+          logger.info(`✗ Channel ${channel.name} failed: ${result.reason}`);
+        }
       }
     }
 
@@ -1233,7 +1257,6 @@ router.get('/blacklist', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const postgresService = require('../services/postgresService');
     const result = await postgresService.query(
       'SELECT id, channel_name, created_at FROM blacklisted_channels WHERE user_id = $1 ORDER BY created_at DESC',
       [userId]
@@ -1269,7 +1292,6 @@ router.post('/blacklist', async (req, res) => {
       return res.status(400).json({ error: 'Channel name is required' });
     }
 
-    const postgresService = require('../services/postgresService');
 
     // Insert or ignore if already exists
     await postgresService.query(
@@ -1305,7 +1327,6 @@ router.delete('/blacklist/:channelName', async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const postgresService = require('../services/postgresService');
 
     const result = await postgresService.query(
       'DELETE FROM blacklisted_channels WHERE user_id = $1 AND channel_name = $2',
@@ -1342,11 +1363,6 @@ router.post('/random-sports-channel', async (req, res) => {
 
     const { excludeSourceIds = [] } = req.body;
 
-    const postgresService = require('../services/postgresService');
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
-    const axios = require('axios');
 
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(
@@ -1596,11 +1612,6 @@ router.post('/auto-fill-streams', async (req, res) => {
     } = req.body;
 
     const minHeight = parseInt(minQuality) || 0;
-    const postgresService = require('../services/postgresService');
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
-    const axios = require('axios');
 
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(

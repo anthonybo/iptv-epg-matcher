@@ -445,9 +445,20 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 type: 'stream'
             });
 
-            // Track bandwidth as data flows
+            // Track bandwidth as data flows - batch updates to reduce overhead
+            let pendingBytes = 0;
+            let lastBandwidthUpdate = Date.now();
+            const BANDWIDTH_UPDATE_INTERVAL = 1000; // Update metrics at most once per second
+
             passThrough.on('data', (chunk) => {
-                metricsService.trackBandwidth(streamKey, chunk.length, 0);
+                pendingBytes += chunk.length;
+                const now = Date.now();
+                // Only call trackBandwidth once per second to reduce CPU overhead
+                if (now - lastBandwidthUpdate >= BANDWIDTH_UPDATE_INTERVAL) {
+                    metricsService.trackBandwidth(streamKey, pendingBytes, 0);
+                    pendingBytes = 0;
+                    lastBandwidthUpdate = now;
+                }
             });
 
             // Handle errors on the source stream
@@ -626,9 +637,19 @@ router.get('/xtream/:sessionId/:type/:id', async (req, res) => {
                 type: 'xtream'
             });
 
-            // Track bandwidth as data flows
+            // Track bandwidth as data flows - batch updates to reduce overhead
+            let pendingBytesXtream = 0;
+            let lastBandwidthUpdateXtream = Date.now();
+            const BANDWIDTH_UPDATE_INTERVAL_XTREAM = 1000;
+
             passThrough.on('data', (chunk) => {
-                metricsService.trackBandwidth(streamKey, chunk.length, 0);
+                pendingBytesXtream += chunk.length;
+                const now = Date.now();
+                if (now - lastBandwidthUpdateXtream >= BANDWIDTH_UPDATE_INTERVAL_XTREAM) {
+                    metricsService.trackBandwidth(streamKey, pendingBytesXtream, 0);
+                    pendingBytesXtream = 0;
+                    lastBandwidthUpdateXtream = now;
+                }
             });
 
             // Pipe through passThrough to track bandwidth
