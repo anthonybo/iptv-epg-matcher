@@ -5,6 +5,54 @@ const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
 const epgService = require('../services/epgService');
 const logger = require('../config/logger');
 const postgresService = require('../services/postgresService');
+const dns = require('dns').promises;
+
+/**
+ * Lookup server location from IP address using free ip-api.com service
+ * @param {string} url - The server URL
+ * @returns {Promise<{country: string, city: string} | null>}
+ */
+async function lookupServerLocation(url) {
+    try {
+        // Extract hostname from URL
+        const urlObj = new URL(url.startsWith('http') ? url : `http://${url}`);
+        let hostname = urlObj.hostname;
+
+        // If it's already an IP, use it directly
+        const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+        let ip = hostname;
+
+        if (!ipRegex.test(hostname)) {
+            // Resolve hostname to IP
+            try {
+                const addresses = await dns.resolve4(hostname);
+                if (addresses && addresses.length > 0) {
+                    ip = addresses[0];
+                }
+            } catch (dnsError) {
+                logger.warn(`DNS lookup failed for ${hostname}: ${dnsError.message}`);
+                return null;
+            }
+        }
+
+        // Use ip-api.com (free, no API key needed, 45 requests/minute limit)
+        const axios = require('axios');
+        const response = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city`, {
+            timeout: 5000
+        });
+
+        if (response.data && response.data.status === 'success') {
+            return {
+                country: response.data.country || null,
+                city: response.data.city || null
+            };
+        }
+        return null;
+    } catch (error) {
+        logger.warn(`Failed to lookup server location: ${error.message}`);
+        return null;
+    }
+}
 
 // Apply auth middleware to all routes in this router
 router.use(authMiddleware);
@@ -290,9 +338,11 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
  * Re-fetch channels and account information from Xtream API or Stalker portal
  */
 router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, res) => {
+    const sourceId = parseInt(req.params.sourceId);
+    const refreshStartTime = Date.now();
+
     try {
         const userId = req.user.id;
-        const sourceId = parseInt(req.params.sourceId);
 
         // Get source details from database
         const sources = await iptvDatabaseService.getUserIPTVSources(userId);
@@ -504,14 +554,31 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         await iptvDatabaseService.saveChannels(sourceId, dbChannels);
         logger.info(`Saved ${dbChannels.length} channels for source ${sourceId}`);
 
-        // Update refresh status to success
+        // Lookup server location if not already set
+        let locationUpdate = '';
+        let locationParams = [];
+        if (!source.server_country && source.url) {
+            const location = await lookupServerLocation(source.url);
+            if (location) {
+                locationUpdate = ', server_country = $3, server_city = $4';
+                locationParams = [location.country, location.city];
+                logger.info(`Found server location for source ${sourceId}: ${location.city}, ${location.country}`);
+            }
+        }
+
+        // Update refresh status to success and reset failure count
+        const refreshDuration = Date.now() - refreshStartTime;
         await iptvDatabaseService.pool.query(`
             UPDATE iptv_sources
             SET last_refresh_status = 'success',
                 last_refresh_error = NULL,
-                last_refresh_attempt = CURRENT_TIMESTAMP
+                last_refresh_attempt = CURRENT_TIMESTAMP,
+                last_successful_refresh = CURRENT_TIMESTAMP,
+                last_refresh_duration_ms = $2,
+                failure_count = 0
+                ${locationUpdate}
             WHERE id = $1
-        `, [sourceId]);
+        `, [sourceId, refreshDuration, ...locationParams]);
 
         // Get the updated source with channel count
         const updatedSource = await iptvDatabaseService.getUserSources(userId, null);
@@ -528,15 +595,19 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
     } catch (error) {
         logger.error(`Error refreshing source data: ${error.message}`);
 
-        // Update refresh status to error with error message
+        // Update refresh status to error and increment failure count
         try {
+            const refreshDuration = Date.now() - refreshStartTime;
             await iptvDatabaseService.pool.query(`
                 UPDATE iptv_sources
                 SET last_refresh_status = 'error',
                     last_refresh_error = $1,
-                    last_refresh_attempt = CURRENT_TIMESTAMP
+                    last_refresh_attempt = CURRENT_TIMESTAMP,
+                    last_refresh_duration_ms = $3,
+                    failure_count = COALESCE(failure_count, 0) + 1,
+                    last_failure_time = CURRENT_TIMESTAMP
                 WHERE id = $2
-            `, [error.message, sourceId]);
+            `, [error.message, sourceId, refreshDuration]);
         } catch (updateError) {
             logger.error(`Failed to update refresh status: ${updateError.message}`);
         }

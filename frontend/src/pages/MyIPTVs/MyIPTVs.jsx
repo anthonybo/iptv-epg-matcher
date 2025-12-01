@@ -180,6 +180,18 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
           <span className="truncate flex-1" title={source.url}>{source.url}</span>
         </div>
 
+        {/* Server Location */}
+        {source.server_country && (
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="text-slate-300">
+              {source.server_city ? `${source.server_city}, ` : ''}{source.server_country}
+            </span>
+          </div>
+        )}
+
         {source.username && (
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -199,7 +211,7 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
         )}
 
         {/* Last Refresh Status Section */}
-        {source.last_refresh_attempt && (
+        {(source.last_refresh_attempt || source.failure_count > 0) && (
           <div className="border-t border-slate-700/50 pt-3 mt-3 space-y-2">
             <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Last Refresh</div>
 
@@ -212,6 +224,18 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
                 <span className="font-medium text-slate-300">
                   {new Date(source.last_refresh_attempt).toLocaleString()}
                 </span>
+                {source.last_refresh_duration_ms && (
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                    source.last_refresh_duration_ms > 120000 ? 'bg-red-500/30 text-red-300 border border-red-500/40' :
+                    source.last_refresh_duration_ms > 60000 ? 'bg-amber-500/30 text-amber-300 border border-amber-500/40' :
+                    'bg-blue-500/30 text-blue-300 border border-blue-500/40'
+                  }`}>
+                    {source.last_refresh_duration_ms >= 60000
+                      ? `${(source.last_refresh_duration_ms / 60000).toFixed(1)}m`
+                      : `${(source.last_refresh_duration_ms / 1000).toFixed(1)}s`
+                    }
+                  </span>
+                )}
               </div>
             )}
 
@@ -238,6 +262,38 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
                     {source.last_refresh_error}
                   </p>
                 </div>
+              </div>
+            )}
+
+            {/* Failure tracking */}
+            {source.failure_count > 0 && (
+              <div className="mt-2 pt-2 border-t border-slate-700/30 space-y-2">
+                <div className="flex items-center gap-2 text-sm text-slate-400">
+                  <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span className="text-slate-500">Failures:</span>
+                  <span className={`font-medium ${source.failure_count >= 5 ? 'text-red-400' : source.failure_count >= 3 ? 'text-amber-400' : 'text-slate-300'}`}>
+                    {source.failure_count} {source.failure_count === 1 ? 'time' : 'times'}
+                  </span>
+                  {source.last_failure_time && (
+                    <span className="text-slate-500 text-xs">
+                      (last: {new Date(source.last_failure_time).toLocaleDateString()})
+                    </span>
+                  )}
+                </div>
+                {/* Last successful refresh - use last_successful_refresh or fall back to last_refreshed */}
+                {(source.last_successful_refresh || source.last_refreshed) && (
+                  <div className="flex items-center gap-2 text-sm text-slate-400">
+                    <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span className="text-slate-500">Last success:</span>
+                    <span className="font-medium text-emerald-400">
+                      {new Date(source.last_successful_refresh || source.last_refreshed).toLocaleString()}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -458,6 +514,7 @@ const MyIPTVs = ({
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
   const [sourceRefreshStatus, setSourceRefreshStatus] = useState({}); // Track status per source: { sourceId: 'loading' | 'success' | 'error' }
+  const [refreshSummary, setRefreshSummary] = useState(null); // { successCount, failCount, duration }
 
   // Load sources on mount
   useEffect(() => {
@@ -583,6 +640,11 @@ const MyIPTVs = ({
         setSourceRefreshStatus(prev => ({ ...prev, [source.id]: 'success' }));
         setRefreshProgress(prev => ({ ...prev, current: prev.current + 1 }));
 
+        // Update source data immediately so user sees duration/location as each completes
+        if (result.source) {
+          setSources(prev => prev.map(s => s.id === source.id ? result.source : s));
+        }
+
         return { sourceId: source.id, status: 'success', result };
       } catch (err) {
         console.error(`Error refreshing source ${source.id}:`, err);
@@ -590,6 +652,17 @@ const MyIPTVs = ({
         // Update status to error
         setSourceRefreshStatus(prev => ({ ...prev, [source.id]: 'error' }));
         setRefreshProgress(prev => ({ ...prev, current: prev.current + 1 }));
+
+        // Reload sources to get updated failure stats from database
+        try {
+          const updatedSources = await iptvSourcesService.getUserSources();
+          const updatedSource = updatedSources.find(s => s.id === source.id);
+          if (updatedSource) {
+            setSources(prev => prev.map(s => s.id === source.id ? updatedSource : s));
+          }
+        } catch (reloadErr) {
+          console.error('Failed to reload source after error:', reloadErr);
+        }
 
         return { sourceId: source.id, status: 'error', error: err.message };
       }
@@ -620,14 +693,11 @@ const MyIPTVs = ({
     setIsRefreshingAll(false);
     setRefreshProgress({ current: 0, total: 0 });
 
-    // Show final summary with timing
-    setNotification({
-      type: failCount === 0 ? 'success' : 'warning',
-      message: `Refresh complete in ${duration}s! ${successCount} succeeded${failCount > 0 ? `, ${failCount} failed` : ''}.`
-    });
+    // Set persistent summary (user must dismiss it)
+    setRefreshSummary({ successCount, failCount, duration });
+
+    // Clear success badges after 8 seconds, keep error badges
     setTimeout(() => {
-      setNotification(null);
-      // Only clear success status, keep error status visible
       setSourceRefreshStatus(prev => {
         const newStatus = {};
         Object.keys(prev).forEach(key => {
@@ -697,6 +767,41 @@ const MyIPTVs = ({
             <button
               onClick={() => setNotification(null)}
               className="text-current opacity-70 hover:opacity-100 transition-opacity"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Refresh Summary Banner */}
+      {refreshSummary && (
+        <div className={`rounded-xl border px-4 py-3 mb-4 ${
+          refreshSummary.failCount === 0
+            ? 'bg-emerald-900/50 border-emerald-500/40 text-emerald-100'
+            : 'bg-amber-900/50 border-amber-500/40 text-amber-100'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {refreshSummary.failCount === 0 ? (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              )}
+              <span className="font-medium">
+                Refresh complete in {refreshSummary.duration}s: {refreshSummary.successCount} succeeded
+                {refreshSummary.failCount > 0 && <span className="text-red-300">, {refreshSummary.failCount} failed</span>}
+              </span>
+            </div>
+            <button
+              onClick={() => setRefreshSummary(null)}
+              className="text-current opacity-70 hover:opacity-100 transition-opacity p-1"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
