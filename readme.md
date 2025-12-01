@@ -1,42 +1,113 @@
 # IPTV Guru
 
-A powerful web application for matching IPTV channels with EPG (Electronic Program Guide) data, with live stream playback capability.
+A powerful web application for managing IPTV channels, matching EPG (Electronic Program Guide) data, and watching live streams with multi-view support.
 
 ## Overview
 
 IPTV Guru allows you to:
-- Load IPTV channels from various sources (M3U files, URLs, or Xtream API)
-- Auto-match or manually match channels with EPG data
-- Watch live TV streams directly in your browser
-- Generate new Xtream credentials with properly matched EPG data
-- Use a high-performance SQLite database for EPG data storage
-
-This tool solves the common problem of mismatched or missing EPG data in IPTV services by providing an intuitive interface to correct and enhance channel metadata.
+- Manage multiple IPTV sources (M3U, Xtream API, Stalker portals)
+- Auto-match or manually match channels with EPG data from multiple sources
+- Watch live TV streams directly in your browser with adaptive playback
+- View multiple streams simultaneously with Multi-View mode
+- Discover live sports events and auto-fill streams
+- Generate Xtream credentials with properly matched EPG data
+- Browse channels with a TV Guide interface
 
 ## Features
 
-- **Multiple Source Support**: Load channels from M3U files, URLs, or Xtream API credentials
-- **Automatic EPG Matching**: Smart algorithms to suggest matching EPG IDs for channels
-- **Multiple Player Options**: HLS, TS, and VLC link support for maximum compatibility
-- **EPG Preview**: View current and upcoming programs for matched channels
-- **Channel Filtering**: Browse channels by category or search by name
-- **Session Management**: Persistent sessions to save your work
-- **Modern UI**: Responsive, user-friendly interface built with React
-- **Database-Driven EPG**: Optimized SQLite database for fast EPG data access
-- **Efficient EPG Parser**: Python script to process large XML EPG files into the database
+### Source Management
+- **M3U Support**: Load channels from M3U files or URLs
+- **Xtream API**: Connect to Xtream-compatible IPTV providers
+- **Stalker Portals**: Full support for Stalker/MAC-based portals with token refresh
+- **Multiple Sources**: Manage multiple IPTV sources simultaneously
+
+### EPG Management
+- **Multiple EPG Sources**: Aggregate EPG data from multiple XMLTV sources
+- **Automatic Matching**: Smart algorithms suggest matching EPG IDs
+- **Manual Matching**: Search and match channels manually when needed
+- **Dummy EPG**: Generate placeholder EPG for channels without guide data
+- **Custom EPG Sources**: Add your own EPG URLs
+
+### Streaming & Playback
+- **MPEG-TS Player**: Native browser playback using mpegts.js
+- **HLS Support**: Fallback to HLS for compatible streams
+- **Stream Proxy**: Backend proxy for CORS-restricted streams
+- **Auto-Recovery**: Automatic reconnection on stream failures
+- **Quality Detection**: Real-time video quality display
+
+### Multi-View
+- **Grid Layout**: Watch up to 9 streams simultaneously
+- **Drag & Drop**: Reorder streams by dragging
+- **Auto-Fill**: Automatically populate streams by sport/category
+- **Theatre Mode**: Fullscreen multi-view experience
+- **Per-Stream Controls**: Mute, refresh, or remove individual streams
+
+### Live Sports
+- **Event Discovery**: Browse live and upcoming sports events
+- **Auto-Test**: Automatically find working streams for events
+- **Smart Search**: Search channels by event name
+- **Blacklist**: Exclude problematic channels from searches
+
+### TV Guide
+- **Grid View**: Traditional EPG grid layout
+- **Current Time Indicator**: Visual timeline with current position
+- **Program Details**: View program descriptions and timing
+- **Quick Play**: Start watching directly from the guide
+
+## Tech Stack
+
+- **Frontend**: React, Tailwind CSS
+- **Backend**: Node.js, Express
+- **Database**: PostgreSQL (primary), SQLite (EPG cache)
+- **Cache**: Redis (sessions, rate limiting)
+- **Streaming**: mpegts.js, Clappr player
 
 ## Installation
 
 ### Prerequisites
 
-- Node.js (v14.x or higher)
-- npm or yarn
-- Python 3.6 or higher (for EPG parsing)
+- Node.js (v16.x or higher)
+- PostgreSQL 15+
+- Redis (optional, for sessions/caching)
+- Docker & Docker Compose (recommended)
 
-### Backend Setup
+### Quick Start with Docker
 
 ```bash
-# Navigate to backend directory
+# Clone the repository
+git clone https://github.com/yourusername/iptv-epg-matcher.git
+cd iptv-epg-matcher
+
+# Copy environment file
+cp .env.example .env
+
+# Start PostgreSQL and Redis
+docker-compose up -d
+
+# Install dependencies
+npm install
+cd backend && npm install && cd ..
+cd frontend && npm install && cd ..
+
+# Start the application
+npm start
+```
+
+### Manual Setup
+
+#### Database Setup
+
+```bash
+# Start PostgreSQL and Redis with Docker
+docker-compose up -d postgres redis
+
+# Or connect to existing PostgreSQL instance
+# Update .env with your database credentials
+```
+
+#### Backend Setup
+
+```bash
 cd backend
 
 # Install dependencies
@@ -45,17 +116,13 @@ npm install
 # Create necessary directories
 mkdir -p uploads logs cache data
 
-# Install Python dependencies for EPG parser
-pip install -r requirements.txt
-
 # Start the server
 npm start
 ```
 
-### Frontend Setup
+#### Frontend Setup
 
 ```bash
-# Navigate to frontend directory
 cd frontend
 
 # Install dependencies
@@ -65,75 +132,167 @@ npm install
 npm start
 ```
 
-### Run Frontend and Backend Together
+### Running Both Services
 
-Once dependencies are installed, install the root-level tooling (first run only) and launch both services from the project root:
+From the project root:
 
 ```bash
-npm install
 npm start
 ```
 
-This command uses `concurrently` to run the backend API and the frontend dev server side by side in the same terminal, with prefixed logs for each service. Use `Ctrl+C` (or the equivalent interrupt signal) to stop both processes at once.
+This runs both backend (port 5001) and frontend (port 3000) concurrently.
 
-## Database & EPG Data
+## Configuration
 
-The application now uses a SQLite database for efficient EPG data storage and retrieval, which significantly improves performance when handling large EPG datasets.
+Copy `.env.example` to `.env` and configure:
 
-### EPG Parser
+### Required Settings
 
-The included Python-based EPG parser (`epg_parser.py`) processes XMLTV files into the SQLite database. It handles both local files and remote URLs, with support for compressed (gzipped) XML data.
+```env
+# PostgreSQL
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=iptvguru
+POSTGRES_USER=iptvguru
+POSTGRES_PASSWORD=changeme
 
-#### Running the EPG Parser
-
-```bash
-# Basic usage (uses default EPG sources)
-python epg_parser.py
-
-# Specify a custom database path
-python epg_parser.py --db /path/to/custom/epg.db
-
-# Force refresh all EPG data
-python epg_parser.py --force
-
-# Process a specific EPG source only
-python epg_parser.py --source https://example.com/epg.xml.gz
+# Security
+JWT_SECRET=your-jwt-secret-change-in-production
+SESSION_SECRET=your-session-secret-change-in-production
 ```
 
-#### EPG Parser Features
+### Optional Settings
 
-- **Two-Pass Processing**: Ensures all channels are created before programs to avoid foreign key constraint errors
-- **Batch Processing**: Efficiently handles large datasets with minimal memory usage
-- **Source Management**: Tracks which EPG source each channel and program came from
-- **Incremental Updates**: Only processes sources that have changed since the last update
-- **Handles Large Files**: Streams XML data rather than loading entire files into memory
+```env
+# Redis (for sessions/caching)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+# EPG Settings
+EPG_CACHE_TTL=86400
+EPG_REFRESH_INTERVAL=43200
+
+# Streaming
+STREAM_TIMEOUT=30000
+MAX_STREAM_CONNECTIONS=100
+```
 
 ## Usage
 
-1. Start both the backend and frontend servers with `npm start` in the project root
-2. Navigate to http://localhost:3000 in your browser
-3. Load your IPTV channels using one of the available methods
-4. Browse, search, and match channels with EPG data
-5. Play streams directly in the browser
+1. Navigate to http://localhost:3000
+2. Register an account or log in
+3. Add your IPTV sources (M3U URL, Xtream credentials, or Stalker portal)
+4. Browse channels and match them with EPG data
+5. Watch streams directly or use Multi-View for multiple streams
+
+### Adding IPTV Sources
+
+**M3U URL:**
+- Enter the M3U playlist URL
+- Channels will be automatically imported
+
+**Xtream API:**
+- Enter server URL, username, and password
+- Both live channels and VOD are supported
+
+**Stalker Portal:**
+- Enter portal URL and MAC address
+- Token refresh is handled automatically
+
+### Multi-View
+
+1. Navigate to Multi-View from the sidebar
+2. Click "Add Stream" or use sport auto-fill
+3. Drag streams to reorder
+4. Use individual controls to mute/refresh/remove streams
+
+### Live Sports
+
+1. Go to Live Events from the sidebar
+2. Browse by sport category
+3. Click "Auto-Test" to find working streams
+4. Add working streams to Multi-View
+
+## API Endpoints
+
+### Authentication
+- `POST /api/auth/register` - Register new user
+- `POST /api/auth/login` - Login and get JWT token
+- `GET /api/auth/profile` - Get user profile
+
+### IPTV Sources
+- `GET /api/iptv-sources` - List all sources
+- `POST /api/iptv-sources` - Add new source
+- `DELETE /api/iptv-sources/:id` - Remove source
+
+### Channels
+- `GET /api/channels` - List channels (with pagination)
+- `GET /api/channels/:id` - Get channel details
+
+### Streaming
+- `GET /api/stream/:sessionId/:channelId` - Stream a channel
+- `GET /api/xtream/*` - Xtream API proxy
+
+### EPG
+- `GET /api/epg/channels` - List EPG channels
+- `POST /api/epg/match` - Match IPTV channel to EPG
+- `GET /api/epg/programs/:channelId` - Get programs for channel
+
+### Live Events
+- `GET /api/live-events/sports` - List available sports
+- `POST /api/live-events/random-working-stream` - Find working stream for event
+- `POST /api/live-events/auto-fill-streams` - Auto-fill multi-view by sport
+
+## Architecture
+
+```
+├── backend/
+│   ├── routes/          # API endpoints
+│   ├── services/        # Business logic
+│   ├── middleware/      # Auth, rate limiting
+│   ├── config/          # Configuration
+│   └── migrations/      # Database migrations
+├── frontend/
+│   ├── src/
+│   │   ├── components/  # React components
+│   │   ├── contexts/    # React contexts
+│   │   ├── hooks/       # Custom hooks
+│   │   ├── pages/       # Page components
+│   │   ├── services/    # API services
+│   │   └── utils/       # Utility functions
+└── docker-compose.yml   # Docker services
+```
+
+## Performance
+
+- **Connection Pooling**: HTTP agents with keep-alive for upstream requests
+- **Parallel Testing**: Concurrent stream validation (3 at a time)
+- **Bandwidth Batching**: Metrics updates batched to reduce overhead
+- **React.memo**: Component memoization to prevent unnecessary re-renders
+- **Debouncing**: Channel changes debounced to handle React StrictMode
 
 ## Troubleshooting
 
-### Large EPG Files
+### Streams not playing
+- Check browser console for errors
+- Verify the IPTV source is online
+- Try a different playback method (HLS vs MPEG-TS)
+- Check backend logs at `backend/logs/combined-*.log`
 
-If you encounter the error `Cannot create a string longer than 0x1fffffe8 characters`, it means an EPG file is too large to be processed in memory. The Python EPG parser solves this by streaming the data instead of loading it all at once.
+### EPG not showing
+- Ensure EPG sources are configured and refreshed
+- Match channels to EPG using the EPG Matcher
+- Check if EPG data exists for the time range
 
-### Database Errors
+### Database errors
+- Ensure PostgreSQL is running: `docker-compose ps`
+- Check connection settings in `.env`
+- Run migrations if needed
 
-If you encounter database errors, you may need to rebuild the EPG database:
-
-```bash
-# Remove the old database
-rm backend/data/epg.db
-
-# Run the parser to rebuild the database
-cd backend
-python epg_parser.py
-```
+### High memory usage
+- Reduce MAX_STREAM_CONNECTIONS
+- Enable Redis for session storage
+- Increase Node.js memory: `NODE_MAX_OLD_SPACE_SIZE=4096`
 
 ## Contributing
 
