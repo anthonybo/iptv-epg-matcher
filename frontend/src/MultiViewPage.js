@@ -278,10 +278,31 @@ const MultiViewPage = ({ sessionId }) => {
   };
 
   const handleRefreshStream = (id, sourceId) => {
+    const newRefreshKey = Date.now();
+
     setStreams(prevStreams => {
+      // Find the old stream to get its current refreshKey
+      const oldStream = prevStreams.find(s => s.id === id && s.sourceId === sourceId);
+      if (oldStream) {
+        const oldKey = `${sourceId}_${id}_${oldStream._refreshKey || ''}`;
+        const newKey = `${sourceId}_${id}_${newRefreshKey}`;
+
+        // Transfer muted state from old key to new key
+        setMutedStreams(prev => {
+          const wasMuted = prev.has(oldKey);
+          if (wasMuted) {
+            const updated = new Set(prev);
+            updated.delete(oldKey);
+            updated.add(newKey);
+            return updated;
+          }
+          return prev;
+        });
+      }
+
       return prevStreams.map(stream => {
         if (stream.id === id && stream.sourceId === sourceId) {
-          return { ...stream, _refreshKey: Date.now() };
+          return { ...stream, _refreshKey: newRefreshKey };
         }
         return stream;
       });

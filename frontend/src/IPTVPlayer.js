@@ -117,12 +117,15 @@ const IPTVPlayer = ({
     ].slice(-20));
   };
 
-  // Update video element muted state when muted prop changes
+  // Track video element changes to sync muted state
+  const [videoElementKey, setVideoElementKey] = useState(0);
+
+  // Update video element muted state when muted prop changes OR video element changes
   useEffect(() => {
     if (videoElementRef.current) {
       videoElementRef.current.muted = muted;
     }
-  }, [muted]);
+  }, [muted, videoElementKey]);
 
   // Initialize component
   useEffect(() => {
@@ -843,6 +846,8 @@ const IPTVPlayer = ({
           const videoEl = playerInstanceRef.current.core.activePlayback.el;
           if (videoEl) {
             videoElementRef.current = videoEl;
+            // Trigger muted state sync for the new video element
+            setVideoElementKey(prev => prev + 1);
           }
         } catch (err) {
           log('warn', 'Could not get video element for Clappr player', err);
@@ -1086,6 +1091,8 @@ const IPTVPlayer = ({
 
       // Store video element reference for health checks
       videoElementRef.current = videoEl;
+      // Trigger muted state sync for the new video element
+      setVideoElementKey(prev => prev + 1);
 
       if (window.mpegts.getFeatureList().mseLivePlayback) {
         // CRITICAL: Aggressive memory management for multi-view to prevent kernel buffer exhaustion
