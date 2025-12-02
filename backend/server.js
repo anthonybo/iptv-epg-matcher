@@ -361,6 +361,7 @@ const liveEventsRoutes = require('./routes/liveEvents');
 const multiviewRoutes = require('./routes/multiview');
 const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
+const userLocationsRoutes = require('./routes/userLocations');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -411,6 +412,7 @@ app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 app.use('/api/multiview', multiviewRoutes); // Multiview streams management
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
+app.use('/api/user/locations', userLocationsRoutes); // User locations for local news
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));

@@ -1,4 +1,5 @@
 import React from 'react';
+import LocationSelector from '../LocationSelector';
 
 const SettingsModal = ({
   isOpen,
@@ -175,6 +176,17 @@ const SettingsModal = ({
                 : `Only accept streams ${autoFillSettings.minQuality}p or higher`
               }
             </p>
+          </div>
+
+          {/* Location Setting for Local News */}
+          <div>
+            <label className="block text-sm font-medium text-slate-300 mb-2">
+              Your Location
+            </label>
+            <p className="text-xs text-slate-500 mb-3">
+              Used for finding local news channels
+            </p>
+            <LocationSelector compact={false} showLabel={true} className="w-full" />
           </div>
 
           {/* Current Status */}

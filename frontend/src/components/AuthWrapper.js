@@ -3,11 +3,12 @@
  * Wraps the application and handles authentication state
  * Shows login/register or allows users to continue without authentication
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import Login from './Login';
 import Register from './Register';
 import SessionManager from '../utils/sessionManager';
+import LocationSelector from './LocationSelector';
 
 const AuthWrapper = ({ children }) => {
   const { isAuthenticated, loading, user } = useAuth();
@@ -106,6 +107,16 @@ const UserBadge = ({ user, onOpenSessionDebugger, onOpenServerStatus }) => {
           <div className="border-b border-slate-800 px-4 py-3">
             <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Signed in as</p>
             <p className="truncate text-sm font-semibold text-slate-100">{user.email}</p>
+          </div>
+
+          {/* Location Section */}
+          <div className="border-b border-slate-800">
+            <div className="px-4 py-2">
+              <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Location</p>
+            </div>
+            <div className="px-2 pb-2">
+              <LocationSelector compact={false} showLabel={true} className="w-full" />
+            </div>
           </div>
 
           {/* Debugging Section */}

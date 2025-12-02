@@ -27,6 +27,9 @@ const MultiViewHeader = ({
   // Settings
   autoFillSettings,
   onShowSettings,
+  // Local News
+  onFindLocalNews,
+  searchingNews,
   // Layout
   layoutMode,
   showLayoutMenu,
@@ -104,6 +107,30 @@ const MultiViewHeader = ({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
             <span className="text-slate-400">{autoFillSettings.maxSlots}</span>
+          </button>
+
+          {/* Local News Button */}
+          <button
+            onClick={onFindLocalNews}
+            disabled={searchingNews}
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+              searchingNews
+                ? 'border-slate-600 bg-slate-800/50 text-slate-500 cursor-not-allowed'
+                : 'border-amber-700 bg-amber-900/20 text-amber-300 hover:bg-amber-900/40'
+            }`}
+            title="Find Local News"
+          >
+            {searchingNews ? (
+              <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            ) : (
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" />
+              </svg>
+            )}
+            News
           </button>
 
           {/* Layout Mode Button */}

@@ -71,6 +71,9 @@ const MultiViewPage = ({ sessionId }) => {
   // Find alternative stream state
   const [findingAlternativeFor, setFindingAlternativeFor] = useState(null);
 
+  // Local news state
+  const [searchingNews, setSearchingNews] = useState(false);
+
   // Layout mode state
   const [layoutMode, setLayoutMode] = useState(() => {
     const saved = localStorage.getItem('multiview_layout_mode');
@@ -485,6 +488,60 @@ const MultiViewPage = ({ sessionId }) => {
     }
   };
 
+  // Handler for finding local news
+  const handleFindLocalNews = async () => {
+    setSearchingNews(true);
+
+    try {
+      const currentSourceIds = autoFillSettings.avoidDuplicateSources
+        ? streams.map(s => s.sourceId).filter(id => id)
+        : [];
+      const currentChannelIds = streams.map(s => s.id).filter(id => id);
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        showToast('Authentication required', 'error');
+        setSearchingNews(false);
+        return;
+      }
+
+      const response = await fetch('/api/live-events/local-news', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          excludeSourceIds: currentSourceIds,
+          excludeChannelIds: currentChannelIds,
+          minQuality: autoFillSettings.minQuality
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        const success = await addToMultiview(data.channel);
+        if (success) {
+          showToast(`Added ${data.channel.name} (${data.location.city}, ${data.location.stateAbbrev})`, 'success');
+          window.dispatchEvent(new Event('multiviewUpdate'));
+        } else {
+          showToast('Failed to add news channel to multiview', 'error');
+        }
+      } else if (data.error === 'No location set') {
+        showToast('Please set your location in Settings first', 'error');
+        setShowSettingsModal(true);
+      } else {
+        showToast(data.message || data.error || 'No local news found', 'error');
+      }
+    } catch (error) {
+      console.error('[Local News] Error:', error);
+      showToast('Failed to find local news', 'error');
+    } finally {
+      setSearchingNews(false);
+    }
+  };
+
   const handleRandomAnyChannel = async () => {
     setSearchingStream(true);
     setShowSportDropdown(false);
@@ -895,6 +952,8 @@ const MultiViewPage = ({ sessionId }) => {
           onRandomAnyChannel={handleRandomAnyChannel}
           autoFillSettings={autoFillSettings}
           onShowSettings={() => setShowSettingsModal(true)}
+          onFindLocalNews={handleFindLocalNews}
+          searchingNews={searchingNews}
           layoutMode={layoutMode}
           showLayoutMenu={showLayoutMenu}
           setShowLayoutMenu={setShowLayoutMenu}
