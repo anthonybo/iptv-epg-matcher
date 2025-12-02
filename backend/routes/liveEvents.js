@@ -36,10 +36,13 @@ function extractSearchTerms(teamName) {
   // Split into words
   const words = cleaned.split(/\s+/);
 
-  // Add individual significant words (3+ chars, not common words)
+  // Add individual significant words (4+ chars, not common words)
+  // Using 4 chars to avoid abbreviations like "St." matching "St. Lucia"
   const commonWords = new Set(['the', 'and', 'for', 'state', 'university']);
   words.forEach(word => {
-    if (word.length >= 3 && !commonWords.has(word.toLowerCase())) {
+    // Strip trailing punctuation for length check
+    const cleanWord = word.replace(/[.,:;!?]$/, '');
+    if (cleanWord.length >= 4 && !commonWords.has(cleanWord.toLowerCase())) {
       terms.add(word);
     }
   });
@@ -48,7 +51,11 @@ function extractSearchTerms(teamName) {
   // e.g., "Temple Owls" -> "Temple", "Villanova Wildcats" -> "Villanova"
   // e.g., "Central State (OH) Marauders" -> "Central State", "Central"
   if (words.length >= 2) {
-    terms.add(words[0]); // First word (usually city/school name)
+    // Only add first word if it's meaningful (4+ chars after stripping punctuation)
+    const firstWordClean = words[0].replace(/[.,:;!?]$/, '');
+    if (firstWordClean.length >= 4) {
+      terms.add(words[0]);
+    }
 
     // Handle parenthetical state abbreviations like "(OH)"
     const withoutParens = cleaned.replace(/\s*\([^)]+\)\s*/g, ' ').trim();
@@ -929,12 +936,13 @@ router.post('/random-any-channel', async (req, res) => {
         const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
         const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
 
-        if (videoStream || hasAudio) {
-          const streamHeight = videoStream ? (videoStream.height || 0) : 0;
+        // MUST have video - audio-only streams (like radio) are not valid for IPTV
+        if (videoStream) {
+          const streamHeight = videoStream.height || 0;
           return { success: true, height: streamHeight, hasAudio, channel };
         }
 
-        return { success: false, reason: 'No video or audio streams' };
+        return { success: false, reason: hasAudio ? 'Audio-only stream (no video)' : 'No video stream' };
       } catch (error) {
         return { success: false, reason: error.message.split('\n')[0] };
       }
@@ -1069,6 +1077,8 @@ router.post('/search-channel', async (req, res) => {
     const searchQuery = query.trim();
     const minHeight = parseInt(minQuality) || 0;
     const offset = parseInt(searchOffset) || 0;
+
+    logger.info(`[Find Alternative] Received search request: query="${searchQuery}", offset=${offset}, minQuality=${minHeight}p`);
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(
       'SELECT channel_name FROM blacklisted_channels WHERE user_id = $1',
@@ -1099,9 +1109,32 @@ router.post('/search-channel', async (req, res) => {
 
     logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
 
-    // Build query params with multiple search terms for OR matching
-    const channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
-    const searchParams = searchTerms.map(term => `%${term}%`);
+    // For event searches, prioritize team mascots/nicknames (last word of team name)
+    // e.g., "Anaheim Ducks" -> prioritize "Ducks", "St. Louis Blues" -> prioritize "Blues"
+    let priorityTerms = [];
+    if (homeTeam && awayTeam) {
+      const homeWords = homeTeam.split(/\s+/);
+      const awayWords = awayTeam.split(/\s+/);
+      // Last word is usually the mascot/nickname
+      if (homeWords.length > 0) priorityTerms.push(homeWords[homeWords.length - 1]);
+      if (awayWords.length > 0) priorityTerms.push(awayWords[awayWords.length - 1]);
+      // Filter out short words
+      priorityTerms = priorityTerms.filter(t => t.length >= 4);
+      logger.info(`Priority search terms (mascots): ${priorityTerms.join(', ')}`);
+    }
+
+    // Build query - for event searches, require at least one priority term (mascot)
+    let channelConditions;
+    let searchParams;
+    if (priorityTerms.length > 0) {
+      // Require at least one mascot/nickname match to filter out irrelevant channels
+      channelConditions = priorityTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+      searchParams = priorityTerms.map(term => `%${term}%`);
+    } else {
+      // Fallback to all terms for non-event searches
+      channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+      searchParams = searchTerms.map(term => `%${term}%`);
+    }
     let queryParams = [userId, ...searchParams];
 
     // Build source exclusion clause
@@ -1182,8 +1215,20 @@ router.post('/search-channel', async (req, res) => {
       // Sort by relevance score (highest first) and filter low-relevance channels
       channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-      // Filter to only keep relevant channels (score >= 35 for fuzzy matches)
-      channels = channels.filter(c => c.relevanceScore >= 35);
+      // Log top scoring channels for debugging
+      if (channels.length > 0) {
+        const topChannels = channels.slice(0, 10).map(c => `${c.name.substring(0, 50)}: ${c.relevanceScore}`);
+        logger.info(`Top scoring channels: ${topChannels.join(' | ')}`);
+      }
+
+      // For event searches (both teams specified), require channels that match at least one FULL team
+      // Score >= 200 means both teams matched (ideal)
+      // Score >= 100 means at least one team matched
+      // Filter out low scores but also prioritize high scores by testing them first
+      const minScore = 100;
+      channels = channels.filter(c => c.relevanceScore >= minScore);
+
+      logger.info(`Filtered channels with minScore=${minScore}: ${channels.length} remaining (top score: ${channels[0]?.relevanceScore || 0})`);
 
       if (channels.length === 0) {
         return res.json({
@@ -1212,7 +1257,7 @@ router.post('/search-channel', async (req, res) => {
     }
 
     // Test streams using ffprobe validation
-    const PARALLEL_TESTS = 3; // Test 3 channels at a time (reduced to prevent network saturation)
+    const PARALLEL_TESTS = 5; // Test 5 channels at a time for faster results
 
     // Helper function to test a single channel
     const testSingleChannel = async (channel, index) => {
@@ -1265,13 +1310,13 @@ router.post('/search-channel', async (req, res) => {
           }
         }
 
-        // Validate with ffprobe
+        // Validate with ffprobe - use shorter timeout for faster results
         const ffprobeArgs = [
           '-v', 'error',
           '-print_format', 'json',
           '-show_streams',
           '-read_intervals', '%+#1',
-          '-timeout', '8000000'
+          '-timeout', '5000000'  // 5 seconds (was 8)
         ];
 
         if (channel.source_type === 'stalker') {
@@ -1281,7 +1326,7 @@ router.post('/search-channel', async (req, res) => {
         ffprobeArgs.push(testUrl);
 
         const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
-          timeout: 8000,
+          timeout: 5000,  // 5 seconds (was 8)
           maxBuffer: 1024 * 1024
         });
 
@@ -1289,12 +1334,13 @@ router.post('/search-channel', async (req, res) => {
         const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
         const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
 
-        if (videoStream || hasAudio) {
-          const streamHeight = videoStream ? (videoStream.height || 0) : 0;
+        // MUST have video - audio-only streams (like radio) are not valid for IPTV
+        if (videoStream) {
+          const streamHeight = videoStream.height || 0;
           return { success: true, height: streamHeight, hasAudio, channel, index };
         }
 
-        return { success: false, reason: 'No video or audio streams', index };
+        return { success: false, reason: hasAudio ? 'Audio-only stream (no video)' : 'No video stream', index };
       } catch (error) {
         return { success: false, reason: error.message.split('\n')[0], index };
       }
@@ -1868,13 +1914,13 @@ router.post('/auto-fill-streams', async (req, res) => {
         }
 
         const videoStream = probeData.streams.find(s => s.codec_type === 'video');
-        const hasAudio = probeData.streams.some(s => s.codec_type === 'audio');
 
-        if (!videoStream && !hasAudio) {
-          throw new Error('No valid streams');
+        // MUST have video - audio-only streams are not valid for IPTV
+        if (!videoStream) {
+          throw new Error('No video stream');
         }
 
-        return { valid: true, height: videoStream ? (videoStream.height || 0) : 0 };
+        return { valid: true, height: videoStream.height || 0 };
       } else {
         // M3U/XTREAM validation
         const ffprobeArgs = [
@@ -1897,13 +1943,13 @@ router.post('/auto-fill-streams', async (req, res) => {
         }
 
         const videoStream = probeData.streams.find(s => s.codec_type === 'video');
-        const hasAudio = probeData.streams.some(s => s.codec_type === 'audio');
 
-        if (!videoStream && !hasAudio) {
-          throw new Error('No valid streams');
+        // MUST have video - audio-only streams are not valid for IPTV
+        if (!videoStream) {
+          throw new Error('No video stream');
         }
 
-        return { valid: true, height: videoStream ? (videoStream.height || 0) : 0 };
+        return { valid: true, height: videoStream.height || 0 };
       }
     };
 

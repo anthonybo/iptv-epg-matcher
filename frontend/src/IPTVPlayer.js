@@ -82,9 +82,14 @@ const IPTVPlayer = ({
       lastRecoveryTime: 0,
       activeRecoveries: 0, // Track concurrent recoveries
       maxConcurrentRecoveries: 2, // Only allow 2 streams to recover at once
-      pendingRecoveries: [] // Queue for pending recoveries to prevent stack overflow
+      pendingRecoveries: [], // Queue for pending recoveries to prevent stack overflow
+      maxPendingRecoveries: 10 // Hard limit to prevent memory issues
     };
   }
+
+  // Track total recovery attempts for this instance to prevent infinite loops
+  const totalRecoveryAttemptsRef = useRef(0);
+  const MAX_TOTAL_RECOVERY_ATTEMPTS = 20; // Hard limit per instance per session
   
   // Enhanced logging function - optimized for multi-view performance
   const log = (level, message, data = null) => {
@@ -344,6 +349,14 @@ const IPTVPlayer = ({
       healthCheckIntervalRef.current = null;
     }
 
+    // Clear any pending recoveries from the global queue for this instance
+    // This prevents orphaned recovery attempts when channel changes
+    if (theatreMode && window.iptvRecoveryQueue?.pendingRecoveries?.length > 0) {
+      // Clear all pending - we're destroying the player anyway
+      window.iptvRecoveryQueue.pendingRecoveries.forEach(timer => clearTimeout(timer));
+      window.iptvRecoveryQueue.pendingRecoveries = [];
+    }
+
     // Reset timing refs to prevent false stall detection on new stream
     // These will be set properly when new stream starts playing
     lastPlayingTimeRef.current = Date.now(); // Reset to now so stall detection doesn't fire immediately
@@ -421,13 +434,24 @@ const IPTVPlayer = ({
 
   // Unified recovery mechanism with progressive backoff
   const attemptRecovery = (errorContext = '') => {
+    // CRITICAL: Hard limit on total recovery attempts to prevent infinite loops
+    totalRecoveryAttemptsRef.current++;
+    if (totalRecoveryAttemptsRef.current > MAX_TOTAL_RECOVERY_ATTEMPTS) {
+      log('error', `Maximum total recovery attempts (${MAX_TOTAL_RECOVERY_ATTEMPTS}) exceeded - giving up`);
+      setError('Stream unavailable after multiple recovery attempts. Please refresh the page.');
+      isRecoveringRef.current = false;
+      return;
+    }
+
     // Prevent multiple simultaneous recovery attempts
     if (isRecoveringRef.current) {
+      log('info', 'Recovery already in progress, skipping duplicate attempt');
       return;
     }
 
     // Don't recover if channel has changed
     if (getChannelId() !== currentChannelIdRef.current) {
+      log('info', 'Channel changed, skipping recovery');
       return;
     }
 
@@ -438,6 +462,7 @@ const IPTVPlayer = ({
     if (timeSinceLastError > 30000) {
       retryCountRef.current = 0;
       freshStartCountRef.current = 0;
+      totalRecoveryAttemptsRef.current = 0; // Also reset total attempts after sustained success
       log('info', 'Resetting retry counters after successful playback period');
     }
 
@@ -456,6 +481,12 @@ const IPTVPlayer = ({
       // Strict rate limiting: minimum 500ms between recovery attempts (increased from 200ms)
       // This dramatically reduces connection churn that causes kernel buffer leaks
       if (timeSinceLastGlobalRecovery < 500 || queue.activeRecoveries >= queue.maxConcurrentRecoveries) {
+        // Check pending queue limit to prevent memory exhaustion
+        if (queue.pendingRecoveries.length >= queue.maxPendingRecoveries) {
+          log('warn', 'Too many pending recoveries, dropping this attempt');
+          isRecoveringRef.current = false;
+          return;
+        }
         // Queue this recovery instead of recursive call to prevent stack overflow
         const delayMs = Math.max(500 - timeSinceLastGlobalRecovery, 0) + Math.random() * 500;
         isRecoveringRef.current = false;
@@ -512,13 +543,23 @@ const IPTVPlayer = ({
           clearTimeout(recoveryTimeoutRef.current);
         }
 
+        // Set a safety timeout - if player doesn't start, schedule next retry
+        // Use longer timeout in theatre mode, shorter for single view
+        const recoveryTimeout = theatreMode ? 15000 : 10000;
         recoveryTimeoutRef.current = setTimeout(() => {
           if (isRecoveringRef.current) {
+            log('warn', 'Recovery timeout - player did not start within timeout');
             clearRecoveryState();
-            // Trigger next recovery attempt since this one failed
-            attemptRecovery('Recovery timeout - player did not start');
+            // Only trigger next attempt if we haven't exhausted retries
+            // The totalRecoveryAttemptsRef check in attemptRecovery will also guard this
+            if (retryCountRef.current < MAX_RETRIES || freshStartCountRef.current < MAX_FRESH_STARTS) {
+              attemptRecovery('Recovery timeout - player did not start');
+            } else {
+              log('error', 'Recovery timeout and all retries exhausted');
+              setError('Stream unavailable. Please try another channel or refresh the page.');
+            }
           }
-        }, 10000); // 10 second timeout
+        }, recoveryTimeout);
 
         switch (playbackMethod) {
           case 'mpegts-player':
@@ -579,12 +620,22 @@ const IPTVPlayer = ({
           clearTimeout(recoveryTimeoutRef.current);
         }
 
+        // Set a safety timeout - if player doesn't start after fresh start, try again
+        // Use longer timeout in theatre mode
+        const freshStartTimeout = theatreMode ? 20000 : 15000;
         recoveryTimeoutRef.current = setTimeout(() => {
           if (isRecoveringRef.current) {
+            log('warn', 'Fresh start timeout - player did not start');
             clearRecoveryState();
-            attemptRecovery('Fresh start timeout - player did not start');
+            // Only trigger another fresh start if we haven't exhausted them
+            if (freshStartCountRef.current < MAX_FRESH_STARTS) {
+              attemptRecovery('Fresh start timeout - player did not start');
+            } else {
+              log('error', 'Fresh start timeout and all fresh starts exhausted');
+              setError('Stream unavailable. Please try another channel or refresh the page.');
+            }
           }
-        }, 10000); // 10 second timeout
+        }, freshStartTimeout);
 
         switch (playbackMethod) {
           case 'mpegts-player':
@@ -700,6 +751,7 @@ const IPTVPlayer = ({
     retryCountRef.current = 0;
     freshStartCountRef.current = 0;
     lastErrorTimeRef.current = 0;
+    totalRecoveryAttemptsRef.current = 0; // Reset total attempts for new channel
     currentChannelIdRef.current = newChannelId; // Track current channel
 
     if (!containerRef.current) {

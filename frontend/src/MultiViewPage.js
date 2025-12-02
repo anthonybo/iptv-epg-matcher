@@ -712,18 +712,18 @@ const MultiViewPage = ({ sessionId }) => {
     setFindingAlternativeFor(streamKey);
 
     try {
+      // Exclude sources already in use in multiview (one source = one stream)
       let excludeSourceIds = [];
       if (stream.sourceId) {
         excludeSourceIds.push(stream.sourceId);
       }
 
-      if (autoFillSettings.avoidDuplicateSources) {
-        const otherSourceIds = streams
-          .filter(s => s.id !== stream.id || s.sourceId !== stream.sourceId)
-          .map(s => s.sourceId)
-          .filter(id => id && !excludeSourceIds.includes(id));
-        excludeSourceIds = [...excludeSourceIds, ...otherSourceIds];
-      }
+      // Always exclude other sources in multiview - one source per stream
+      const otherSourceIds = streams
+        .filter(s => s.id !== stream.id || s.sourceId !== stream.sourceId)
+        .map(s => s.sourceId)
+        .filter(id => id && !excludeSourceIds.includes(id));
+      excludeSourceIds = [...excludeSourceIds, ...otherSourceIds];
 
       const excludeChannelIds = stream.id ? [stream.id] : [];
 
@@ -735,8 +735,9 @@ const MultiViewPage = ({ sessionId }) => {
         return;
       }
 
-      // Use stored search query if available, otherwise extract from channel name
-      let searchName = stream.searchQuery;
+      // Use stored search query or event name if available, otherwise extract from channel name
+      // Priority: searchQuery > espnEventName > cleaned channel name
+      let searchName = stream.searchQuery || stream.espnEventName;
       let searchOffset = stream.searchOffset || 0;
 
       if (!searchName) {
@@ -764,6 +765,7 @@ const MultiViewPage = ({ sessionId }) => {
         searchOffset = 0;
       }
 
+      console.log(`[Find Alternative] Stream data: searchQuery="${stream.searchQuery}", espnEventName="${stream.espnEventName}", name="${stream.name}"`);
       console.log(`[Find Alternative] Searching for "${searchName}" starting at offset ${searchOffset}`);
 
       const response = await fetch('/api/live-events/search-channel', {
