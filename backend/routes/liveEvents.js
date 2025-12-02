@@ -1076,10 +1076,33 @@ router.post('/search-channel', async (req, res) => {
     );
     const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
 
+    // Extract search terms using fuzzy matching logic (handles event names like "Temple Owls at Villanova Wildcats")
+    // Check if query looks like an event name (contains "at" or "vs" between teams)
+    const eventMatch = searchQuery.match(/^(.+?)\s+(?:at|vs\.?|@)\s+(.+?)$/i);
+    let searchTerms;
+    let homeTeam = null;
+    let awayTeam = null;
+
+    if (eventMatch) {
+      // Query is an event name - extract team search terms
+      awayTeam = eventMatch[1].trim();
+      homeTeam = eventMatch[2].trim();
+      const homeTerms = extractSearchTerms(homeTeam);
+      const awayTerms = extractSearchTerms(awayTeam);
+      searchTerms = [...new Set([...homeTerms, ...awayTerms])];
+      logger.info(`Search channel: Detected event format - home: "${homeTeam}", away: "${awayTeam}", terms: ${searchTerms.join(', ')}`);
+    } else {
+      // Simple search - just use the query as-is plus extracted terms
+      searchTerms = extractSearchTerms(searchQuery);
+      logger.info(`Search channel: Simple search for "${searchQuery}", terms: ${searchTerms.join(', ')}`);
+    }
+
     logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
 
-    // Build query params
-    let queryParams = [userId, `%${searchQuery}%`];
+    // Build query params with multiple search terms for OR matching
+    const channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+    const searchParams = searchTerms.map(term => `%${term}%`);
+    let queryParams = [userId, ...searchParams];
 
     // Build source exclusion clause
     let sourceExclusion = '';
@@ -1110,7 +1133,7 @@ router.post('/search-channel', async (req, res) => {
       blacklistConditions = blacklistPlaceholders.join(' AND ');
     }
 
-    // Search for matching channels - prioritize exact matches, then partial matches
+    // Search for matching channels using OR conditions for all search terms
     const channelsResult = await postgresService.query(`
       SELECT
         c.channel_id as id,
@@ -1125,21 +1148,16 @@ router.post('/search-channel', async (req, res) => {
         s.url as source_url,
         s.username as source_username,
         s.password as source_password,
-        s.mac_address as source_mac,
-        CASE
-          WHEN LOWER(c.name) = LOWER($2) THEN 1
-          WHEN LOWER(c.name) LIKE LOWER($2) THEN 2
-          ELSE 3
-        END as match_priority
+        s.mac_address as source_mac
       FROM iptv_channels c
       JOIN iptv_sources s ON c.source_id = s.id
       WHERE s.user_id = $1
-        AND c.name ILIKE $2
+        AND (${channelConditions})
         ${sourceExclusion}
         ${channelExclusion}
         AND ${blacklistConditions}
-      ORDER BY match_priority, c.name
-      LIMIT 20 OFFSET ${offset}
+      ORDER BY c.name
+      LIMIT 50
     `, queryParams);
 
     let channels = channelsResult.rows || [];
@@ -1152,7 +1170,46 @@ router.post('/search-channel', async (req, res) => {
       });
     }
 
-    logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams in parallel...`);
+    // Only apply relevance scoring if we detected an event format (homeTeam/awayTeam set)
+    // For simple searches, all channels matched the SQL ILIKE so they're all relevant
+    if (homeTeam || awayTeam) {
+      // Score and sort channels using fuzzy relevance scoring
+      channels = channels.map(channel => {
+        const score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
+        return { ...channel, relevanceScore: score };
+      });
+
+      // Sort by relevance score (highest first) and filter low-relevance channels
+      channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+      // Filter to only keep relevant channels (score >= 35 for fuzzy matches)
+      channels = channels.filter(c => c.relevanceScore >= 35);
+
+      if (channels.length === 0) {
+        return res.json({
+          success: false,
+          error: 'No relevant channels found',
+          message: `No channels found matching "${searchQuery}" (all filtered by relevance)`
+        });
+      }
+
+      logger.info(`Found ${channels.length} relevant channels matching "${searchQuery}" (top score: ${channels[0]?.relevanceScore}), testing streams...`);
+    } else {
+      logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams...`);
+    }
+
+    // Apply offset for pagination (skip already-tried channels)
+    if (offset > 0) {
+      channels = channels.slice(offset);
+    }
+
+    if (channels.length === 0) {
+      return res.json({
+        success: false,
+        error: 'No more channels to try',
+        message: `All channels for "${searchQuery}" have been tried`
+      });
+    }
 
     // Test streams using ffprobe validation
     const PARALLEL_TESTS = 3; // Test 3 channels at a time (reduced to prevent network saturation)

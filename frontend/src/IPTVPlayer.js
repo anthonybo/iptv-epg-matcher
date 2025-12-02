@@ -76,10 +76,13 @@ const IPTVPlayer = ({
   const recoveryTimeoutRef = useRef(null); // Timeout to detect if recovery attempt failed
 
   // Global recovery rate limiter (shared across all instances)
+  // Uses a queue-based approach to prevent stack overflow in multi-view
   if (typeof window.iptvRecoveryQueue === 'undefined') {
     window.iptvRecoveryQueue = {
       lastRecoveryTime: 0,
-      queue: []
+      activeRecoveries: 0, // Track concurrent recoveries
+      maxConcurrentRecoveries: 2, // Only allow 2 streams to recover at once
+      pendingRecoveries: [] // Queue for pending recoveries to prevent stack overflow
     };
   }
   
@@ -405,6 +408,17 @@ const IPTVPlayer = ({
     videoElementRef.current = null;
   };
 
+  // Helper to properly clear recovery state (decrements global counter in theatre mode)
+  const clearRecoveryState = () => {
+    if (isRecoveringRef.current && theatreMode) {
+      // Decrement global counter if we're in theatre mode
+      if (window.iptvRecoveryQueue.activeRecoveries > 0) {
+        window.iptvRecoveryQueue.activeRecoveries--;
+      }
+    }
+    isRecoveringRef.current = false;
+  };
+
   // Unified recovery mechanism with progressive backoff
   const attemptRecovery = (errorContext = '') => {
     // Prevent multiple simultaneous recovery attempts
@@ -431,19 +445,33 @@ const IPTVPlayer = ({
     isRecoveringRef.current = true;
     lastErrorTimeRef.current = now;
 
-    // In theatre mode (multi-view), stagger recovery attempts to prevent CPU overload
-    // Only allow one recovery every 200ms across all streams (increased from 100ms)
+    // In theatre mode (multi-view), use queue-based rate limiting to prevent:
+    // 1. Stack overflow from recursive calls when multiple streams fail
+    // 2. CPU/network overload from too many concurrent recoveries
+    // 3. Kernel buffer exhaustion from connection churn
     if (theatreMode) {
-      const timeSinceLastGlobalRecovery = now - window.iptvRecoveryQueue.lastRecoveryTime;
-      if (timeSinceLastGlobalRecovery < 200) {
-        // Delay this recovery attempt slightly
-        const delayMs = 200 - timeSinceLastGlobalRecovery + Math.random() * 200;
-        // Reset flag before recursive call, will be set again in recursive call
+      const queue = window.iptvRecoveryQueue;
+      const timeSinceLastGlobalRecovery = now - queue.lastRecoveryTime;
+
+      // Strict rate limiting: minimum 500ms between recovery attempts (increased from 200ms)
+      // This dramatically reduces connection churn that causes kernel buffer leaks
+      if (timeSinceLastGlobalRecovery < 500 || queue.activeRecoveries >= queue.maxConcurrentRecoveries) {
+        // Queue this recovery instead of recursive call to prevent stack overflow
+        const delayMs = Math.max(500 - timeSinceLastGlobalRecovery, 0) + Math.random() * 500;
         isRecoveringRef.current = false;
-        setTimeout(() => attemptRecovery(errorContext), delayMs);
+        // Use setTimeout with a bound function instead of recursive call
+        const recoveryTimer = setTimeout(() => {
+          // Remove from pending queue
+          const idx = queue.pendingRecoveries.indexOf(recoveryTimer);
+          if (idx > -1) queue.pendingRecoveries.splice(idx, 1);
+          // Retry recovery (not recursive - fresh call from setTimeout)
+          attemptRecovery(errorContext);
+        }, delayMs);
+        queue.pendingRecoveries.push(recoveryTimer);
         return;
       }
-      window.iptvRecoveryQueue.lastRecoveryTime = now;
+      queue.lastRecoveryTime = now;
+      queue.activeRecoveries++;
     }
 
     const MAX_RETRIES = 6; // More retry attempts with progressive backoff
@@ -451,10 +479,11 @@ const IPTVPlayer = ({
     const retryCount = retryCountRef.current;
 
     if (retryCount < MAX_RETRIES) {
-      // Aggressive fast recovery in multi-view: 200ms, 500ms, 1s, 1.5s, 2s, 3s (total: ~8s)
-      // Moderate recovery in single view: 500ms, 1s, 2s, 3s, 5s, 8s (total: ~19.5s)
+      // UPDATED: Slower recovery in multi-view to reduce connection churn and kernel buffer leaks
+      // Multi-view: 1s, 2s, 3s, 5s, 8s, 10s (total: ~29s) - much slower to prevent system overload
+      // Single view: 500ms, 1s, 2s, 3s, 5s, 8s (total: ~19.5s) - normal recovery
       const delays = theatreMode
-        ? [200, 500, 1000, 1500, 2000, 3000]
+        ? [1000, 2000, 3000, 5000, 8000, 10000]
         : [500, 1000, 2000, 3000, 5000, 8000];
       const retryDelay = delays[Math.min(retryCount, delays.length - 1)];
 
@@ -467,7 +496,7 @@ const IPTVPlayer = ({
       retryTimerRef.current = setTimeout(() => {
         // Double-check channel hasn't changed during the delay
         if (getChannelId() !== currentChannelIdRef.current) {
-          isRecoveringRef.current = false;
+          clearRecoveryState();
           setRecoveryStatus(null);
           return;
         }
@@ -485,7 +514,7 @@ const IPTVPlayer = ({
 
         recoveryTimeoutRef.current = setTimeout(() => {
           if (isRecoveringRef.current) {
-            isRecoveringRef.current = false;
+            clearRecoveryState();
             // Trigger next recovery attempt since this one failed
             attemptRecovery('Recovery timeout - player did not start');
           }
@@ -508,7 +537,7 @@ const IPTVPlayer = ({
             log('error', 'Unknown playback method during recovery', { method: playbackMethod });
             clearTimeout(recoveryTimeoutRef.current);
             recoveryTimeoutRef.current = null;
-            isRecoveringRef.current = false; // Clear on error
+            clearRecoveryState(); // Clear on error
         }
       }, retryDelay);
     } else if (freshStartCountRef.current < MAX_FRESH_STARTS) {
@@ -529,7 +558,7 @@ const IPTVPlayer = ({
       retryTimerRef.current = setTimeout(() => {
         if (getChannelId() !== currentChannelIdRef.current) {
           log('info', 'Channel changed during fresh start delay, aborting');
-          isRecoveringRef.current = false;
+          clearRecoveryState();
           setRecoveryStatus(null);
           return;
         }
@@ -552,7 +581,7 @@ const IPTVPlayer = ({
 
         recoveryTimeoutRef.current = setTimeout(() => {
           if (isRecoveringRef.current) {
-            isRecoveringRef.current = false;
+            clearRecoveryState();
             attemptRecovery('Fresh start timeout - player did not start');
           }
         }, 10000); // 10 second timeout
@@ -574,14 +603,14 @@ const IPTVPlayer = ({
             log('error', 'Unknown playback method during fresh start', { method: playbackMethod });
             clearTimeout(recoveryTimeoutRef.current);
             recoveryTimeoutRef.current = null;
-            isRecoveringRef.current = false; // Clear on error
+            clearRecoveryState(); // Clear on error
         }
       }, freshStartDelay);
     } else {
       // All recovery attempts exhausted
       log('error', `Stream failed after ${MAX_RETRIES} retries and ${MAX_FRESH_STARTS} fresh starts`);
       setError('Stream unavailable. Please try another channel or refresh the page.');
-      isRecoveringRef.current = false;
+      clearRecoveryState();
     }
   };
 
@@ -808,7 +837,7 @@ const IPTVPlayer = ({
         // Resetting here causes infinite loops because stream might stall immediately after 'playing'
 
         lastPlayingTimeRef.current = Date.now();
-        isRecoveringRef.current = false; // Allow new recovery if needed
+        clearRecoveryState(); // Allow new recovery if needed
 
         // CRITICAL: Reset initialization lock when player successfully starts
         isInitializingRef.current = false;
@@ -862,9 +891,9 @@ const IPTVPlayer = ({
           clearTimeout(stallTimerRef.current);
         }
 
-        // Reduced stall timeout - rely more on health check for freeze detection
-        // This is just for initial buffering issues
-        const stallTimeout = theatreMode ? 8000 : 10000;
+        // Increased stall timeout in theatre mode to reduce connection churn
+        // This prevents aggressive reconnection that can cause kernel buffer leaks
+        const stallTimeout = theatreMode ? 15000 : 10000;
 
         // Set a timer to detect if we're stuck
         stallTimerRef.current = setTimeout(() => {
@@ -1007,21 +1036,26 @@ const IPTVPlayer = ({
       videoElementRef.current = videoEl;
 
       if (window.mpegts.getFeatureList().mseLivePlayback) {
-        // Reduce buffer sizes in theatre mode (multi-view) to save memory
-        // 6 streams x 64MB = 384MB is too much
-        const bufferSize = theatreMode ? 16 * 1024 * 1024 : 32 * 1024 * 1024; // 16MB for multi-view, 32MB for single
-        const backBufferSize = theatreMode ? 8 * 1024 * 1024 : 16 * 1024 * 1024; // 8MB for multi-view, 16MB for single
+        // CRITICAL: Aggressive memory management for multi-view to prevent kernel buffer exhaustion
+        // 4-6 streams x 64MB = 256-384MB is too much and causes system crashes
+        // Use much smaller buffers in theatre mode to reduce memory pressure
+        const bufferSize = theatreMode ? 8 * 1024 * 1024 : 32 * 1024 * 1024; // 8MB for multi-view, 32MB for single
+        const backBufferSize = theatreMode ? 4 * 1024 * 1024 : 16 * 1024 * 1024; // 4MB for multi-view, 16MB for single
 
         const player = window.mpegts.createPlayer({
           type: 'mse',
           url: proxyTsUrl,
           isLive: true,
           enableStashBuffer: false,
-          // Buffer management - optimized for multi-view
+          // Buffer management - aggressively optimized for multi-view to prevent crashes
           liveBufferLatencyChasing: true,
+          liveBufferLatencyMaxLatency: theatreMode ? 2.0 : 1.5, // Allow more latency in multi-view
+          liveBufferLatencyMinRemain: theatreMode ? 1.0 : 0.5,
           maxBufferSize: bufferSize,
+          // Auto-cleanup is CRITICAL for preventing memory leaks in long-running streams
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackBufferSize: backBufferSize,
+          autoCleanupMaxBackwardDuration: theatreMode ? 30 : 180, // Much shorter cleanup in multi-view (30s vs 3min)
+          autoCleanupMinBackwardDuration: theatreMode ? 15 : 120, // Start cleanup earlier in multi-view
           // Disable worker to reduce CPU overhead
           enableWorker: false,
           lazyLoad: false,
@@ -1094,7 +1128,7 @@ const IPTVPlayer = ({
 
           lastPlayingTimeRef.current = Date.now();
           lastKnownCurrentTimeRef.current = videoEl.currentTime;
-          isRecoveringRef.current = false; // Allow new recovery if needed
+          clearRecoveryState(); // Allow new recovery if needed
 
           // CRITICAL: Reset initialization lock when player successfully starts
           isInitializingRef.current = false;
@@ -1148,9 +1182,9 @@ const IPTVPlayer = ({
             clearTimeout(stallTimerRef.current);
           }
 
-          // Reduced stall timeout - rely more on health check for freeze detection
-          // This is just for initial buffering issues
-          const stallTimeout = theatreMode ? 8000 : 10000;
+          // Increased stall timeout in theatre mode to reduce connection churn
+          // This prevents aggressive reconnection that can cause kernel buffer leaks
+          const stallTimeout = theatreMode ? 15000 : 10000;
 
           // Set a timer to detect if we're stuck
           stallTimerRef.current = setTimeout(() => {

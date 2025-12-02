@@ -104,7 +104,8 @@ export const addToMultiview = async (channel) => {
       espnEventId: channel.espnEventId,
       espnEventName: channel.espnEventName,
       // Store search metadata for "find alternative" feature
-      searchQuery: channel.searchQuery,
+      // Use event name for auto-filled streams so we search for the game, not the channel
+      searchQuery: channel.searchQuery || channel.espnEventName,
       searchOffset: channel.searchOffset
     };
 

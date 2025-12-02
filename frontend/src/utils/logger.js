@@ -152,10 +152,38 @@ class FrontendLogger {
   }
 
   /**
+   * Check if message should be filtered (known non-critical errors)
+   */
+  shouldFilter(message) {
+    const filterPatterns = [
+      // AC-3/EAC-3 codec not supported by browser MSE - video plays fine, just no audio
+      /audio\/mp4;codecs=ac-3/i,
+      /audio\/mp4;codecs=ec-3/i,
+      /The type provided.*is unsupported/i,
+      // Early-EOF is normal when switching/stopping streams
+      /Fetch stream meet Early-EOF/i,
+      /UnrecoverableEarlyEof/i,
+      // Vite dev server connection issues (dev only)
+      /vite.*server connection lost/i,
+      /vite.*polling for restart/i
+    ];
+    return filterPatterns.some(pattern => pattern.test(message));
+  }
+
+  /**
    * Add log entry to queue
    */
   log(level, message, context = {}) {
     if (!this.enabled) return;
+
+    // Filter out known non-critical errors
+    if (level === 'error' && this.shouldFilter(message)) {
+      // Still log to console in dev for debugging, but don't send to backend
+      if (process.env.NODE_ENV === 'development' && this.originalConsole) {
+        this.originalConsole.log('[Logger] Filtered:', message);
+      }
+      return;
+    }
 
     const entry = {
       level,

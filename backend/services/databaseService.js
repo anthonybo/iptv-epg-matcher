@@ -51,10 +51,10 @@ const initDb = () => {
   });
 };
 
-// Initialize immediately
-initDb().catch(err => {
-  logger.error(`Database initialization failed: ${err.message}`);
-});
+// DISABLED: SQLite initialization - now using PostgreSQL via epgDatabaseService
+// initDb().catch(err => {
+//   logger.error(`Database initialization failed: ${err.message}`);
+// });
 
 // Helper for promise-based SQLite queries
 const run = (sql, params = []) => {
@@ -162,10 +162,11 @@ const initDatabase = async () => {
   }
 };
 
-// Initialize the database on load
-initDatabase().catch(err => {
-  logger.error(`Failed to initialize database: ${err.message}`);
-});
+// DISABLED: SQLite initialization - now using PostgreSQL via epgDatabaseService
+// This file is deprecated and kept for reference only
+// initDatabase().catch(err => {
+//   logger.error(`Failed to initialize database: ${err.message}`);
+// });
 
 // Database service methods
 const databaseService = {

@@ -551,10 +551,10 @@ sseService.setupSseRoutes(app);
 // This will ensure both session mechanisms work together
 
 // Add a function to periodically sync sessions between systems
-function syncSessionSystems() {
+async function syncSessionSystems() {
   try {
     // First, migrate from sessionStorage to app.locals.sessions
-    const sessions = sessionStorage.getAllSessions();
+    const sessions = await sessionStorage.getAllSessions() || {};
     Object.keys(sessions).forEach(sessionId => {
       const session = sessions[sessionId];
       if (!app.locals.sessions[sessionId]) {
@@ -569,21 +569,23 @@ function syncSessionSystems() {
         logger.debug(`Migrated session from sessionStorage to app.locals: ${sessionId}`);
       }
     });
-    
+
     // Then, migrate from app.locals.sessions to sessionStorage
-    Object.keys(app.locals.sessions).forEach(sessionId => {
+    for (const sessionId of Object.keys(app.locals.sessions)) {
       const session = app.locals.sessions[sessionId];
       if (!sessions[sessionId]) {
-        sessionStorage.registerSessionFromLocals(sessionId, {
-          channels: session.channels || [],
-          categories: session.categories || [],
-          createdAt: session.created,
-          lastAccessed: session.lastAccessed
-        });
-        logger.debug(`Migrated session from app.locals to sessionStorage: ${sessionId}`);
+        try {
+          await sessionStorage.createSession(sessionId, {
+            channels: session.channels || [],
+            categories: session.categories || []
+          });
+          logger.debug(`Migrated session from app.locals to sessionStorage: ${sessionId}`);
+        } catch (err) {
+          logger.error(`Failed to migrate session ${sessionId}:`, err);
+        }
       }
-    });
-    
+    }
+
     logger.debug('Session synchronization complete');
   } catch (error) {
     logger.error('Error synchronizing session systems:', error);
@@ -951,11 +953,14 @@ epgFinder.findAndExposeEpgData();
 // Initialize database on startup
 (async () => {
   try {
-    await db.initDatabase();
-    logger.info('Database initialized successfully');
+    // Initialize PostgreSQL EPG database service
+    const epgDatabaseService = require('./services/epgDatabaseService');
+    const epgQueryService = require('./services/epgQueryService');
+    await epgDatabaseService.init();
+    logger.info('EPG database initialized successfully (PostgreSQL)');
 
     // Get database stats
-    const stats = await db.getDatabaseStats();
+    const stats = await epgQueryService.getDatabaseStats();
     logger.info(`Database contains ${stats.channelCount} channels and ${stats.programCount} programs`);
 
     // Initialize IPTV database - uses abstraction layer (PostgreSQL or SQLite based on USE_POSTGRES)
