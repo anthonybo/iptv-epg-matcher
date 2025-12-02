@@ -10,11 +10,105 @@ const { promisify } = require('util');
 const http = require('http');
 const https = require('https');
 const axios = require('axios');
+const FuzzySet = require('fuzzyset');
 const logger = require('../config/logger');
 const { authMiddleware } = require('../middleware/authMiddleware');
 const liveEventsService = require('../services/liveEventsService');
 const postgresService = require('../services/postgresService');
 const iptvDatabaseService = require('../services/iptvDatabase');
+
+/**
+ * Extract searchable terms from a team name
+ * Instead of maintaining a brittle list of mascots, we extract meaningful parts:
+ * - The full team name
+ * - Individual words (for partial matching)
+ * - Location/school name (typically the first word(s) before the mascot)
+ */
+function extractSearchTerms(teamName) {
+  if (!teamName) return [];
+
+  const terms = new Set();
+  const cleaned = teamName.trim();
+
+  // Add full name
+  terms.add(cleaned);
+
+  // Split into words
+  const words = cleaned.split(/\s+/);
+
+  // Add individual significant words (3+ chars, not common words)
+  const commonWords = new Set(['the', 'and', 'for', 'state', 'university']);
+  words.forEach(word => {
+    if (word.length >= 3 && !commonWords.has(word.toLowerCase())) {
+      terms.add(word);
+    }
+  });
+
+  // For multi-word names, add first word(s) which is typically the location/school
+  // e.g., "Temple Owls" -> "Temple", "Villanova Wildcats" -> "Villanova"
+  // e.g., "Central State (OH) Marauders" -> "Central State", "Central"
+  if (words.length >= 2) {
+    terms.add(words[0]); // First word (usually city/school name)
+
+    // Handle parenthetical state abbreviations like "(OH)"
+    const withoutParens = cleaned.replace(/\s*\([^)]+\)\s*/g, ' ').trim();
+    const cleanedWords = withoutParens.split(/\s+/);
+    if (cleanedWords.length >= 2) {
+      // Add first two words for compound names like "Central State", "West Virginia"
+      terms.add(cleanedWords.slice(0, 2).join(' '));
+    }
+  }
+
+  return Array.from(terms);
+}
+
+/**
+ * Calculate relevance score between a channel name and team names using fuzzy matching
+ * Returns a score from 0-400 based on how well the channel matches the teams
+ */
+function calculateRelevanceScore(channelName, homeTeam, awayTeam) {
+  const channelLower = channelName.toLowerCase();
+  let score = 0;
+
+  // Extract search terms for each team
+  const homeTerms = extractSearchTerms(homeTeam);
+  const awayTerms = extractSearchTerms(awayTeam);
+
+  // Check for exact substring matches first (fastest)
+  const hasHomeMatch = homeTerms.some(term => channelLower.includes(term.toLowerCase()));
+  const hasAwayMatch = awayTerms.some(term => channelLower.includes(term.toLowerCase()));
+
+  // Both teams = highest priority
+  if (hasHomeMatch && hasAwayMatch) {
+    score += 200;
+  }
+
+  // Individual team matches
+  if (hasHomeMatch) score += 100;
+  if (hasAwayMatch) score += 100;
+
+  // If no exact matches, try fuzzy matching for typo tolerance
+  if (!hasHomeMatch && !hasAwayMatch && (homeTeam || awayTeam)) {
+    // Build fuzzy set from channel name words
+    const channelWords = channelLower.split(/[\s|:@\-]+/).filter(w => w.length >= 3);
+    if (channelWords.length > 0) {
+      const fuzzyChannel = FuzzySet(channelWords);
+
+      // Check if any team term fuzzy matches channel words
+      const allTerms = [...homeTerms, ...awayTerms];
+      for (const term of allTerms) {
+        if (term.length < 3) continue;
+        const match = fuzzyChannel.get(term.toLowerCase(), null, 0.7);
+        if (match && match.length > 0) {
+          // Fuzzy match found - add partial score based on match quality
+          score += Math.round(match[0][0] * 50);
+        }
+      }
+    }
+  }
+
+  return score;
+}
 
 // Promisify execFile once at module load
 const execFileAsync = promisify(execFile);
@@ -293,31 +387,10 @@ router.post('/random-working-stream', async (req, res) => {
       const homeTeam = event.home_team || '';
       const awayTeam = event.away_team || '';
 
-      const cleanTeamName = (teamName) => {
-        let cleaned = teamName
-          .replace(/^(FC|CF|US|AS|AC|SC|VfL|SV|TSG|1\.|RB|CD|UD)\s+/i, '')
-          .replace(/\s+(FC|CF|United|City|Town|Hotspur|Wanderers|Athletic|Rovers)$/i, '')
-          .trim();
-
-        cleaned = cleaned
-          .replace(/\s+(Aggies|Anteaters|Bears|Bruins|Bulldogs|Cardinals|Cougars|Crimson Tide|Ducks|Eagles|Falcons|Gators|Hawkeyes|Huskies|Jayhawks|Knights|Lions|Longhorns|Mountaineers|Musketeers|Nittany Lions|Panthers|Razorbacks|Rebels|Seminoles|Sooners|Spartans|Sun Devils|Tar Heels|Terrapins|Tigers|Trojans|Utes|Volunteers|Wildcats|Wolverines|Badgers|Buckeyes|Cornhuskers|Cyclones|Fighting Irish|Golden Bears|Hokies|Horned Frogs|Hurricanes|Orange|Orangemen|Red Raiders|Scarlet Knights|Demon Deacons|Blue Devils|Gamecocks|Hoosiers|Boilermakers|Golden Gophers|Huskers|Huskies|Thundering Herd|Mean Green|Fighting Hawks|Chanticleers|Ragin' Cajuns|Warhawks|Red Foxes|Gaels|Bruins|Leathernecks)$/i, '')
-          .trim();
-
-        return cleaned;
-      };
-
-      const homeTeamClean = homeTeam ? cleanTeamName(homeTeam) : '';
-      const awayTeamClean = awayTeam ? cleanTeamName(awayTeam) : '';
-
-      const searchTerms = [];
-      if (homeTeam) {
-        searchTerms.push(homeTeam);
-        if (homeTeamClean !== homeTeam) searchTerms.push(homeTeamClean);
-      }
-      if (awayTeam) {
-        searchTerms.push(awayTeam);
-        if (awayTeamClean !== awayTeam) searchTerms.push(awayTeamClean);
-      }
+      // Use the new extractSearchTerms function for robust term extraction
+      const homeTerms = extractSearchTerms(homeTeam);
+      const awayTerms = extractSearchTerms(awayTeam);
+      const searchTerms = [...new Set([...homeTerms, ...awayTerms])]; // Dedupe
 
       if (searchTerms.length === 0) {
         logger.info(`Event ${event.event_id} has no team names, skipping`);
@@ -616,37 +689,10 @@ router.get('/:eventId/channels', async (req, res) => {
     const leagueName = event.league_name || '';
     const sportType = event.sport_type || '';
 
-    // Extract clean team names (remove common prefixes and mascots)
-    const cleanTeamName = (teamName) => {
-      // First remove common soccer/football club prefixes
-      let cleaned = teamName
-        .replace(/^(FC|CF|US|AS|AC|SC|VfL|SV|TSG|1\.|RB|CD|UD)\s+/i, '')
-        .replace(/\s+(FC|CF|United|City|Town|Hotspur|Wanderers|Athletic|Rovers)$/i, '')
-        .trim();
-
-      // Then remove common college mascot names (for NCAA sports)
-      cleaned = cleaned
-        .replace(/\s+(Aggies|Anteaters|Bears|Bruins|Bulldogs|Cardinals|Cougars|Crimson Tide|Ducks|Eagles|Falcons|Gators|Hawkeyes|Huskies|Jayhawks|Knights|Lions|Longhorns|Mountaineers|Musketeers|Nittany Lions|Panthers|Razorbacks|Rebels|Seminoles|Sooners|Spartans|Sun Devils|Tar Heels|Terrapins|Tigers|Trojans|Utes|Volunteers|Wildcats|Wolverines|Badgers|Buckeyes|Cornhuskers|Cyclones|Fighting Irish|Golden Bears|Hokies|Horned Frogs|Hurricanes|Orange|Orangemen|Red Raiders|Scarlet Knights|Demon Deacons|Blue Devils|Gamecocks|Hoosiers|Boilermakers|Golden Gophers|Huskers|Huskies|Thundering Herd|Mean Green|Fighting Hawks|Chanticleers|Ragin' Cajuns|Warhawks|Red Foxes|Gaels|Bruins|Leathernecks)$/i, '')
-        .trim();
-
-      return cleaned;
-    };
-
-    const homeTeamClean = homeTeam ? cleanTeamName(homeTeam) : '';
-    const awayTeamClean = awayTeam ? cleanTeamName(awayTeam) : '';
-
-    // Build search terms - ONLY team-related terms, no generic sport/league
-    const searchTerms = [];
-
-    if (homeTeam) {
-      searchTerms.push(homeTeam); // Full team name
-      if (homeTeamClean !== homeTeam) searchTerms.push(homeTeamClean);
-    }
-
-    if (awayTeam) {
-      searchTerms.push(awayTeam); // Full team name
-      if (awayTeamClean !== awayTeam) searchTerms.push(awayTeamClean);
-    }
+    // Use the new extractSearchTerms function for robust term extraction
+    const homeTerms = extractSearchTerms(homeTeam);
+    const awayTerms = extractSearchTerms(awayTeam);
+    const searchTerms = [...new Set([...homeTerms, ...awayTerms])]; // Dedupe
 
     // Build SQL query with OR conditions for team names only
     const conditions = searchTerms.map(() => 'c.name LIKE ?').join(' OR ');
@@ -1650,7 +1696,7 @@ router.post('/auto-fill-streams', async (req, res) => {
     );
     const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
 
-    logger.info(`Auto-fill: Looking for ${maxStreams} streams (sport: ${sportType || 'any'}, league: ${leagueName || 'any'}, minQuality: ${minHeight}p)`);
+    logger.info(`Auto-fill: Looking for ${maxStreams} streams (sport: ${sportType || 'any'}, league: ${leagueName || 'any'}, minQuality: ${minHeight}p) for user ${userId}`);
     logger.info(`Auto-fill: Excluding ${excludeSourceIds.length} sources, ${excludeEventIds.length} events, ${excludeChannelIds.length} channels`);
 
     const foundChannels = [];
@@ -1804,20 +1850,6 @@ router.post('/auto-fill-streams', async (req, res) => {
       }
     };
 
-    // Clean team name helper
-    const cleanTeamName = (teamName) => {
-      let cleaned = teamName
-        .replace(/^(FC|CF|US|AS|AC|SC|VfL|SV|TSG|1\.|RB|CD|UD)\s+/i, '')
-        .replace(/\s+(FC|CF|United|City|Town|Hotspur|Wanderers|Athletic|Rovers)$/i, '')
-        .trim();
-
-      cleaned = cleaned
-        .replace(/\s+(Aggies|Anteaters|Bears|Bruins|Bulldogs|Cardinals|Cougars|Crimson Tide|Ducks|Eagles|Falcons|Gators|Hawkeyes|Huskies|Jayhawks|Knights|Lions|Longhorns|Mountaineers|Musketeers|Nittany Lions|Panthers|Razorbacks|Rebels|Seminoles|Sooners|Spartans|Sun Devils|Tar Heels|Terrapins|Tigers|Trojans|Utes|Volunteers|Wildcats|Wolverines|Badgers|Buckeyes|Cornhuskers|Cyclones|Fighting Irish|Golden Bears|Hokies|Horned Frogs|Hurricanes|Orange|Orangemen|Red Raiders|Scarlet Knights|Demon Deacons|Blue Devils|Gamecocks|Hoosiers|Boilermakers|Golden Gophers|Huskers|Huskies|Thundering Herd|Mean Green|Fighting Hawks|Chanticleers|Ragin' Cajuns|Warhawks|Red Foxes|Gaels|Bruins|Leathernecks)$/i, '')
-        .trim();
-
-      return cleaned;
-    };
-
     // Track which events we've exhausted all channels for
     const exhaustedEvents = new Set();
 
@@ -1840,20 +1872,13 @@ router.post('/auto-fill-streams', async (req, res) => {
       const homeTeam = event.home_team || '';
       const awayTeam = event.away_team || '';
 
-      const homeTeamClean = homeTeam ? cleanTeamName(homeTeam) : '';
-      const awayTeamClean = awayTeam ? cleanTeamName(awayTeam) : '';
-
-      const searchTerms = [];
-      if (homeTeam) {
-        searchTerms.push(homeTeam);
-        if (homeTeamClean !== homeTeam) searchTerms.push(homeTeamClean);
-      }
-      if (awayTeam) {
-        searchTerms.push(awayTeam);
-        if (awayTeamClean !== awayTeam) searchTerms.push(awayTeamClean);
-      }
+      // Use the new extractSearchTerms function for robust term extraction
+      const homeTerms = extractSearchTerms(homeTeam);
+      const awayTerms = extractSearchTerms(awayTeam);
+      const searchTerms = [...new Set([...homeTerms, ...awayTerms])]; // Dedupe
 
       if (searchTerms.length === 0) {
+        logger.info(`Auto-fill: Event ${event.event_name} has no search terms, skipping`);
         continue;
       }
 
@@ -1890,7 +1915,18 @@ router.post('/auto-fill-streams', async (req, res) => {
         queryParams.push(...Array.from(usedChannelIds));
       }
 
-      const channelsResult = await postgresService.query(`
+      // Build scoring conditions for SQL - prioritize channels with both teams
+      let scoringCase = 'CASE ';
+      if (homeTeam && awayTeam) {
+        // Both teams = highest priority
+        scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') AND LOWER(c.name) LIKE LOWER('%${awayTeam.replace(/'/g, "''")}%') THEN 3 `;
+      }
+      if (homeTeam) {
+        scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') THEN 2 `;
+      }
+      scoringCase += 'ELSE 1 END';
+
+      const sqlQuery = `
         SELECT
           c.channel_id as id,
           c.name,
@@ -1908,11 +1944,13 @@ router.post('/auto-fill-streams', async (req, res) => {
         FROM iptv_channels c
         JOIN iptv_sources s ON c.source_id = s.id
         WHERE s.user_id = $1 AND (${channelConditions}) ${sourceExclusion} ${channelExclusion} AND ${blacklistConditions}
-        ORDER BY RANDOM()
-        LIMIT 20
-      `, queryParams);
+        ORDER BY ${scoringCase} DESC, RANDOM()
+        LIMIT 50
+      `;
 
-        const channels = channelsResult.rows || [];
+      const channelsResult = await postgresService.query(sqlQuery, queryParams);
+
+        let channels = channelsResult.rows || [];
 
         if (channels.length === 0) {
           // No more channels for this event, mark as exhausted
@@ -1920,39 +1958,96 @@ router.post('/auto-fill-streams', async (req, res) => {
           continue;
         }
 
+        // Score channels using fuzzy matching (prioritize channels with BOTH teams)
+        channels = channels.map(channel => {
+          let score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
+
+          // League name bonus
+          if (event.league_name && channel.name.toLowerCase().includes(event.league_name.toLowerCase())) {
+            score += 25;
+          }
+
+          // Sport type bonus
+          if (event.sport_type && channel.name.toLowerCase().includes(event.sport_type.toLowerCase())) {
+            score += 10;
+          }
+
+          return { ...channel, relevanceScore: score };
+        });
+
+        // Sort by relevance score (highest first) and filter low-relevance channels
+        channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+        // Only keep channels with score >= 35 (fuzzy match can add ~35 points)
+        // Score >= 100 means exact team name match, >= 200 means both teams
+        channels = channels.filter(c => c.relevanceScore >= 35);
+
+        if (channels.length === 0) {
+          exhaustedEvents.add(event.event_id);
+          continue;
+        }
+
+        logger.info(`Auto-fill: Found ${channels.length} relevant channels for "${event.event_name}" (top score: ${channels[0]?.relevanceScore})`);
+
         let foundForThisEvent = false;
 
-        // Test channels for this event
-        for (const channel of channels) {
+        // Filter out already used sources and channels
+        const eligibleChannels = channels.filter(channel =>
+          !usedSourceIds.has(parseInt(channel.source_id)) &&
+          !usedChannelIds.has(channel.id)
+        );
+
+        if (eligibleChannels.length === 0) {
+          exhaustedEvents.add(event.event_id);
+          continue;
+        }
+
+        // Test channels in parallel batches (test top 6 at a time, prioritized by score)
+        const batchSize = 6;
+        for (let i = 0; i < eligibleChannels.length && !foundForThisEvent; i += batchSize) {
           if (foundChannels.length >= maxStreams) {
             break;
           }
 
-          // Skip if source already used (double-check)
-          if (usedSourceIds.has(parseInt(channel.source_id))) {
-            continue;
-          }
+          const batch = eligibleChannels.slice(i, i + batchSize);
+          logger.info(`Auto-fill: Testing batch of ${batch.length} channels in parallel for "${event.event_name}"`);
 
-          // Skip if channel already used
-          if (usedChannelIds.has(channel.id)) {
-            continue;
-          }
+          // Test all channels in batch simultaneously
+          const testPromises = batch.map(async (channel) => {
+            try {
+              logger.info(`Auto-fill: Testing channel ${channel.name} (score: ${channel.relevanceScore}) for event ${event.event_name}`);
+              const result = await testChannel(channel);
 
-          try {
-            logger.info(`Auto-fill: Testing channel ${channel.name} for event ${event.event_name}`);
-            const result = await testChannel(channel);
+              // Check quality requirement
+              if (minHeight > 0 && result.height < minHeight) {
+                logger.info(`Auto-fill: ✗ Channel ${channel.name} quality too low: ${result.height}p < ${minHeight}p`);
+                return { channel, success: false, reason: 'quality' };
+              }
 
-            // Check quality requirement
-            if (minHeight > 0 && result.height < minHeight) {
-              logger.info(`Auto-fill: ✗ Channel ${channel.name} quality too low: ${result.height}p < ${minHeight}p`);
-              // Mark channel as tested so we skip it next pass
-              usedChannelIds.add(channel.id);
-              continue;
+              logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING! (${result.height}p)`);
+              return { channel, success: true, result };
+            } catch (error) {
+              logger.info(`Auto-fill: ✗ Channel ${channel.name} failed: ${error.message}`);
+              return { channel, success: false, reason: 'error', error: error.message };
             }
+          });
 
-            logger.info(`Auto-fill: ✓ Channel ${channel.name} is WORKING! (${result.height}p)`);
+          const results = await Promise.all(testPromises);
 
-            // Found a working channel
+          // Mark all tested channels as used
+          for (const r of results) {
+            usedChannelIds.add(r.channel.id);
+          }
+
+          // Find the best working channel from this batch (highest score that works)
+          const workingChannels = results
+            .filter(r => r.success)
+            .sort((a, b) => b.channel.relevanceScore - a.channel.relevanceScore);
+
+          if (workingChannels.length > 0) {
+            const best = workingChannels[0];
+            const channel = best.channel;
+
             foundChannels.push({
               id: channel.id,
               name: channel.name,
@@ -1967,26 +2062,18 @@ router.post('/auto-fill-streams', async (req, res) => {
               sourceMac: channel.source_mac,
               espnEventId: event.event_id,
               espnEventName: event.event_name,
-              quality: result.height
+              quality: best.result.height
             });
 
             // Mark source and event as used
             usedSourceIds.add(parseInt(channel.source_id));
             usedEventIds.add(event.event_id);
-            usedChannelIds.add(channel.id);
             foundForThisEvent = true;
-
-            break; // Move to next event
-          } catch (error) {
-            logger.info(`Auto-fill: ✗ Channel ${channel.name} failed: ${error.message}`);
-            // Mark channel as tested so we skip it next pass
-            usedChannelIds.add(channel.id);
-            continue;
           }
         }
 
         // If we tested all channels and found nothing, mark event as exhausted
-        if (!foundForThisEvent && channels.length < 20) {
+        if (!foundForThisEvent) {
           exhaustedEvents.add(event.event_id);
         }
       }
