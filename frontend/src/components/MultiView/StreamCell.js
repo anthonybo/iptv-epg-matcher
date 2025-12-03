@@ -147,6 +147,7 @@ const StreamCellInner = memo(({
           theatreMode={true}
           muted={isMuted}
           onQualityDetected={onQualityDetected}
+          useResilientProxy={true} // Always use backend retry for multi-view streams
         />
       </div>
     </div>

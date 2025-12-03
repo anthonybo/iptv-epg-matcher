@@ -27,8 +27,16 @@ const IPTVPlayer = ({
   showEpgInfo: externalShowEpgInfo,
   showDebug: externalShowDebug,
   onQualityDetected,
-  muted = false
+  muted = false,
+  useResilientProxy = null // null = auto (true in theatre mode, false otherwise)
 }) => {
+  // Determine if we should use the resilient proxy
+  // Auto mode: use resilient proxy in theatre mode (multi-view) by default
+  // The resilient proxy handles retry/reconnect at the backend level, eliminating
+  // the need for complex frontend recovery logic that can cause network flooding
+  const shouldUseResilientProxy = useResilientProxy !== null
+    ? useResilientProxy
+    : theatreMode; // Default to resilient proxy in multi-view
   // Helper to get channel ID from either 'id' or 'tvgId' field
   // CRITICAL: Use 'id' first (IPTV channel ID like xtream_1111) not 'tvgId' (EPG hint like AnimalPlanet.us)
   const getChannelId = () => {
@@ -921,6 +929,10 @@ const IPTVPlayer = ({
 
   // Start proactive health check to detect frozen video
   const startHealthCheck = () => {
+    // When using resilient proxy, the backend handles reconnection automatically
+    // We still run health checks to detect client-side issues, but don't trigger recovery
+    // The backend will keep the stream alive; frontend just displays what it receives
+
     // Clear any existing health check
     if (healthCheckIntervalRef.current) {
       clearInterval(healthCheckIntervalRef.current);
@@ -946,11 +958,19 @@ const IPTVPlayer = ({
         return;
       }
 
-      // For live streams, being in 'ended' state is a problem - trigger soft recovery first
+      // For live streams, being in 'ended' state is a problem
       if (videoEl.ended) {
-        log('error', 'Video in ended state - live stream should never end');
+        log('error', 'Video in ended state - live stream should never end', { useResilientProxy: shouldUseResilientProxy });
         clearInterval(healthCheckIntervalRef.current);
         healthCheckIntervalRef.current = null;
+
+        // When using resilient proxy, don't trigger frontend recovery - backend handles it
+        // Just show the error if the stream completely ended
+        if (shouldUseResilientProxy) {
+          setError('Stream ended. Try "Find Alternative" or refresh.');
+          return;
+        }
+
         // Try soft recovery first - stream ended naturally, might just need reload
         attemptSoftRecovery('Stream ended (health check)');
         return;
@@ -972,9 +992,26 @@ const IPTVPlayer = ({
         const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
 
         if (timeSinceLastPlaying >= freezeThreshold) {
-          log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`);
+          log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`, { useResilientProxy: shouldUseResilientProxy });
           clearInterval(healthCheckIntervalRef.current);
           healthCheckIntervalRef.current = null;
+
+          // When using resilient proxy, backend handles reconnection
+          // Only show error if frozen for a very long time (backend should have reconnected by now)
+          if (shouldUseResilientProxy) {
+            // With resilient proxy, allow more time - backend might be reconnecting
+            // Only show error after 30+ seconds frozen (backend retries take time)
+            if (timeSinceLastPlaying >= 30000) {
+              setError('Stream frozen. Backend retries may have failed. Try "Find Alternative" or refresh.');
+            } else {
+              // Otherwise, just wait - backend is likely reconnecting
+              log('info', 'Stream frozen but using resilient proxy - waiting for backend reconnect');
+              // Restart health check to continue monitoring
+              startHealthCheck();
+            }
+            return;
+          }
+
           // Try soft recovery first - frozen stream might just need a reload
           attemptSoftRecovery('Stream frozen');
         }
@@ -985,7 +1022,7 @@ const IPTVPlayer = ({
       }
     }, checkInterval);
 
-    log('info', `Health check started (interval: ${checkInterval}ms, freeze threshold: ${freezeThreshold}ms)`);
+    log('info', `Health check started (interval: ${checkInterval}ms, freeze threshold: ${freezeThreshold}ms, resilientProxy: ${shouldUseResilientProxy})`);
   };
 
   // Initialize the appropriate player
@@ -1311,16 +1348,29 @@ const IPTVPlayer = ({
       return;
     }
     
-    log('info', 'Initializing mpegts.js player');
+    log('info', 'Initializing mpegts.js player', { useResilientProxy: shouldUseResilientProxy });
 
     // Get URL for TS stream
-    let baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    // Use resilient proxy in multi-view mode - it handles retry/reconnect at backend level
+    // This eliminates the need for frontend recovery logic that can cause network flooding
+    let baseTsUrl;
+    if (shouldUseResilientProxy) {
+      // Resilient endpoint - handles automatic reconnection at the proxy level
+      // The backend will keep the HTTP connection alive and silently reconnect to source if it fails
+      baseTsUrl = `http://localhost:5001/api/stream/resilient/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+      log('info', 'Using resilient stream proxy (backend-level retry)');
+    } else {
+      // Standard endpoint - frontend handles recovery
+      baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    }
     // Add sourceId if available to ensure we only search in the correct IPTV source
     if (selectedChannel?.sourceId) {
       baseTsUrl += `&source_id=${selectedChannel.sourceId}`;
     }
-    // Add cache buster to force fresh stream request on every retry
-    baseTsUrl += `&_t=${Date.now()}`;
+    // Add cache buster to force fresh stream request on every retry (only for non-resilient)
+    if (!shouldUseResilientProxy) {
+      baseTsUrl += `&_t=${Date.now()}`;
+    }
     let proxyTsUrl = addAuthToStreamUrl(baseTsUrl);
 
     // Validate the URL before using it
@@ -1388,7 +1438,7 @@ const IPTVPlayer = ({
 
         // Add error event listener before loading
         player.on(window.mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-          log('error', 'mpegts player error', { errorType, errorDetail, errorInfo });
+          log('error', 'mpegts player error', { errorType, errorDetail, errorInfo, useResilientProxy: shouldUseResilientProxy });
           setLoading(false);
 
           // CRITICAL: Reset initialization lock on error
@@ -1424,17 +1474,35 @@ const IPTVPlayer = ({
             errorContext = `Media error (${errorDetail})`;
           }
 
+          // When using resilient proxy, the backend handles retry/reconnect automatically
+          // The frontend only sees an error when the backend has exhausted all retries
+          // In this case, just show the error - don't attempt frontend-level recovery
+          if (shouldUseResilientProxy) {
+            log('info', 'Using resilient proxy - backend retry exhausted, showing error');
+            setError(`${errorContext}. Backend retries exhausted. Try "Find Alternative" or refresh.`);
+            return;
+          }
+
+          // Standard mode: use frontend recovery logic
           attemptRecovery(errorContext);
         });
 
         // Handle LOADING_COMPLETE event - for live streams this means the stream ended
         // This is a natural stream ending (server closed connection) vs an error
         player.on(window.mpegts.Events.LOADING_COMPLETE, () => {
-          log('warn', 'Stream loading complete (server closed connection)');
+          log('warn', 'Stream loading complete (server closed connection)', { useResilientProxy: shouldUseResilientProxy });
 
           // Don't recover if channel has changed
           if (getChannelId() !== currentChannelIdRef.current) {
             log('info', 'Channel changed, ignoring loading complete');
+            return;
+          }
+
+          // When using resilient proxy, loading complete means the backend gave up after all retries
+          // Don't attempt frontend recovery - just show the error
+          if (shouldUseResilientProxy) {
+            log('info', 'Using resilient proxy - backend connection closed, showing error');
+            setError('Stream ended. Backend retries exhausted. Try "Find Alternative" or refresh.');
             return;
           }
 

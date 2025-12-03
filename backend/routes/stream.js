@@ -15,6 +15,29 @@ const path = require('path');
 const os = require('os');
 const metricsService = require('../services/metricsService');
 
+// ============================================================================
+// RESILIENT STREAM PROXY WITH AUTOMATIC RETRY/RECONNECT
+// ============================================================================
+// This implements backend-level stream recovery so the frontend player doesn't
+// need to handle reconnection logic. When a source stream fails, the proxy
+// automatically attempts to reconnect without closing the HTTP response.
+// ============================================================================
+
+// Store active resilient stream connections for monitoring
+const resilientStreams = new Map();
+
+// Configuration for resilient streaming
+const RESILIENT_CONFIG = {
+    maxRetries: 5,              // Max retry attempts before giving up
+    initialRetryDelay: 1000,    // Start with 1 second delay
+    maxRetryDelay: 8000,        // Max 8 second delay between retries
+    backoffMultiplier: 1.5,     // Exponential backoff multiplier
+    connectionTimeout: 15000,   // 15 second timeout for initial connection
+    healthCheckInterval: 10000, // Check stream health every 10 seconds
+    staleDataThreshold: 30000,  // Consider stream stale if no data for 30 seconds
+    maxStreamDuration: 4 * 60 * 60 * 1000, // 4 hour max stream duration
+};
+
 // Connection pooling agents for efficient HTTP/HTTPS requests
 // Increased limits to handle multi-view with many concurrent streams
 const httpAgent = new http.Agent({
@@ -701,6 +724,427 @@ router.get('/xtream/:sessionId/:type/:id', async (req, res) => {
             return res.status(500).json({ error: error.message });
         }
     }
+});
+
+// ============================================================================
+// RESILIENT STREAM ENDPOINT - Automatic retry/reconnect at proxy level
+// ============================================================================
+
+/**
+ * Helper function to create a resilient stream connection
+ * This handles automatic retry/reconnect when the source stream fails
+ */
+async function createResilientStreamConnection(streamUrl, streamKey, channel, res, req, logger) {
+    const state = {
+        retryCount: 0,
+        lastDataTime: Date.now(),
+        totalBytesStreamed: 0,
+        startTime: Date.now(),
+        currentFetch: null,
+        currentBody: null,
+        isDestroyed: false,
+        healthCheckTimer: null,
+        retryDelay: RESILIENT_CONFIG.initialRetryDelay,
+    };
+
+    // Store in global map for monitoring
+    resilientStreams.set(streamKey, {
+        channel: channel.name,
+        url: streamUrl,
+        state,
+        startTime: state.startTime,
+    });
+
+    // Function to connect to stream source
+    const connectToSource = async () => {
+        if (state.isDestroyed) {
+            return false;
+        }
+
+        try {
+            logger.info(`[RESILIENT ${streamKey}] Connecting to source (attempt ${state.retryCount + 1}/${RESILIENT_CONFIG.maxRetries + 1})`);
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => {
+                controller.abort();
+            }, RESILIENT_CONFIG.connectionTimeout);
+
+            state.currentFetch = await fetch(streamUrl, {
+                method: 'GET',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
+                },
+                signal: controller.signal,
+                agent: streamUrl.startsWith('https') ? httpsAgent : httpAgent
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!state.currentFetch.ok) {
+                throw new Error(`HTTP ${state.currentFetch.status}: ${state.currentFetch.statusText}`);
+            }
+
+            state.currentBody = state.currentFetch.body;
+            state.lastDataTime = Date.now();
+            state.retryCount = 0; // Reset retry count on successful connection
+            state.retryDelay = RESILIENT_CONFIG.initialRetryDelay; // Reset delay
+
+            logger.info(`[RESILIENT ${streamKey}] Connected successfully`);
+            return true;
+
+        } catch (error) {
+            if (state.isDestroyed) {
+                return false;
+            }
+
+            logger.warn(`[RESILIENT ${streamKey}] Connection failed: ${error.message}`);
+            state.retryCount++;
+
+            if (state.retryCount > RESILIENT_CONFIG.maxRetries) {
+                logger.error(`[RESILIENT ${streamKey}] Max retries exceeded, giving up`);
+                return false;
+            }
+
+            // Exponential backoff
+            logger.info(`[RESILIENT ${streamKey}] Retrying in ${state.retryDelay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, state.retryDelay));
+            state.retryDelay = Math.min(
+                state.retryDelay * RESILIENT_CONFIG.backoffMultiplier,
+                RESILIENT_CONFIG.maxRetryDelay
+            );
+
+            return connectToSource(); // Recursive retry
+        }
+    };
+
+    // Function to handle stream data with automatic reconnection
+    const streamWithReconnect = async () => {
+        if (state.isDestroyed) {
+            return;
+        }
+
+        const connected = await connectToSource();
+        if (!connected) {
+            // Failed to connect even after retries - close the response
+            if (!res.headersSent) {
+                res.status(502).json({ error: 'Failed to connect to stream source after retries' });
+            } else {
+                res.end();
+            }
+            cleanup();
+            return;
+        }
+
+        // Set up health check timer
+        state.healthCheckTimer = setInterval(() => {
+            const timeSinceData = Date.now() - state.lastDataTime;
+            const streamDuration = Date.now() - state.startTime;
+
+            // Check for stale stream
+            if (timeSinceData > RESILIENT_CONFIG.staleDataThreshold) {
+                logger.warn(`[RESILIENT ${streamKey}] Stream stale (no data for ${timeSinceData}ms), attempting reconnect`);
+
+                // Destroy current connection and reconnect
+                if (state.currentBody) {
+                    state.currentBody.destroy();
+                }
+                streamWithReconnect();
+                return;
+            }
+
+            // Check for max duration
+            if (streamDuration > RESILIENT_CONFIG.maxStreamDuration) {
+                logger.info(`[RESILIENT ${streamKey}] Max stream duration reached (${streamDuration}ms)`);
+                cleanup();
+                res.end();
+            }
+        }, RESILIENT_CONFIG.healthCheckInterval);
+
+        // Pipe data to response
+        state.currentBody.on('data', (chunk) => {
+            if (state.isDestroyed) return;
+
+            state.lastDataTime = Date.now();
+            state.totalBytesStreamed += chunk.length;
+
+            try {
+                res.write(chunk);
+            } catch (err) {
+                logger.error(`[RESILIENT ${streamKey}] Error writing to response: ${err.message}`);
+                cleanup();
+            }
+        });
+
+        state.currentBody.on('error', async (err) => {
+            if (state.isDestroyed) return;
+
+            logger.warn(`[RESILIENT ${streamKey}] Source stream error: ${err.message}`);
+
+            // Clear the health check before reconnecting
+            if (state.healthCheckTimer) {
+                clearInterval(state.healthCheckTimer);
+                state.healthCheckTimer = null;
+            }
+
+            // Attempt reconnect
+            state.retryCount++;
+            if (state.retryCount <= RESILIENT_CONFIG.maxRetries) {
+                logger.info(`[RESILIENT ${streamKey}] Attempting automatic reconnect...`);
+                await new Promise(resolve => setTimeout(resolve, state.retryDelay));
+                state.retryDelay = Math.min(
+                    state.retryDelay * RESILIENT_CONFIG.backoffMultiplier,
+                    RESILIENT_CONFIG.maxRetryDelay
+                );
+                streamWithReconnect();
+            } else {
+                logger.error(`[RESILIENT ${streamKey}] Max reconnect attempts reached`);
+                cleanup();
+                res.end();
+            }
+        });
+
+        state.currentBody.on('end', async () => {
+            if (state.isDestroyed) return;
+
+            logger.info(`[RESILIENT ${streamKey}] Source stream ended, attempting reconnect...`);
+
+            // Clear the health check before reconnecting
+            if (state.healthCheckTimer) {
+                clearInterval(state.healthCheckTimer);
+                state.healthCheckTimer = null;
+            }
+
+            // Stream ended normally - try to reconnect
+            state.retryCount++;
+            if (state.retryCount <= RESILIENT_CONFIG.maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, state.retryDelay));
+                streamWithReconnect();
+            } else {
+                logger.info(`[RESILIENT ${streamKey}] Stream completed after reconnect attempts`);
+                cleanup();
+                res.end();
+            }
+        });
+    };
+
+    // Cleanup function
+    const cleanup = () => {
+        if (state.isDestroyed) return;
+        state.isDestroyed = true;
+
+        logger.info(`[RESILIENT ${streamKey}] Cleaning up (streamed ${(state.totalBytesStreamed / 1024 / 1024).toFixed(2)} MB)`);
+
+        if (state.healthCheckTimer) {
+            clearInterval(state.healthCheckTimer);
+        }
+
+        if (state.currentBody) {
+            try {
+                state.currentBody.destroy();
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        resilientStreams.delete(streamKey);
+        metricsService.trackStreamEnd(streamKey);
+    };
+
+    // Handle client disconnect
+    req.on('close', () => {
+        logger.info(`[RESILIENT ${streamKey}] Client disconnected`);
+        cleanup();
+    });
+
+    res.on('error', (err) => {
+        logger.error(`[RESILIENT ${streamKey}] Response error: ${err.message}`);
+        cleanup();
+    });
+
+    // Track stream start
+    metricsService.trackStreamStart(streamKey, {
+        channel: channel.name,
+        channelId: channel.id,
+        source: channel.groupTitle || 'Unknown',
+        type: 'resilient'
+    });
+
+    // Start streaming
+    streamWithReconnect();
+}
+
+/**
+ * GET /resilient/:sessionId/:channelId
+ * Resilient stream proxy with automatic retry/reconnect at the backend level
+ * This endpoint handles stream failures transparently - the frontend player
+ * doesn't need to implement any recovery logic.
+ */
+router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) => {
+    try {
+        const { sessionId, channelId } = req.params;
+        const format = req.query.format || 'ts';
+        const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null;
+        const userId = req.user?.id;
+
+        logger.info(`[RESILIENT] Stream request for session ${sessionId}, channel ${channelId}, sourceId ${sourceId}`);
+
+        // Fetch channel from database (reuse existing logic)
+        const db = await iptvDatabaseService.connect();
+        const channelRow = await new Promise((resolve, reject) => {
+            db.get(`
+                SELECT
+                    c.channel_id as id,
+                    c.name,
+                    c.stream_url as url,
+                    c.logo_url as logo,
+                    c.group_title,
+                    c.tvg_id,
+                    c.source_type,
+                    c.source_username,
+                    c.source_password,
+                    c.source_url,
+                    c.source_mac
+                FROM iptv_channels c
+                JOIN iptv_sources s ON c.source_id = s.id
+                WHERE c.channel_id = ?
+                ${sourceId ? 'AND s.id = ?' : ''}
+                AND (s.session_id = ? OR s.user_id = ?)
+            `, sourceId
+                ? [channelId, sourceId, sessionId, userId]
+                : [channelId, sessionId, userId], (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            });
+        });
+
+        if (!channelRow) {
+            logger.error(`[RESILIENT] Channel not found: ${channelId}`);
+            return res.status(404).json({ error: 'Channel not found' });
+        }
+
+        if (!channelRow.url) {
+            logger.error(`[RESILIENT] No stream URL for channel ${channelId}`);
+            return res.status(400).json({ error: 'No stream URL for this channel' });
+        }
+
+        const channel = {
+            id: channelRow.id,
+            name: channelRow.name,
+            url: channelRow.url,
+            groupTitle: channelRow.group_title,
+            source_type: channelRow.source_type,
+            source_mac: channelRow.source_mac,
+        };
+
+        // Handle Stalker portal URLs - request fresh link
+        let streamUrl = channel.url;
+        if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
+            try {
+                logger.info(`[RESILIENT] Requesting fresh Stalker link for channel ${channelId}...`);
+
+                const createLinkResponse = await fetch(channel.url, {
+                    method: 'GET',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+                        'X-User-Agent': 'Model: MAG250; Link: WiFi',
+                        'Cookie': `mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`
+                    },
+                    timeout: 10000,
+                    agent: channel.url.startsWith('https') ? httpsAgent : httpAgent
+                });
+
+                if (createLinkResponse.ok) {
+                    const linkData = await createLinkResponse.json();
+                    if (linkData && linkData.js && linkData.js.cmd) {
+                        const freshCmd = linkData.js.cmd;
+                        const match = freshCmd.match(/ffmpeg\s+(.+)/);
+                        if (match && match[1]) {
+                            let freshUrl = match[1];
+                            logger.info(`[RESILIENT] Got fresh Stalker URL: ${freshUrl.substring(0, 80)}...`);
+
+                            // Extract stream ID from ORIGINAL cmd parameter in channel.url
+                            // Some Stalker portals return empty stream parameter in create_link response
+                            const originalCmdMatch = channel.url.match(/cmd=([^&]+)/);
+                            if (originalCmdMatch) {
+                                const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                                const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
+                                const originalStreamId = originalStreamMatch ? originalStreamMatch[1] : null;
+
+                                if (originalStreamId) {
+                                    // Check if fresh URL has empty stream parameter
+                                    if (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/)) {
+                                        logger.info(`[RESILIENT] Portal returned empty stream ID - using original: ${originalStreamId}`);
+                                        freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
+                                    }
+                                }
+                            }
+
+                            streamUrl = freshUrl;
+
+                            // Replace localhost if needed
+                            if (streamUrl.includes('localhost')) {
+                                const sourceUrl = new URL(channel.url);
+                                streamUrl = streamUrl.replace(/http:\/\/localhost/g,
+                                    `${sourceUrl.protocol}//${sourceUrl.host}`);
+                            }
+
+                            logger.info(`[RESILIENT] Final stream URL: ${streamUrl.substring(0, 100)}...`);
+                        }
+                    }
+                }
+            } catch (error) {
+                logger.warn(`[RESILIENT] Error fetching Stalker link: ${error.message}, using original URL`);
+            }
+        }
+
+        logger.info(`[RESILIENT] Streaming channel: ${channel.name} from: ${streamUrl.substring(0, 80)}...`);
+
+        // Set streaming headers
+        res.setHeader('Content-Type', format === 'ts' ? 'video/mp2t' : 'video/mp4');
+        res.setHeader('Transfer-Encoding', 'chunked');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('X-Stream-Mode', 'resilient');
+
+        // Create unique stream key
+        const streamKey = `resilient_${sessionId}_${channelId}_${Date.now()}`;
+
+        // Start resilient streaming
+        await createResilientStreamConnection(streamUrl, streamKey, channel, res, req, logger);
+
+    } catch (error) {
+        logger.error(`[RESILIENT] Stream error: ${error.message}`, {
+            error: error.message,
+            stack: error.stack
+        });
+
+        if (!res.headersSent) {
+            return res.status(500).json({ error: error.message });
+        }
+    }
+});
+
+/**
+ * GET /resilient/status
+ * Get status of all active resilient streams (for monitoring)
+ */
+router.get('/resilient/status', authMiddleware, (req, res) => {
+    const streams = [];
+    for (const [key, data] of resilientStreams.entries()) {
+        streams.push({
+            key,
+            channel: data.channel,
+            startTime: data.startTime,
+            duration: Date.now() - data.startTime,
+            retryCount: data.state?.retryCount || 0,
+            bytesStreamed: data.state?.totalBytesStreamed || 0,
+        });
+    }
+    res.json({
+        activeStreams: streams.length,
+        streams,
+        config: RESILIENT_CONFIG,
+    });
 });
 
 /**
