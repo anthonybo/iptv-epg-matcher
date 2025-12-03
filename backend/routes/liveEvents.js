@@ -1102,9 +1102,10 @@ router.post('/search-channel', async (req, res) => {
       searchTerms = [...new Set([...homeTerms, ...awayTerms])];
       logger.info(`Search channel: Detected event format - home: "${homeTeam}", away: "${awayTeam}", terms: ${searchTerms.join(', ')}`);
     } else {
-      // Simple search - just use the query as-is plus extracted terms
-      searchTerms = extractSearchTerms(searchQuery);
-      logger.info(`Search channel: Simple search for "${searchQuery}", terms: ${searchTerms.join(', ')}`);
+      // Simple search - just use the full query as a single search term
+      // Don't break it apart or we'll match "network" in "NHL Network" to everything
+      searchTerms = [searchQuery];
+      logger.info(`Search channel: Simple search for "${searchQuery}"`);
     }
 
     logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
@@ -1123,19 +1124,23 @@ router.post('/search-channel', async (req, res) => {
       logger.info(`Priority search terms (mascots): ${priorityTerms.join(', ')}`);
     }
 
-    // Build query - for event searches, require at least one priority term (mascot)
+    // Build query - use ALL search terms (same as autofill) for better coverage
     let channelConditions;
     let searchParams;
-    if (priorityTerms.length > 0) {
-      // Require at least one mascot/nickname match to filter out irrelevant channels
-      channelConditions = priorityTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
-      searchParams = priorityTerms.map(term => `%${term}%`);
-    } else {
-      // Fallback to all terms for non-event searches
-      channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
-      searchParams = searchTerms.map(term => `%${term}%`);
-    }
+    // Use all search terms for matching, not just mascots
+    channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+    searchParams = searchTerms.map(term => `%${term}%`);
     let queryParams = [userId, ...searchParams];
+
+    // Build scoring conditions for SQL - only used for event searches (same as autofill)
+    let scoringCase = null;
+    if (homeTeam && awayTeam) {
+      // Event search - prioritize channels with both teams
+      scoringCase = 'CASE ';
+      scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') AND LOWER(c.name) LIKE LOWER('%${awayTeam.replace(/'/g, "''")}%') THEN 3 `;
+      scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') THEN 2 `;
+      scoringCase += 'ELSE 1 END';
+    }
 
     // Build source exclusion clause
     let sourceExclusion = '';
@@ -1167,6 +1172,8 @@ router.post('/search-channel', async (req, res) => {
     }
 
     // Search for matching channels using OR conditions for all search terms
+    // Use scoring case to prioritize channels matching both teams (only for event searches)
+    const orderClause = scoringCase ? `${scoringCase} DESC, c.name` : 'c.name';
     const channelsResult = await postgresService.query(`
       SELECT
         c.channel_id as id,
@@ -1189,7 +1196,7 @@ router.post('/search-channel', async (req, res) => {
         ${sourceExclusion}
         ${channelExclusion}
         AND ${blacklistConditions}
-      ORDER BY c.name
+      ORDER BY ${orderClause}
       LIMIT 50
     `, queryParams);
 
@@ -1221,11 +1228,12 @@ router.post('/search-channel', async (req, res) => {
         logger.info(`Top scoring channels: ${topChannels.join(' | ')}`);
       }
 
-      // For event searches (both teams specified), require channels that match at least one FULL team
+      // For event searches (both teams specified), filter low-relevance channels
       // Score >= 200 means both teams matched (ideal)
-      // Score >= 100 means at least one team matched
+      // Score >= 100 means at least one full team matched
+      // Score >= 35 means fuzzy match found (same threshold as autofill)
       // Filter out low scores but also prioritize high scores by testing them first
-      const minScore = 100;
+      const minScore = 35; // Same as autofill for consistency
       channels = channels.filter(c => c.relevanceScore >= minScore);
 
       logger.info(`Filtered channels with minScore=${minScore}: ${channels.length} remaining (top score: ${channels[0]?.relevanceScore || 0})`);

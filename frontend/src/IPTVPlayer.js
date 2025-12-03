@@ -83,13 +83,51 @@ const IPTVPlayer = ({
       activeRecoveries: 0, // Track concurrent recoveries
       maxConcurrentRecoveries: 2, // Only allow 2 streams to recover at once
       pendingRecoveries: [], // Queue for pending recoveries to prevent stack overflow
-      maxPendingRecoveries: 10 // Hard limit to prevent memory issues
+      maxPendingRecoveries: 10, // Hard limit to prevent memory issues
+      globalRecoveryCount: 0, // Track total recoveries across all streams
+      globalRecoveryWindowStart: 0, // When the current window started
+      globalPaused: false // Emergency stop if too many global recoveries
     };
   }
 
+  // Check and update global recovery limits (shared across all player instances)
+  const checkGlobalRecoveryLimits = () => {
+    const queue = window.iptvRecoveryQueue;
+    const now = Date.now();
+    const GLOBAL_WINDOW_MS = 30000; // 30 second window
+    const MAX_GLOBAL_RECOVERIES = 16; // Max 16 recoveries across ALL streams in 30s
+
+    // Reset window if expired
+    if (now - queue.globalRecoveryWindowStart > GLOBAL_WINDOW_MS) {
+      queue.globalRecoveryCount = 0;
+      queue.globalRecoveryWindowStart = now;
+      queue.globalPaused = false;
+    }
+
+    queue.globalRecoveryCount++;
+
+    // If we've exceeded the global limit, pause all recoveries
+    if (queue.globalRecoveryCount > MAX_GLOBAL_RECOVERIES) {
+      queue.globalPaused = true;
+      log('error', `Global recovery limit exceeded (${queue.globalRecoveryCount} in 30s) - pausing all recoveries`);
+      return false; // Don't allow this recovery
+    }
+
+    return true; // Allow recovery
+  };
+
   // Track total recovery attempts for this instance to prevent infinite loops
   const totalRecoveryAttemptsRef = useRef(0);
-  const MAX_TOTAL_RECOVERY_ATTEMPTS = 20; // Hard limit per instance per session
+  // Fewer total attempts in theatre mode - with 4 streams, 10 each = 40 total connections max
+  const MAX_TOTAL_RECOVERY_ATTEMPTS = theatreMode ? 10 : 20;
+
+  // Track recovery timestamps to detect chronically unstable streams
+  // If too many recoveries happen in a short window, stop trying
+  const recoveryTimestampsRef = useRef([]); // Array of timestamps when recoveries occurred
+  // More aggressive limits in theatre mode to prevent 4 streams from overwhelming the network
+  const RECOVERY_WINDOW_MS = theatreMode ? 30000 : 60000; // 30s window in theatre, 60s single
+  const MAX_RECOVERIES_IN_WINDOW = theatreMode ? 4 : 6; // Fewer attempts in theatre mode
+  const streamUnstableRef = useRef(false); // Flag to mark stream as unstable
   
   // Enhanced logging function - optimized for multi-view performance
   const log = (level, message, data = null) => {
@@ -425,8 +463,9 @@ const IPTVPlayer = ({
   };
 
   // Helper to properly clear recovery state (decrements global counter in theatre mode)
-  const clearRecoveryState = () => {
-    if (isRecoveringRef.current && theatreMode) {
+  // Pass decrementActive=true when a recovery that incremented activeRecoveries is ending
+  const clearRecoveryState = (decrementActive = false) => {
+    if (theatreMode && (isRecoveringRef.current || decrementActive)) {
       // Decrement global counter if we're in theatre mode
       if (window.iptvRecoveryQueue.activeRecoveries > 0) {
         window.iptvRecoveryQueue.activeRecoveries--;
@@ -435,8 +474,58 @@ const IPTVPlayer = ({
     isRecoveringRef.current = false;
   };
 
+  // Check if stream is chronically unstable (too many recoveries in a short window)
+  // Returns true if we should stop trying to recover
+  const isStreamChronicallyUnstable = () => {
+    const now = Date.now();
+
+    // Clean up old timestamps outside the window
+    recoveryTimestampsRef.current = recoveryTimestampsRef.current.filter(
+      ts => now - ts < RECOVERY_WINDOW_MS
+    );
+
+    // Add current recovery timestamp
+    recoveryTimestampsRef.current.push(now);
+
+    // Check if we've exceeded the limit
+    if (recoveryTimestampsRef.current.length > MAX_RECOVERIES_IN_WINDOW) {
+      log('error', `Stream is chronically unstable: ${recoveryTimestampsRef.current.length} recoveries in ${RECOVERY_WINDOW_MS / 1000}s`);
+      streamUnstableRef.current = true;
+      return true;
+    }
+
+    return false;
+  };
+
   // Unified recovery mechanism with progressive backoff
   const attemptRecovery = (errorContext = '') => {
+    // FIRST: Check global pause (emergency stop across all streams)
+    if (theatreMode && window.iptvRecoveryQueue.globalPaused) {
+      log('info', 'Global recovery paused - too many failures across all streams');
+      setError('Multiple streams failing. Please wait or refresh the page.');
+      return;
+    }
+
+    // Check if stream has been marked as chronically unstable
+    if (streamUnstableRef.current) {
+      log('info', 'Stream marked as unstable, not attempting recovery');
+      return;
+    }
+
+    // Check if this recovery would exceed the frequency limit
+    if (isStreamChronicallyUnstable()) {
+      setError('Stream is unstable. Try "Find Alternative" or refresh the page.');
+      isRecoveringRef.current = false;
+      return;
+    }
+
+    // Check global recovery limits (only in theatre mode)
+    if (theatreMode && !checkGlobalRecoveryLimits()) {
+      setError('Too many stream failures. Please wait or refresh the page.');
+      isRecoveringRef.current = false;
+      return;
+    }
+
     // CRITICAL: Hard limit on total recovery attempts to prevent infinite loops
     totalRecoveryAttemptsRef.current++;
     if (totalRecoveryAttemptsRef.current > MAX_TOTAL_RECOVERY_ATTEMPTS) {
@@ -466,6 +555,10 @@ const IPTVPlayer = ({
       retryCountRef.current = 0;
       freshStartCountRef.current = 0;
       totalRecoveryAttemptsRef.current = 0; // Also reset total attempts after sustained success
+      softRecoveryCountRef.current = 0; // Reset soft recovery counter after sustained success
+      // Clear recovery timestamps - stream has been stable for 30s
+      recoveryTimestampsRef.current = [];
+      streamUnstableRef.current = false; // Clear unstable flag
       log('info', 'Resetting retry counters after successful playback period');
     }
 
@@ -664,7 +757,165 @@ const IPTVPlayer = ({
       // All recovery attempts exhausted
       log('error', `Stream failed after ${MAX_RETRIES} retries and ${MAX_FRESH_STARTS} fresh starts`);
       setError('Stream unavailable. Please try another channel or refresh the page.');
+      clearRecoveryState(true); // Decrement activeRecoveries since we're done
+    }
+  };
+
+  // Soft recovery - try unload()/load() without destroying the player
+  // This is much faster and uses fewer resources than full recreation
+  // Use this for recoverable errors like temporary network issues or stream restarts
+  const softRecoveryCountRef = useRef(0);
+  const MAX_SOFT_RECOVERIES = 3;
+
+  const attemptSoftRecovery = (errorContext = '') => {
+    // FIRST: Check global pause (emergency stop across all streams)
+    if (theatreMode && window.iptvRecoveryQueue.globalPaused) {
+      log('info', 'Global recovery paused - too many failures across all streams');
+      setError('Multiple streams failing. Please wait or refresh the page.');
+      return;
+    }
+
+    // Check if stream has been marked as chronically unstable
+    if (streamUnstableRef.current) {
+      log('info', 'Stream marked as unstable, not attempting soft recovery');
+      return;
+    }
+
+    // Check if this recovery would exceed the frequency limit
+    if (isStreamChronicallyUnstable()) {
+      setError('Stream is unstable. Try "Find Alternative" or refresh the page.');
+      isRecoveringRef.current = false;
+      return;
+    }
+
+    // Check global recovery limits (only in theatre mode)
+    if (theatreMode && !checkGlobalRecoveryLimits()) {
+      setError('Too many stream failures. Please wait or refresh the page.');
+      isRecoveringRef.current = false;
+      return;
+    }
+
+    // Check if we have a player instance to work with
+    if (!playerInstanceRef.current) {
+      log('info', 'No player instance for soft recovery, falling back to full recovery');
+      attemptRecovery(errorContext);
+      return;
+    }
+
+    // Don't soft recover if channel has changed
+    if (getChannelId() !== currentChannelIdRef.current) {
+      log('info', 'Channel changed, skipping soft recovery');
+      return;
+    }
+
+    // Prevent multiple simultaneous recovery attempts
+    if (isRecoveringRef.current) {
+      log('info', 'Recovery already in progress, skipping soft recovery');
+      return;
+    }
+
+    // Check soft recovery limit
+    softRecoveryCountRef.current++;
+    if (softRecoveryCountRef.current > MAX_SOFT_RECOVERIES) {
+      log('info', `Soft recovery limit (${MAX_SOFT_RECOVERIES}) reached, falling back to full recovery`);
+      softRecoveryCountRef.current = 0; // Reset for next time
+      attemptRecovery(errorContext);
+      return;
+    }
+
+    log('info', `Attempting soft recovery (${softRecoveryCountRef.current}/${MAX_SOFT_RECOVERIES}): ${errorContext}`);
+    isRecoveringRef.current = true;
+    setRecoveryStatus(`Reconnecting (soft ${softRecoveryCountRef.current}/${MAX_SOFT_RECOVERIES})...`);
+
+    // Rate limiting for multi-view
+    if (theatreMode) {
+      const queue = window.iptvRecoveryQueue;
+      const now = Date.now();
+      const timeSinceLastGlobalRecovery = now - queue.lastRecoveryTime;
+
+      if (timeSinceLastGlobalRecovery < 500 || queue.activeRecoveries >= queue.maxConcurrentRecoveries) {
+        // Queue this recovery
+        if (queue.pendingRecoveries.length >= queue.maxPendingRecoveries) {
+          log('warn', 'Too many pending recoveries, dropping soft recovery attempt');
+          isRecoveringRef.current = false;
+          return;
+        }
+        const delayMs = Math.max(500 - timeSinceLastGlobalRecovery, 0) + Math.random() * 500;
+        isRecoveringRef.current = false;
+        const recoveryTimer = setTimeout(() => {
+          const idx = queue.pendingRecoveries.indexOf(recoveryTimer);
+          if (idx > -1) queue.pendingRecoveries.splice(idx, 1);
+          attemptSoftRecovery(errorContext);
+        }, delayMs);
+        queue.pendingRecoveries.push(recoveryTimer);
+        return;
+      }
+      queue.lastRecoveryTime = now;
+      queue.activeRecoveries++;
+    }
+
+    try {
+      const player = playerInstanceRef.current;
+
+      // Step 1: Unload current stream (releases network connection and buffers)
+      log('info', 'Soft recovery: unloading stream');
+      player.unload();
+
+      // Step 2: Brief delay to let resources clean up
+      const reloadDelay = theatreMode ? 1000 : 500;
+
+      setTimeout(() => {
+        // Double-check channel hasn't changed during the delay
+        if (getChannelId() !== currentChannelIdRef.current) {
+          log('info', 'Channel changed during soft recovery, aborting');
+          clearRecoveryState();
+          setRecoveryStatus(null);
+          return;
+        }
+
+        // Check if player still exists
+        if (!playerInstanceRef.current) {
+          log('info', 'Player destroyed during soft recovery, falling back to full recovery');
+          clearRecoveryState();
+          attemptRecovery(errorContext);
+          return;
+        }
+
+        // Step 3: Reload the stream
+        log('info', 'Soft recovery: reloading stream');
+        player.load();
+
+        // Try to play
+        player.play().catch(e => {
+          // Autoplay blocked is normal, user can click to play
+        });
+
+        // Set a timeout to check if soft recovery worked
+        const softRecoveryTimeout = theatreMode ? 10000 : 8000;
+        const timeoutId = setTimeout(() => {
+          if (isRecoveringRef.current) {
+            log('warn', 'Soft recovery timeout - stream did not start');
+            clearRecoveryState();
+            // Soft recovery failed, try again or fall back to full recovery
+            if (softRecoveryCountRef.current < MAX_SOFT_RECOVERIES) {
+              attemptSoftRecovery('Soft recovery timeout');
+            } else {
+              softRecoveryCountRef.current = 0;
+              attemptRecovery('Soft recovery failed');
+            }
+          }
+        }, softRecoveryTimeout);
+
+        // Store timeout ref so it can be cleared on success
+        recoveryTimeoutRef.current = timeoutId;
+
+      }, reloadDelay);
+
+    } catch (e) {
+      log('error', 'Soft recovery failed with exception', { error: e.message });
       clearRecoveryState();
+      softRecoveryCountRef.current = 0;
+      attemptRecovery(errorContext + ' (soft recovery exception)');
     }
   };
 
@@ -695,12 +946,13 @@ const IPTVPlayer = ({
         return;
       }
 
-      // For live streams, being in 'ended' state is a problem - trigger recovery
+      // For live streams, being in 'ended' state is a problem - trigger soft recovery first
       if (videoEl.ended) {
         log('error', 'Video in ended state - live stream should never end');
         clearInterval(healthCheckIntervalRef.current);
         healthCheckIntervalRef.current = null;
-        attemptRecovery('Stream ended');
+        // Try soft recovery first - stream ended naturally, might just need reload
+        attemptSoftRecovery('Stream ended (health check)');
         return;
       }
 
@@ -723,7 +975,8 @@ const IPTVPlayer = ({
           log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`);
           clearInterval(healthCheckIntervalRef.current);
           healthCheckIntervalRef.current = null;
-          attemptRecovery('Stream frozen');
+          // Try soft recovery first - frozen stream might just need a reload
+          attemptSoftRecovery('Stream frozen');
         }
       } else {
         // Video is progressing normally - update last known time
@@ -755,6 +1008,9 @@ const IPTVPlayer = ({
     freshStartCountRef.current = 0;
     lastErrorTimeRef.current = 0;
     totalRecoveryAttemptsRef.current = 0; // Reset total attempts for new channel
+    softRecoveryCountRef.current = 0; // Reset soft recovery counter for new channel
+    recoveryTimestampsRef.current = []; // Clear recovery history for new channel
+    streamUnstableRef.current = false; // Clear unstable flag for new channel
     currentChannelIdRef.current = newChannelId; // Track current channel
 
     if (!containerRef.current) {
@@ -1119,7 +1375,13 @@ const IPTVPlayer = ({
           enableWorker: false,
           lazyLoad: false,
           lazyLoadMaxDuration: 3 * 60, // 3 minutes
-          lazyLoadRecoverDuration: 30 // 30 seconds
+          lazyLoadRecoverDuration: 30, // 30 seconds
+          // NEW: Enable liveSync for automatic latency synchronization
+          // This adjusts playback rate to catch up when latency drifts too high
+          liveSync: true,
+          liveSyncMaxLatency: theatreMode ? 3.0 : 2.0, // Max latency before aggressive catch-up
+          liveSyncTargetLatency: theatreMode ? 1.5 : 1.0, // Target latency to maintain
+          liveSyncPlaybackRate: 1.1 // Speed up playback by 10% to catch up (gentle)
         });
         
         player.attachMediaElement(videoEl);
@@ -1138,6 +1400,17 @@ const IPTVPlayer = ({
             return;
           }
 
+          // Check for stack overflow / fatal internal errors - don't retry these
+          const errorMsg = errorInfo?.msg || errorInfo?.message || '';
+          if (errorMsg.includes('Maximum call stack size exceeded') ||
+              errorMsg.includes('stack') ||
+              errorDetail === 'Exception') {
+            log('error', 'Fatal internal error - not attempting recovery', { errorMsg });
+            setError('Stream data is corrupted. Try "Find Alternative" or another channel.');
+            streamUnstableRef.current = true; // Mark as unstable to prevent any recovery
+            return;
+          }
+
           // Determine error context for better logging
           let errorContext = 'Stream error';
           if (errorType === window.mpegts.ErrorTypes.NETWORK_ERROR) {
@@ -1152,6 +1425,22 @@ const IPTVPlayer = ({
           }
 
           attemptRecovery(errorContext);
+        });
+
+        // Handle LOADING_COMPLETE event - for live streams this means the stream ended
+        // This is a natural stream ending (server closed connection) vs an error
+        player.on(window.mpegts.Events.LOADING_COMPLETE, () => {
+          log('warn', 'Stream loading complete (server closed connection)');
+
+          // Don't recover if channel has changed
+          if (getChannelId() !== currentChannelIdRef.current) {
+            log('info', 'Channel changed, ignoring loading complete');
+            return;
+          }
+
+          // For live streams, loading complete means the stream ended - attempt recovery
+          // Use soft recovery first (unload/load) before full recreation
+          attemptSoftRecovery('Stream ended (loading complete)');
         });
 
         player.load();
@@ -1184,6 +1473,10 @@ const IPTVPlayer = ({
           // DON'T reset retry counters here - only reset after sustained playback
           // The attemptRecovery function already handles this (resets after 30s of no errors)
           // Resetting here causes infinite loops because stream might stall immediately after 'playing'
+
+          // DON'T reset soft recovery counter either - it should only reset after sustained playback
+          // Resetting here causes infinite recovery loops for streams that play briefly then die
+          // The counter will reset naturally when lastErrorTimeRef exceeds 30s in attemptRecovery
 
           lastPlayingTimeRef.current = Date.now();
           lastKnownCurrentTimeRef.current = videoEl.currentTime;
@@ -1257,7 +1550,8 @@ const IPTVPlayer = ({
 
             if (timeSinceLastPlaying > 5000) { // Stalled for more than 5 seconds
               log('error', `Video stalled for ${timeSinceLastPlaying}ms`);
-              attemptRecovery('Stream stalled');
+              // Try soft recovery first - stall might be temporary buffering issue
+              attemptSoftRecovery('Stream stalled');
             }
           }, stallTimeout);
         };
@@ -1289,7 +1583,8 @@ const IPTVPlayer = ({
             return;
           }
 
-          attemptRecovery('Stream ended');
+          // Try soft recovery first - stream ended naturally, might just need reload
+          attemptSoftRecovery('Stream ended (video element)');
         });
 
         player.play().catch(e => {
