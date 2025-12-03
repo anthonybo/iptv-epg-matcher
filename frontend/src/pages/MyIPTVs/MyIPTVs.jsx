@@ -631,8 +631,8 @@ const MyIPTVs = ({
 
     const startTime = Date.now();
 
-    // Refresh all sources in parallel using Promise.allSettled
-    const refreshPromises = sources.map(async (source) => {
+    // Helper function to refresh a single source
+    const refreshSource = async (source) => {
       try {
         const result = await iptvSourcesService.refreshAccountInfo(source.id);
 
@@ -666,10 +666,48 @@ const MyIPTVs = ({
 
         return { sourceId: source.id, status: 'error', error: err.message };
       }
+    };
+
+    // Smart parallel refresh: group sources by host to avoid rate limiting
+    // Different hosts can be refreshed in parallel, but same host should be serialized
+    // This is especially important for Stalker portals which rate-limit by MAC/session
+    const getHostKey = (source) => {
+      try {
+        const url = new URL(source.url);
+        // For stalker portals, include the MAC in the key since each MAC is rate-limited separately
+        if (source.type === 'stalker' && source.mac) {
+          return `${url.host}:${source.mac}`;
+        }
+        return url.host;
+      } catch {
+        return source.id.toString(); // Fallback to source ID
+      }
+    };
+
+    // Group sources by host
+    const sourcesByHost = {};
+    sources.forEach(source => {
+      const hostKey = getHostKey(source);
+      if (!sourcesByHost[hostKey]) {
+        sourcesByHost[hostKey] = [];
+      }
+      sourcesByHost[hostKey].push(source);
     });
 
-    // Wait for all refreshes to complete
-    const results = await Promise.allSettled(refreshPromises);
+    // Process each host's sources sequentially, but all hosts in parallel
+    // This gives us max parallelism while respecting per-host rate limits
+    const hostPromises = Object.values(sourcesByHost).map(async (hostSources) => {
+      const hostResults = [];
+      for (const source of hostSources) {
+        const result = await refreshSource(source);
+        hostResults.push({ status: 'fulfilled', value: result });
+      }
+      return hostResults;
+    });
+
+    // Wait for all hosts to complete and flatten results
+    const hostResults = await Promise.all(hostPromises);
+    const results = hostResults.flat();
 
     const endTime = Date.now();
     const duration = ((endTime - startTime) / 1000).toFixed(1);

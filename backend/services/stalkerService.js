@@ -13,66 +13,104 @@ const logger = require('../config/logger');
  * @returns {Promise<{token: string, profileId: string}>}
  */
 async function authenticateStalker(portalUrl, macAddress) {
-  try {
-    // Ensure portal URL ends with /
-    const baseUrl = portalUrl.endsWith('/') ? portalUrl : `${portalUrl}/`;
+  // Ensure portal URL ends with /
+  const baseUrl = portalUrl.endsWith('/') ? portalUrl : `${portalUrl}/`;
 
-    // Normalize MAC address format
-    const normalizedMac = normalizeMacAddress(macAddress);
+  // Normalize MAC address format
+  const normalizedMac = normalizeMacAddress(macAddress);
 
-    logger.info(`Authenticating Stalker portal: ${baseUrl} with MAC: ${normalizedMac}`);
+  logger.info(`Authenticating Stalker portal: ${baseUrl} with MAC: ${normalizedMac}`);
 
-    // First request: Handshake to get token
-    // Try portal.php endpoint first (newer Stalker portals), fallback to server/load.php
-    const handshakeUrl = `${baseUrl}portal.php?type=stb&action=handshake`;
-    logger.info(`Fetching Stalker handshake from: ${handshakeUrl}`);
+  // First request: Handshake to get token
+  // Try portal.php endpoint first (newer Stalker portals), fallback to server/load.php
+  const handshakeUrl = `${baseUrl}portal.php?type=stb&action=handshake`;
 
-    const handshakeResponse = await fetch(handshakeUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
-        'X-User-Agent': 'Model: MAG250; Link: WiFi',
-        'Cookie': `mac=${normalizedMac}; stb_lang=en; timezone=America/New_York`
-      }
-    });
+  // Retry logic for handshake - portals can return 500 errors when under load
+  const maxRetries = 3;
+  const retryDelays = [1000, 2000, 4000]; // 1s, 2s, 4s delays
+  let lastError = null;
 
-    if (!handshakeResponse.ok) {
-      const errorText = await handshakeResponse.text();
-      logger.error(`Stalker handshake HTTP error (${handshakeResponse.status}): ${errorText.substring(0, 500)}`);
-      throw new Error(`Stalker handshake failed: ${handshakeResponse.status} ${handshakeResponse.statusText}`);
-    }
-
-    // Try to parse JSON, log the raw response if it fails
-    let handshakeData;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const responseText = await handshakeResponse.text();
-      logger.info(`Stalker handshake raw response (${responseText.length} chars): ${responseText.substring(0, 500)}`);
-      handshakeData = JSON.parse(responseText);
-    } catch (jsonError) {
-      logger.error(`Failed to parse Stalker handshake response as JSON: ${jsonError.message}`);
-      throw new Error(`Invalid JSON response from Stalker portal`);
+      logger.info(`Fetching Stalker handshake (attempt ${attempt}/${maxRetries}): ${handshakeUrl}`);
+
+      const handshakeResponse = await fetch(handshakeUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+          'X-User-Agent': 'Model: MAG250; Link: WiFi',
+          'Cookie': `mac=${normalizedMac}; stb_lang=en; timezone=America/New_York`
+        },
+        timeout: 15000 // 15 second timeout
+      });
+
+      if (!handshakeResponse.ok) {
+        const errorText = await handshakeResponse.text();
+        const statusCode = handshakeResponse.status;
+
+        // Only retry on 5xx errors (server errors) - don't retry 4xx (client errors)
+        if (statusCode >= 500 && attempt < maxRetries) {
+          logger.warn(`Stalker handshake returned ${statusCode}, retrying in ${retryDelays[attempt - 1]}ms...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelays[attempt - 1]));
+          continue;
+        }
+
+        logger.error(`Stalker handshake HTTP error (${statusCode}): ${errorText.substring(0, 500)}`);
+        throw new Error(`Stalker handshake failed: ${statusCode} ${handshakeResponse.statusText}`);
+      }
+
+      // Try to parse JSON, log the raw response if it fails
+      let handshakeData;
+      try {
+        const responseText = await handshakeResponse.text();
+        logger.info(`Stalker handshake raw response (${responseText.length} chars): ${responseText.substring(0, 500)}`);
+        handshakeData = JSON.parse(responseText);
+      } catch (jsonError) {
+        logger.error(`Failed to parse Stalker handshake response as JSON: ${jsonError.message}`);
+        throw new Error(`Invalid JSON response from Stalker portal`);
+      }
+      logger.debug('Stalker handshake response:', handshakeData);
+
+      if (!handshakeData || !handshakeData.js) {
+        throw new Error('Invalid Stalker handshake response');
+      }
+
+      // Extract token from response
+      const token = handshakeData.js.token || null;
+      const profileId = handshakeData.js.id || '1';
+
+      if (!token) {
+        throw new Error('Failed to obtain Stalker authentication token');
+      }
+
+      logger.info(`Stalker authentication successful. Token: ${token.substring(0, 10)}...`);
+
+      return { token, profileId, baseUrl };
+
+    } catch (error) {
+      lastError = error;
+
+      // Retry on network errors (ECONNRESET, ETIMEDOUT, etc.)
+      const isNetworkError = error.code === 'ECONNRESET' ||
+                            error.code === 'ETIMEDOUT' ||
+                            error.code === 'ECONNREFUSED' ||
+                            error.type === 'request-timeout';
+
+      if (isNetworkError && attempt < maxRetries) {
+        logger.warn(`Stalker handshake network error (${error.code || error.type}), retrying in ${retryDelays[attempt - 1]}ms...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelays[attempt - 1]));
+        continue;
+      }
+
+      // Don't retry - throw immediately
+      logger.error(`Stalker authentication error: ${error.message}`);
+      throw error;
     }
-    logger.debug('Stalker handshake response:', handshakeData);
-
-    if (!handshakeData || !handshakeData.js) {
-      throw new Error('Invalid Stalker handshake response');
-    }
-
-    // Extract token from response
-    const token = handshakeData.js.token || null;
-    const profileId = handshakeData.js.id || '1';
-
-    if (!token) {
-      throw new Error('Failed to obtain Stalker authentication token');
-    }
-
-    logger.info(`Stalker authentication successful. Token: ${token.substring(0, 10)}...`);
-
-    return { token, profileId, baseUrl };
-  } catch (error) {
-    logger.error(`Stalker authentication error: ${error.message}`);
-    throw error;
   }
+
+  // If we get here, all retries failed
+  logger.error(`Stalker authentication failed after ${maxRetries} attempts: ${lastError?.message}`);
+  throw lastError || new Error('Stalker authentication failed after retries');
 }
 
 /**
