@@ -152,9 +152,10 @@ class FrontendLogger {
   }
 
   /**
-   * Check if message should be filtered (known non-critical errors)
+   * Check if message should be filtered from BACKEND logging only
+   * These messages still appear in browser console, just not sent to backend
    */
-  shouldFilter(message) {
+  shouldFilterFromBackend(message) {
     const filterPatterns = [
       // AC-3/EAC-3 codec not supported by browser MSE - video plays fine, just no audio
       /audio\/mp4;codecs=ac-3/i,
@@ -166,13 +167,8 @@ class FrontendLogger {
       // Vite dev server connection issues (dev only)
       /vite.*server connection lost/i,
       /vite.*polling for restart/i,
-      // mpegts.js TS demuxer sync errors - happens during buffering/stream switching
-      // These are noisy but non-critical (stream usually recovers)
-      /sync_byte\s*=\s*\d+,\s*not\s*0x47/i,
-      /\[TSDemuxer\].*sync_byte/i,
-      // mpegts.js internal errors that don't affect playback
-      /\[MSEController\].*buffer/i,
-      /\[IOController\].*abort/i
+      // mpegts.js TS demuxer sync errors - extremely noisy (thousands per minute)
+      /sync_byte\s*=\s*\d+,\s*not\s*0x47/i
     ];
     return filterPatterns.some(pattern => pattern.test(message));
   }
@@ -183,12 +179,9 @@ class FrontendLogger {
   log(level, message, context = {}) {
     if (!this.enabled) return;
 
-    // Filter out known non-critical errors
-    if (level === 'error' && this.shouldFilter(message)) {
-      // Still log to console in dev for debugging, but don't send to backend
-      if (process.env.NODE_ENV === 'development' && this.originalConsole) {
-        this.originalConsole.log('[Logger] Filtered:', message);
-      }
+    // Only filter the most extreme noise from backend logging
+    // Other messages still go to backend for debugging
+    if (this.shouldFilterFromBackend(message)) {
       return;
     }
 

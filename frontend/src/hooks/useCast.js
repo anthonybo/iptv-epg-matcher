@@ -1,34 +1,64 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+
+// Global flag to track if Cast has been initialized (singleton pattern)
+// This prevents multiple instances from all trying to initialize Cast
+let castInitialized = false;
+let castInitializing = false;
+const castListeners = new Set();
 
 /**
  * Custom hook for Google Cast functionality
  * Manages Cast connection state and provides methods to cast media
+ *
+ * IMPORTANT: Uses singleton pattern to prevent multiple IPTVPlayer instances
+ * from all trying to initialize Cast SDK simultaneously (causes performance issues)
  */
 export const useCast = () => {
   const [isCastAvailable, setIsCastAvailable] = useState(false);
   const [isCasting, setIsCasting] = useState(false);
   const [castSession, setCastSession] = useState(null);
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 5; // Stop trying after 5 attempts (5 seconds)
 
-  // Initialize Cast API
+  // Initialize Cast API (singleton - only one instance initializes)
   useEffect(() => {
-    console.log('[useCast] Starting Cast initialization');
+    // Register this component as a listener
+    const listener = { setIsCastAvailable, setCastSession, setIsCasting };
+    castListeners.add(listener);
+
+    // If already initialized, we're done
+    if (castInitialized) {
+      return () => {
+        castListeners.delete(listener);
+      };
+    }
+
+    // If another instance is already initializing, just wait
+    if (castInitializing) {
+      return () => {
+        castListeners.delete(listener);
+      };
+    }
+
+    // This instance will handle initialization
+    castInitializing = true;
 
     const initializeCast = () => {
-      console.log('[useCast] Checking for Cast SDK...', {
-        hasChrome: !!window.chrome,
-        hasCast: !!(window.chrome && window.chrome.cast)
-      });
+      // Don't retry forever - max 5 attempts
+      if (retryCountRef.current >= MAX_RETRIES) {
+        castInitializing = false;
+        return;
+      }
 
       if (!window.chrome || !window.chrome.cast) {
-        console.log('[useCast] Cast SDK not loaded yet, retrying in 1s...');
+        retryCountRef.current++;
         setTimeout(initializeCast, 1000);
         return;
       }
 
-      console.log('[useCast] Cast SDK detected, setting up callback');
-
       window['__onGCastApiAvailable'] = (isAvailable) => {
-        console.log('[useCast] __onGCastApiAvailable called:', isAvailable);
+        castInitialized = true;
+        castInitializing = false;
 
         if (isAvailable) {
           const cast = window.chrome.cast;
@@ -39,45 +69,47 @@ export const useCast = () => {
             receiverListener
           );
 
-          console.log('[useCast] Initializing Cast API...');
           cast.initialize(apiConfig, onInitSuccess, onInitError);
-        } else {
-          console.log('[useCast] Cast API not available');
         }
       };
 
-      // Session listener
+      // Session listener - notify all instances
       const sessionListener = (session) => {
-        console.log('[useCast] Session started:', session);
-        setCastSession(session);
-        setIsCasting(true);
+        castListeners.forEach(l => {
+          l.setCastSession(session);
+          l.setIsCasting(true);
+        });
       };
 
-      // Receiver listener
+      // Receiver listener - notify all instances
       const receiverListener = (availability) => {
-        console.log('[useCast] Receiver availability changed:', availability);
-        setIsCastAvailable(availability === 'available');
+        const available = availability === 'available';
+        castListeners.forEach(l => {
+          l.setIsCastAvailable(available);
+        });
       };
 
-      // Success callback
       const onInitSuccess = () => {
-        console.log('[useCast] Cast API initialized successfully');
+        // Silent success
       };
 
-      // Error callback
       const onInitError = (error) => {
         console.error('[useCast] Cast API initialization error:', error);
+        castInitializing = false;
       };
 
       // Trigger the callback if Cast is already loaded
       if (window.chrome.cast.isAvailable) {
-        console.log('[useCast] Cast already available, triggering callback');
         window['__onGCastApiAvailable'](true);
       }
     };
 
     // Start initialization
     initializeCast();
+
+    return () => {
+      castListeners.delete(listener);
+    };
   }, []);
 
   // Cast media to Chromecast

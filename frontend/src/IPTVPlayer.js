@@ -948,13 +948,14 @@ const IPTVPlayer = ({
       clearInterval(healthCheckIntervalRef.current);
     }
 
-    // Less aggressive health checks to reduce CPU overhead and false positives
-    // Theatre mode: 5 seconds, single view: 3 seconds
-    const checkInterval = theatreMode ? 5000 : 3000;
+    // Health checks in multi-view should be very infrequent to reduce CPU overhead
+    // Theatre mode: 10 seconds (6 streams × 10s interval = manageable)
+    // Single view: 3 seconds (more responsive for single stream)
+    const checkInterval = theatreMode ? 10000 : 3000;
     // Freeze threshold: allow time for buffering before triggering recovery
-    // With our larger buffer settings (3-6s latency), we need longer thresholds
-    // Theatre mode: 3 checks (15s), single view: 3 checks (9s)
-    const freezeThreshold = checkInterval * 3;
+    // Theatre mode: 2 checks (20s) - give streams time to recover
+    // Single view: 3 checks (9s) - more responsive
+    const freezeThreshold = theatreMode ? checkInterval * 2 : checkInterval * 3;
 
     // Check periodically if video is progressing
     healthCheckIntervalRef.current = setInterval(() => {
@@ -1137,16 +1138,17 @@ const IPTVPlayer = ({
           // Disable low latency mode - prioritize smooth playback over minimal delay
           lowLatencyMode: false,
           debug: false,
-          // Buffer settings for smoother playback
-          maxBufferLength: theatreMode ? 20 : 30,        // Max buffer in seconds
-          maxMaxBufferLength: theatreMode ? 30 : 60,     // Hard cap on buffer
-          maxBufferSize: theatreMode ? 30 * 1000 * 1000 : 60 * 1000 * 1000, // 30MB/60MB
+          // MULTI-VIEW: Absolute minimum buffer to reduce memory usage
+          // 6 streams × 5MB = 30MB total
+          maxBufferLength: theatreMode ? 5 : 30,         // 5s multi-view, 30s single
+          maxMaxBufferLength: theatreMode ? 10 : 60,     // Hard cap: 10s multi-view, 60s single
+          maxBufferSize: theatreMode ? 5 * 1000 * 1000 : 60 * 1000 * 1000, // 5MB multi-view, 60MB single
           maxBufferHole: 0.5,                            // Max gap to jump over
-          // Back buffer cleanup
-          backBufferLength: theatreMode ? 30 : 90,       // Keep 30s/90s of played content
-          // Live stream settings - gentler sync to avoid stuttering
-          liveSyncDurationCount: 3,                      // Sync to edge minus 3 segments
-          liveMaxLatencyDurationCount: 10,               // Max latency before seeking
+          // Back buffer cleanup - very aggressive in multi-view
+          backBufferLength: theatreMode ? 5 : 90,        // Keep only 5s multi-view, 90s single
+          // Live stream settings - stay close to live edge
+          liveSyncDurationCount: theatreMode ? 1 : 3,    // 1 segment behind in multi-view
+          liveMaxLatencyDurationCount: theatreMode ? 3 : 10, // Aggressive catch-up
           // Reduce fragment loading pressure
           startFragPrefetch: false,                      // Don't prefetch on start
           testBandwidth: false,                          // Skip bandwidth test
@@ -1427,51 +1429,64 @@ const IPTVPlayer = ({
       setVideoElementKey(prev => prev + 1);
 
       if (window.mpegts.getFeatureList().mseLivePlayback) {
-        // PERFORMANCE OPTIMIZED: Balance between smooth playback and memory usage
-        // Single view: prioritize smooth playback with larger buffers
-        // Theatre mode: balance memory usage across multiple streams
-        const bufferSize = theatreMode ? 16 * 1024 * 1024 : 64 * 1024 * 1024; // 16MB multi-view, 64MB single
+        // CRITICAL: Disable mpegts.js internal logging in multi-view mode
+        // mpegts.js generates THOUSANDS of log messages per second which causes
+        // massive CPU overhead when running multiple streams simultaneously
+        if (theatreMode && window.mpegts.LoggingControl) {
+          window.mpegts.LoggingControl.enableAll = false;
+          window.mpegts.LoggingControl.enableDebug = false;
+          window.mpegts.LoggingControl.enableVerbose = false;
+          window.mpegts.LoggingControl.enableInfo = false;
+          window.mpegts.LoggingControl.enableWarn = false;
+          window.mpegts.LoggingControl.enableError = false;
+        }
+
+        // MULTI-VIEW vs SINGLE-VIEW optimization strategy:
+        // - Multi-view (theatreMode): ABSOLUTE MINIMUM resources - no buffers, no workers
+        // - Single-view: Quality focused - buffers and workers enabled
+        //
+        // Per mpegts.js docs, for minimal resource usage:
+        // enableWorker: false, enableStashBuffer: false, aggressive latency chasing
 
         const player = window.mpegts.createPlayer({
           type: 'mse',
           url: proxyTsUrl,
           isLive: true,
 
-          // CRITICAL: Enable stash buffer to smooth out network jitter
-          // This prevents stuttering when network packets arrive unevenly
-          enableStashBuffer: true,
-          stashInitialSize: theatreMode ? 128 * 1024 : 384 * 1024, // 128KB multi-view, 384KB single
+          // STASH BUFFER: DISABLED in multi-view per mpegts.js minimal config
+          // This is the biggest memory saver - no intermediate buffering
+          enableStashBuffer: !theatreMode,
+          stashInitialSize: theatreMode ? 32 * 1024 : 384 * 1024, // 32KB if somehow used, 384KB single
 
-          // CRITICAL: Enable worker thread for transmuxing (TS -> MP4)
-          // This offloads heavy CPU work from the main thread, preventing UI lag
-          enableWorker: true,
+          // WORKER THREADS: DISABLED in multi-view
+          // Workers add CPU overhead and memory for each stream
+          enableWorker: !theatreMode,
 
-          // Buffer management - tuned for smooth playback
-          // Higher latency tolerance = smoother playback (less catch-up adjustments)
+          // BUFFER LATENCY: Very aggressive in multi-view
+          // Keep minimal data in buffer to reduce memory pressure
           liveBufferLatencyChasing: true,
-          liveBufferLatencyMaxLatency: theatreMode ? 5.0 : 3.0, // More buffer headroom
-          liveBufferLatencyMinRemain: theatreMode ? 2.0 : 1.5,  // More minimum buffer
+          liveBufferLatencyMaxLatency: theatreMode ? 1.5 : 3.0, // 1.5s multi-view (per docs)
+          liveBufferLatencyMinRemain: theatreMode ? 0.3 : 1.5,  // 0.3s multi-view (minimal)
 
-          // Increase max buffer size to prevent underruns
-          maxBufferSize: bufferSize,
+          // BUFFER SIZE: Tiny for multi-view
+          // 2MB per stream × 6 streams = 12MB total
+          maxBufferSize: theatreMode ? 2 * 1024 * 1024 : 64 * 1024 * 1024, // 2MB multi-view, 64MB single
 
-          // Auto-cleanup to prevent memory leaks in long-running streams
-          // Less aggressive cleanup = fewer CPU spikes
+          // AUTO-CLEANUP: Maximum aggression in multi-view
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: theatreMode ? 60 : 300,  // 1min multi-view, 5min single
-          autoCleanupMinBackwardDuration: theatreMode ? 30 : 180,  // 30s multi-view, 3min single
+          autoCleanupMaxBackwardDuration: theatreMode ? 10 : 300,  // 10s multi-view
+          autoCleanupMinBackwardDuration: theatreMode ? 5 : 180,   // 5s multi-view
 
-          // Lazy load disabled for live streams (we always need latest data)
+          // LAZY LOAD: Disabled for live streams
           lazyLoad: false,
           lazyLoadMaxDuration: 3 * 60,
           lazyLoadRecoverDuration: 30,
 
-          // Live sync - gentler settings to avoid noticeable playback rate changes
-          // Only chase latency when it gets very high, and do it gently
+          // LIVE SYNC: Aggressive catch-up in multi-view
           liveSync: true,
-          liveSyncMaxLatency: theatreMode ? 6.0 : 4.0,   // Only speed up when very behind
-          liveSyncTargetLatency: theatreMode ? 3.0 : 2.0, // Target comfortable latency
-          liveSyncPlaybackRate: 1.05 // Only 5% speedup (barely noticeable)
+          liveSyncMaxLatency: theatreMode ? 2.0 : 4.0,   // 2s max in multi-view
+          liveSyncTargetLatency: theatreMode ? 1.0 : 2.0, // 1s target in multi-view
+          liveSyncPlaybackRate: theatreMode ? 1.15 : 1.05 // 15% speedup to catch up faster
         });
         
         player.attachMediaElement(videoEl);
