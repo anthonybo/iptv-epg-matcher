@@ -140,7 +140,7 @@ const processWithDetailedUpdates = async (sessionId, options) => {
             channels = jsonData.map(ch => ({
               id: `xtream_${ch.stream_id}`,  // Unique ID based on stream_id
               name: ch.name,
-              url: `${baseUrl}${xtreamUsername}/${xtreamPassword}/${ch.stream_id}.ts`,
+              url: `${baseUrl}live/${xtreamUsername}/${xtreamPassword}/${ch.stream_id}.ts`,
               logo: ch.stream_icon || '',
               groupTitle: ch.category_id ? `Category ${ch.category_id}` : 'Uncategorized',
               epgChannelId: ch.epg_channel_id || '',
