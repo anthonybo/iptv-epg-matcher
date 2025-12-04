@@ -64,26 +64,91 @@ function parseM3U(m3uContent) {
 
 /**
  * Loads M3U content from an Xtream provider
- * 
+ * First tries JSON API (player_api.php), falls back to M3U endpoint (get.php)
+ *
  * @param {string} baseUrl - Xtream base URL
  * @param {string} username - Xtream username
  * @param {string} password - Xtream password
  * @returns {Promise<string>} M3U content
  */
 async function loadXtreamM3U(baseUrl, username, password) {
-  const xtreamM3uUrl = `${baseUrl}get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`;
-  
+  const fetch = require('node-fetch');
+  const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+
+  // Try JSON API first (player_api.php) - more reliable, less likely to be blocked by Cloudflare
+  try {
+    const jsonApiUrl = `${normalizedBaseUrl}player_api.php?username=${username}&password=${password}&action=get_live_streams`;
+    logger.info(`Trying Xtream JSON API: ${jsonApiUrl}`);
+
+    const jsonResponse = await fetch(jsonApiUrl, {
+      timeout: 60000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, */*'
+      }
+    });
+
+    if (jsonResponse.ok) {
+      const jsonData = await jsonResponse.json();
+      if (Array.isArray(jsonData) && jsonData.length > 0) {
+        logger.info(`Successfully fetched ${jsonData.length} channels from Xtream JSON API`);
+
+        // Get categories for proper group names
+        let catMap = {};
+        try {
+          const catUrl = `${normalizedBaseUrl}player_api.php?username=${username}&password=${password}&action=get_live_categories`;
+          const catResponse = await fetch(catUrl, {
+            timeout: 30000,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+          });
+          if (catResponse.ok) {
+            const categories = await catResponse.json();
+            if (Array.isArray(categories)) {
+              categories.forEach(cat => {
+                catMap[cat.category_id] = cat.category_name;
+              });
+              logger.info(`Loaded ${categories.length} category names`);
+            }
+          }
+        } catch (catError) {
+          logger.warn(`Could not fetch categories: ${catError.message}`);
+        }
+
+        // Convert JSON to M3U format
+        let m3uContent = '#EXTM3U\n';
+        jsonData.forEach(ch => {
+          const groupTitle = catMap[ch.category_id] || 'Uncategorized';
+          const tvgId = ch.epg_channel_id || '';
+          const tvgLogo = ch.stream_icon || '';
+          m3uContent += `#EXTINF:-1 tvg-id="${tvgId}" tvg-name="${ch.name}" tvg-logo="${tvgLogo}" group-title="${groupTitle}",${ch.name}\n`;
+          m3uContent += `${normalizedBaseUrl}${username}/${password}/${ch.stream_id}.ts\n`;
+        });
+
+        logger.info(`Generated M3U content from JSON API: ${Math.round(m3uContent.length / 1024)} KB`);
+        return m3uContent;
+      }
+    }
+  } catch (jsonError) {
+    logger.warn(`JSON API failed, falling back to M3U: ${jsonError.message}`);
+  }
+
+  // Fall back to M3U endpoint
+  const xtreamM3uUrl = `${normalizedBaseUrl}get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`;
+  logger.info(`Falling back to M3U endpoint: ${xtreamM3uUrl}`);
+
   try {
     const response = await fetchURL(xtreamM3uUrl);
     const buffer = await response.arrayBuffer();
     const content = Buffer.from(buffer).toString('utf8');
-    
+
     // Basic validation - check that it contains #EXTM3U
     if (!content || !content.includes('#EXTM3U')) {
       logger.error(`Invalid M3U content received from ${baseUrl}. First 100 chars: ${content.substring(0, 100)}`);
       throw new Error('Invalid M3U content received from Xtream provider');
     }
-    
+
     logger.info(`Successfully loaded M3U content from Xtream: ${Math.round(content.length / 1024)} KB`);
     return content;
   } catch (error) {

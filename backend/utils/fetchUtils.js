@@ -13,8 +13,24 @@ const { STREAM_TIMEOUT } = require('../config/constants');
  */
 async function fetchURL(url, options = {}) {
   logger.info(`Fetching URL: ${url}`);
+
+  // Ensure we have headers with a proper User-Agent to avoid Cloudflare blocks
+  const defaultHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+
+  const mergedOptions = {
+    ...options,
+    headers: {
+      ...defaultHeaders,
+      ...(options.headers || {})
+    }
+  };
+
   try {
-    const response = await fetch(url, options);
+    const response = await fetch(url, mergedOptions);
     if (!response.ok) {
       // Build a more descriptive error message
       const statusText = response.statusText || 'Unknown Error';
@@ -70,13 +86,24 @@ async function fetchURL(url, options = {}) {
  */
 async function fetchStream(url, headers = {}, timeout = STREAM_TIMEOUT) {
   logger.debug('Fetching stream', { url, headers });
-  
+
+  // Default headers to avoid Cloudflare blocks
+  const defaultHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+  };
+
+  const mergedHeaders = {
+    ...defaultHeaders,
+    ...headers
+  };
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
-  
+
   try {
-    const response = await fetch(url, { 
-      headers,
+    const response = await fetch(url, {
+      headers: mergedHeaders,
       signal: controller.signal
     });
     

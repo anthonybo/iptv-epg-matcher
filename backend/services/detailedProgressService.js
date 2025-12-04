@@ -106,31 +106,109 @@ const processWithDetailedUpdates = async (sessionId, options) => {
   try {
     if (xtreamUsername && xtreamPassword && xtreamServer) {
       logger.info(`Loading real channels from Xtream server: ${xtreamServer}`);
-      
+
       // Prepare the Xtream URL
       const baseUrl = xtreamServer.endsWith('/') ? xtreamServer : `${xtreamServer}/`;
-      const xtreamM3uUrl = `${baseUrl}get.php?username=${xtreamUsername}&password=${xtreamPassword}&type=m3u_plus&output=ts`;
-      
-      // Fetch the M3U content using fetchURL from utils
-      sendProgressUpdate(sessionId, 'fetching_m3u', 18, 'Fetching M3U data from provider');
-      const buffer = await fetchWithProgressUpdates(xtreamM3uUrl, sessionId);
-      const m3uContent = buffer.toString('utf8');
-      
-      if (!m3uContent || !m3uContent.includes('#EXTM3U')) {
-        throw new Error('Invalid M3U content received from Xtream provider');
+
+      // Try JSON API first (player_api.php) - more reliable, less likely to be blocked by Cloudflare
+      let useJsonApi = false;
+      const jsonApiUrl = `${baseUrl}player_api.php?username=${xtreamUsername}&password=${xtreamPassword}&action=get_live_streams`;
+
+      sendProgressUpdate(sessionId, 'fetching_channels', 18, 'Fetching channel data from provider');
+
+      try {
+        logger.info(`Trying Xtream JSON API: ${jsonApiUrl}`);
+        const fetch = require('node-fetch');
+        const jsonResponse = await fetch(jsonApiUrl, {
+          timeout: 60000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, */*'
+          }
+        });
+
+        if (jsonResponse.ok) {
+          const jsonData = await jsonResponse.json();
+          if (Array.isArray(jsonData) && jsonData.length > 0) {
+            useJsonApi = true;
+            logger.info(`Successfully fetched ${jsonData.length} channels from Xtream JSON API`);
+
+            // Convert JSON API format to our channel format
+            // IMPORTANT: Each channel must have a unique 'id' field using xtream_{stream_id}
+            // This prevents duplicate channel IDs when the same channel name appears multiple times
+            sendProgressUpdate(sessionId, 'parsing_channels', 22, 'Processing channel data');
+            channels = jsonData.map(ch => ({
+              id: `xtream_${ch.stream_id}`,  // Unique ID based on stream_id
+              name: ch.name,
+              url: `${baseUrl}${xtreamUsername}/${xtreamPassword}/${ch.stream_id}.ts`,
+              logo: ch.stream_icon || '',
+              groupTitle: ch.category_id ? `Category ${ch.category_id}` : 'Uncategorized',
+              epgChannelId: ch.epg_channel_id || '',
+              tvgId: ch.epg_channel_id || '',
+              tvgName: ch.name,
+              streamId: ch.stream_id,
+              categoryId: ch.category_id
+            }));
+
+            // Try to get categories for proper group names
+            try {
+              const catUrl = `${baseUrl}player_api.php?username=${xtreamUsername}&password=${xtreamPassword}&action=get_live_categories`;
+              const catResponse = await fetch(catUrl, {
+                timeout: 30000,
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+              });
+              if (catResponse.ok) {
+                const categories = await catResponse.json();
+                if (Array.isArray(categories)) {
+                  const catMap = {};
+                  categories.forEach(cat => {
+                    catMap[cat.category_id] = cat.category_name;
+                  });
+                  // Update channel group titles with actual category names
+                  channels.forEach(ch => {
+                    if (ch.categoryId && catMap[ch.categoryId]) {
+                      ch.groupTitle = catMap[ch.categoryId];
+                    }
+                  });
+                  logger.info(`Applied ${categories.length} category names to channels`);
+                }
+              }
+            } catch (catError) {
+              logger.warn(`Could not fetch categories: ${catError.message}`);
+            }
+          }
+        }
+      } catch (jsonError) {
+        logger.warn(`JSON API failed, falling back to M3U: ${jsonError.message}`);
       }
-      
-      logger.info(`Successfully fetched M3U content: ${Math.round(m3uContent.length / 1024 / 1024 * 10) / 10} MB`);
-      
-      // Parse the M3U content with progress updates
-      sendProgressUpdate(sessionId, 'parsing_m3u', 22, 'Parsing channel data');
-      channels = await parseM3UWithProgressUpdates(m3uContent, sessionId);
-      
+
+      // Fall back to M3U endpoint if JSON API didn't work
+      if (!useJsonApi) {
+        const xtreamM3uUrl = `${baseUrl}get.php?username=${xtreamUsername}&password=${xtreamPassword}&type=m3u_plus&output=ts`;
+        logger.info(`Falling back to M3U endpoint: ${xtreamM3uUrl}`);
+
+        sendProgressUpdate(sessionId, 'fetching_m3u', 18, 'Fetching M3U data from provider');
+        const buffer = await fetchWithProgressUpdates(xtreamM3uUrl, sessionId);
+        const m3uContent = buffer.toString('utf8');
+
+        if (!m3uContent || !m3uContent.includes('#EXTM3U')) {
+          throw new Error('Invalid M3U content received from Xtream provider');
+        }
+
+        logger.info(`Successfully fetched M3U content: ${Math.round(m3uContent.length / 1024 / 1024 * 10) / 10} MB`);
+
+        // Parse the M3U content with progress updates
+        sendProgressUpdate(sessionId, 'parsing_m3u', 22, 'Parsing channel data');
+        channels = await parseM3UWithProgressUpdates(m3uContent, sessionId);
+      }
+
       if (!channels || channels.length === 0) {
-        throw new Error('No channels found in M3U content');
+        throw new Error('No channels found from Xtream provider');
       }
-      
-      logger.info(`Successfully parsed ${channels.length} channels from Xtream`);
+
+      logger.info(`Successfully loaded ${channels.length} channels from Xtream`);
       
       // Save to cache
       try {
@@ -652,7 +730,7 @@ async function parseM3UWithProgressUpdates(m3uContent, sessionId) {
   return new Promise((resolve) => {
     sendProgressUpdate(sessionId, 'parse_starting', 21, 'Starting M3U parsing');
     
-    const lines = m3uContent.split('\n');
+    const lines = m3uContent.split('\n').map(line => line.trim());
     const totalLines = lines.length;
     const channels = [];
     let channelCount = 0;

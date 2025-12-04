@@ -158,6 +158,51 @@ async function updateLastLogin(userId) {
 // IPTV Source Operations
 // ============================================================================
 
+const dns = require('dns').promises;
+
+/**
+ * Lookup server location from IP address using free ip-api.com service
+ * @param {string} url - The server URL
+ * @returns {Promise<{country: string, city: string} | null>}
+ */
+async function lookupServerLocation(url) {
+    try {
+        const urlObj = new URL(url.startsWith('http') ? url : `http://${url}`);
+        let hostname = urlObj.hostname;
+
+        const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+        let ip = hostname;
+
+        if (!ipRegex.test(hostname)) {
+            try {
+                const addresses = await dns.resolve4(hostname);
+                if (addresses && addresses.length > 0) {
+                    ip = addresses[0];
+                }
+            } catch (dnsError) {
+                logger.warn(`DNS lookup failed for ${hostname}: ${dnsError.message}`);
+                return null;
+            }
+        }
+
+        const axios = require('axios');
+        const response = await axios.get(`http://ip-api.com/json/${ip}?fields=status,country,city`, {
+            timeout: 5000
+        });
+
+        if (response.data && response.data.status === 'success') {
+            return {
+                country: response.data.country || null,
+                city: response.data.city || null
+            };
+        }
+        return null;
+    } catch (error) {
+        logger.warn(`Failed to lookup server location: ${error.message}`);
+        return null;
+    }
+}
+
 async function saveSource(sourceData) {
     // Remove id if present - we use database-generated IDs only
     const { id, ...cleanSourceData } = sourceData;
@@ -215,18 +260,36 @@ async function saveSource(sourceData) {
         ]);
         return result.rows[0];
     } else {
-        // Insert new source
+        // Insert new source - lookup server location first
+        let server_country = null;
+        let server_city = null;
+
+        if (url) {
+            try {
+                const location = await lookupServerLocation(url);
+                if (location) {
+                    server_country = location.country;
+                    server_city = location.city;
+                    logger.info(`Found server location for new source: ${server_city}, ${server_country}`);
+                }
+            } catch (locErr) {
+                logger.warn(`Location lookup failed for new source: ${locErr.message}`);
+            }
+        }
+
         const insertQuery = `
             INSERT INTO iptv_sources (
                 user_id, session_id, name, type, url, username, password, mac_address,
-                exp_date, max_connections, active_connections, account_status, is_trial, account_created_at
+                exp_date, max_connections, active_connections, account_status, is_trial, account_created_at,
+                server_country, server_city
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             RETURNING *
         `;
         const result = await queryWithRetry(insertQuery, [
             user_id, session_id, name, type, url, username, password, mac_address,
-            exp_date, max_connections, active_connections, account_status, is_trial, account_created_at
+            exp_date, max_connections, active_connections, account_status, is_trial, account_created_at,
+            server_country, server_city
         ]);
         return result.rows[0];
     }
@@ -568,6 +631,7 @@ module.exports = {
     saveSource,
     getUserSources,
     deleteSource,
+    lookupServerLocation,
 
     // Channels
     saveChannels,

@@ -75,6 +75,18 @@ export const useChannels = (sessionId, sourceId = null) => {
     }
   }, [searchTerm]);
 
+  // Clear search term when sourceId changes (different IPTV source = different channels)
+  useEffect(() => {
+    if (sourceId) {
+      setSearchTerm('');
+      try {
+        sessionStorage.removeItem('channelsSearchTerm');
+      } catch (error) {
+        console.error('[useChannels] Error clearing search term from sessionStorage:', error);
+      }
+    }
+  }, [sourceId]);
+
   // Reset page and channels when sourceId or searchTerm changes
   useEffect(() => {
     setPage(1);
