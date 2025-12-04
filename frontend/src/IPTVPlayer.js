@@ -938,12 +938,13 @@ const IPTVPlayer = ({
       clearInterval(healthCheckIntervalRef.current);
     }
 
-    // Less aggressive health checks for multi-view to reduce CPU overhead
-    // Theatre mode: 3 seconds (was 1s), single view: 2 seconds
-    const checkInterval = theatreMode ? 3000 : 2000;
-    // Freeze threshold: allow time for normal buffering before triggering recovery
-    // Theatre mode: 2 checks (6s), single view: 2 checks (4s)
-    const freezeThreshold = checkInterval * 2;
+    // Less aggressive health checks to reduce CPU overhead and false positives
+    // Theatre mode: 5 seconds, single view: 3 seconds
+    const checkInterval = theatreMode ? 5000 : 3000;
+    // Freeze threshold: allow time for buffering before triggering recovery
+    // With our larger buffer settings (3-6s latency), we need longer thresholds
+    // Theatre mode: 3 checks (15s), single view: 3 checks (9s)
+    const freezeThreshold = checkInterval * 3;
 
     // Check periodically if video is progressing
     healthCheckIntervalRef.current = setInterval(() => {
@@ -1121,9 +1122,24 @@ const IPTVPlayer = ({
         hideMediaControl: theatreMode, // Hide controls in theatre mode
         disableVideoTagContextMenu: theatreMode,
         hlsjsConfig: {
+          // Enable worker thread for demuxing (offload from main thread)
           enableWorker: true,
-          lowLatencyMode: true,
+          // Disable low latency mode - prioritize smooth playback over minimal delay
+          lowLatencyMode: false,
           debug: false,
+          // Buffer settings for smoother playback
+          maxBufferLength: theatreMode ? 20 : 30,        // Max buffer in seconds
+          maxMaxBufferLength: theatreMode ? 30 : 60,     // Hard cap on buffer
+          maxBufferSize: theatreMode ? 30 * 1000 * 1000 : 60 * 1000 * 1000, // 30MB/60MB
+          maxBufferHole: 0.5,                            // Max gap to jump over
+          // Back buffer cleanup
+          backBufferLength: theatreMode ? 30 : 90,       // Keep 30s/90s of played content
+          // Live stream settings - gentler sync to avoid stuttering
+          liveSyncDurationCount: 3,                      // Sync to edge minus 3 segments
+          liveMaxLatencyDurationCount: 10,               // Max latency before seeking
+          // Reduce fragment loading pressure
+          startFragPrefetch: false,                      // Don't prefetch on start
+          testBandwidth: false,                          // Skip bandwidth test
           xhrSetup: (xhr) => {
             // No custom headers to avoid CORS issues
           }
@@ -1401,37 +1417,51 @@ const IPTVPlayer = ({
       setVideoElementKey(prev => prev + 1);
 
       if (window.mpegts.getFeatureList().mseLivePlayback) {
-        // CRITICAL: Aggressive memory management for multi-view to prevent kernel buffer exhaustion
-        // 4-6 streams x 64MB = 256-384MB is too much and causes system crashes
-        // Use much smaller buffers in theatre mode to reduce memory pressure
-        const bufferSize = theatreMode ? 8 * 1024 * 1024 : 32 * 1024 * 1024; // 8MB for multi-view, 32MB for single
-        const backBufferSize = theatreMode ? 4 * 1024 * 1024 : 16 * 1024 * 1024; // 4MB for multi-view, 16MB for single
+        // PERFORMANCE OPTIMIZED: Balance between smooth playback and memory usage
+        // Single view: prioritize smooth playback with larger buffers
+        // Theatre mode: balance memory usage across multiple streams
+        const bufferSize = theatreMode ? 16 * 1024 * 1024 : 64 * 1024 * 1024; // 16MB multi-view, 64MB single
 
         const player = window.mpegts.createPlayer({
           type: 'mse',
           url: proxyTsUrl,
           isLive: true,
-          enableStashBuffer: false,
-          // Buffer management - aggressively optimized for multi-view to prevent crashes
+
+          // CRITICAL: Enable stash buffer to smooth out network jitter
+          // This prevents stuttering when network packets arrive unevenly
+          enableStashBuffer: true,
+          stashInitialSize: theatreMode ? 128 * 1024 : 384 * 1024, // 128KB multi-view, 384KB single
+
+          // CRITICAL: Enable worker thread for transmuxing (TS -> MP4)
+          // This offloads heavy CPU work from the main thread, preventing UI lag
+          enableWorker: true,
+
+          // Buffer management - tuned for smooth playback
+          // Higher latency tolerance = smoother playback (less catch-up adjustments)
           liveBufferLatencyChasing: true,
-          liveBufferLatencyMaxLatency: theatreMode ? 2.0 : 1.5, // Allow more latency in multi-view
-          liveBufferLatencyMinRemain: theatreMode ? 1.0 : 0.5,
+          liveBufferLatencyMaxLatency: theatreMode ? 5.0 : 3.0, // More buffer headroom
+          liveBufferLatencyMinRemain: theatreMode ? 2.0 : 1.5,  // More minimum buffer
+
+          // Increase max buffer size to prevent underruns
           maxBufferSize: bufferSize,
-          // Auto-cleanup is CRITICAL for preventing memory leaks in long-running streams
+
+          // Auto-cleanup to prevent memory leaks in long-running streams
+          // Less aggressive cleanup = fewer CPU spikes
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: theatreMode ? 30 : 180, // Much shorter cleanup in multi-view (30s vs 3min)
-          autoCleanupMinBackwardDuration: theatreMode ? 15 : 120, // Start cleanup earlier in multi-view
-          // Disable worker to reduce CPU overhead
-          enableWorker: false,
+          autoCleanupMaxBackwardDuration: theatreMode ? 60 : 300,  // 1min multi-view, 5min single
+          autoCleanupMinBackwardDuration: theatreMode ? 30 : 180,  // 30s multi-view, 3min single
+
+          // Lazy load disabled for live streams (we always need latest data)
           lazyLoad: false,
-          lazyLoadMaxDuration: 3 * 60, // 3 minutes
-          lazyLoadRecoverDuration: 30, // 30 seconds
-          // NEW: Enable liveSync for automatic latency synchronization
-          // This adjusts playback rate to catch up when latency drifts too high
+          lazyLoadMaxDuration: 3 * 60,
+          lazyLoadRecoverDuration: 30,
+
+          // Live sync - gentler settings to avoid noticeable playback rate changes
+          // Only chase latency when it gets very high, and do it gently
           liveSync: true,
-          liveSyncMaxLatency: theatreMode ? 3.0 : 2.0, // Max latency before aggressive catch-up
-          liveSyncTargetLatency: theatreMode ? 1.5 : 1.0, // Target latency to maintain
-          liveSyncPlaybackRate: 1.1 // Speed up playback by 10% to catch up (gentle)
+          liveSyncMaxLatency: theatreMode ? 6.0 : 4.0,   // Only speed up when very behind
+          liveSyncTargetLatency: theatreMode ? 3.0 : 2.0, // Target comfortable latency
+          liveSyncPlaybackRate: 1.05 // Only 5% speedup (barely noticeable)
         });
         
         player.attachMediaElement(videoEl);
