@@ -139,15 +139,25 @@ const IPTVPlayer = ({
   
   // Enhanced logging function - optimized for multi-view performance
   const log = (level, message, data = null) => {
-    // In theatre mode (multi-view), skip ALL logging to prevent performance issues
-    // Debug panel isn't shown anyway, so no point in maintaining log state
-    if (theatreMode) {
+    // CRITICAL: Always log "Video playing" message even in theatre mode
+    // This is needed for auto-test functionality to detect working channels
+    const isCriticalMessage = message === 'Video playing';
+
+    // In theatre mode (multi-view), skip most logging to prevent performance issues
+    // But always emit critical messages that other components depend on
+    if (theatreMode && !isCriticalMessage) {
       return;
     }
 
-    // Only log to console in development for non-theatre mode
-    if (process.env.NODE_ENV === 'development') {
+    // Log critical messages to console in ALL modes (needed for auto-test detection)
+    // Log other messages only in development
+    if (isCriticalMessage || process.env.NODE_ENV === 'development') {
       console.log(`[${level.toUpperCase()}] ${message}`, data || '');
+    }
+
+    // Skip state updates in theatre mode (no debug panel shown)
+    if (theatreMode) {
+      return;
     }
 
     const timestamp = new Date().toISOString();
