@@ -165,7 +165,14 @@ class FrontendLogger {
       /UnrecoverableEarlyEof/i,
       // Vite dev server connection issues (dev only)
       /vite.*server connection lost/i,
-      /vite.*polling for restart/i
+      /vite.*polling for restart/i,
+      // mpegts.js TS demuxer sync errors - happens during buffering/stream switching
+      // These are noisy but non-critical (stream usually recovers)
+      /sync_byte\s*=\s*\d+,\s*not\s*0x47/i,
+      /\[TSDemuxer\].*sync_byte/i,
+      // mpegts.js internal errors that don't affect playback
+      /\[MSEController\].*buffer/i,
+      /\[IOController\].*abort/i
     ];
     return filterPatterns.some(pattern => pattern.test(message));
   }
