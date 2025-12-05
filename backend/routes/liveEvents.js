@@ -735,25 +735,12 @@ router.get('/:eventId/channels', async (req, res) => {
       });
     });
 
-    // Score and sort channels by relevance
+    // Score and sort channels by relevance using the shared scoring function
     channels = channels.map(channel => {
       const nameLower = channel.name.toLowerCase();
-      let score = 0;
 
-      // Exact team name matches (highest priority)
-      if (homeTeam && nameLower.includes(homeTeam.toLowerCase())) score += 100;
-      if (awayTeam && nameLower.includes(awayTeam.toLowerCase())) score += 100;
-
-      // Cleaned team name matches
-      if (homeTeamClean && nameLower.includes(homeTeamClean.toLowerCase())) score += 50;
-      if (awayTeamClean && nameLower.includes(awayTeamClean.toLowerCase())) score += 50;
-
-      // Both teams mentioned (very relevant!)
-      if (homeTeam && awayTeam &&
-          nameLower.includes(homeTeam.toLowerCase()) &&
-          nameLower.includes(awayTeam.toLowerCase())) {
-        score += 200;
-      }
+      // Use the shared calculateRelevanceScore function for consistent scoring
+      let score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
 
       // League name bonus (lower priority)
       if (leagueName && nameLower.includes(leagueName.toLowerCase())) score += 10;
