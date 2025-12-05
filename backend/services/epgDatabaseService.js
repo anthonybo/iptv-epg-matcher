@@ -170,11 +170,40 @@ const epgDatabaseService = {
         FROM STDIN
       `));
 
-      // Pipe data to PostgreSQL
+      // Pipe data to PostgreSQL with proper error handling
       await new Promise((resolve, reject) => {
-        stream.pipe(copyStream)
-          .on('finish', resolve)
-          .on('error', reject);
+        let finished = false;
+
+        const cleanup = () => {
+          try {
+            stream.destroy();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        };
+
+        const onFinish = () => {
+          if (!finished) {
+            finished = true;
+            resolve();
+          }
+        };
+
+        const onError = (err) => {
+          if (!finished) {
+            finished = true;
+            cleanup();
+            reject(err);
+          }
+        };
+
+        // Handle errors from both streams
+        stream.on('error', onError);
+        copyStream.on('error', onError);
+        copyStream.on('finish', onFinish);
+
+        // Pipe the data
+        stream.pipe(copyStream);
       });
 
       // First, deduplicate the temp table itself (keep first occurrence based on ctid)
@@ -297,11 +326,40 @@ const epgDatabaseService = {
         FROM STDIN
       `));
 
-      // Pipe data to PostgreSQL
+      // Pipe data to PostgreSQL with proper error handling
       await new Promise((resolve, reject) => {
-        stream.pipe(copyStream)
-          .on('finish', resolve)
-          .on('error', reject);
+        let finished = false;
+
+        const cleanup = () => {
+          try {
+            stream.destroy();
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        };
+
+        const onFinish = () => {
+          if (!finished) {
+            finished = true;
+            resolve();
+          }
+        };
+
+        const onError = (err) => {
+          if (!finished) {
+            finished = true;
+            cleanup();
+            reject(err);
+          }
+        };
+
+        // Handle errors from both streams
+        stream.on('error', onError);
+        copyStream.on('error', onError);
+        copyStream.on('finish', onFinish);
+
+        // Pipe the data
+        stream.pipe(copyStream);
       });
 
       // Upsert from temp table to main table
