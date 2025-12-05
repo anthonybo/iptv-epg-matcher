@@ -1,0 +1,396 @@
+/**
+ * Live Scores Service
+ * Fetches and updates live scores from ESPN scoreboard API
+ * Runs as a background job to keep scores updated every 30 seconds
+ */
+
+const axios = require('axios');
+const logger = require('../config/logger');
+const postgresService = require('./postgresService');
+
+// ESPN API configuration
+const ESPN_BASE_URL = 'http://site.api.espn.com/apis/site/v2/sports';
+
+// Sports configuration - same as liveEventsService for consistency
+const SPORTS_CONFIG = [
+  // American Football
+  { sport: 'football', league: 'nfl', name: 'NFL' },
+  { sport: 'football', league: 'college-football', name: 'NCAAF' },
+
+  // Basketball
+  { sport: 'basketball', league: 'nba', name: 'NBA' },
+  { sport: 'basketball', league: 'mens-college-basketball', name: 'NCAAB' },
+  { sport: 'basketball', league: 'womens-college-basketball', name: 'WCAAB' },
+  { sport: 'basketball', league: 'wnba', name: 'WNBA' },
+
+  // Hockey
+  { sport: 'hockey', league: 'nhl', name: 'NHL' },
+
+  // Soccer
+  { sport: 'soccer', league: 'eng.1', name: 'Premier League' },
+  { sport: 'soccer', league: 'usa.1', name: 'MLS' },
+  { sport: 'soccer', league: 'esp.1', name: 'La Liga' },
+  { sport: 'soccer', league: 'ger.1', name: 'Bundesliga' },
+  { sport: 'soccer', league: 'ita.1', name: 'Serie A' },
+  { sport: 'soccer', league: 'fra.1', name: 'Ligue 1' },
+  { sport: 'soccer', league: 'uefa.champions', name: 'Champions League' },
+  { sport: 'soccer', league: 'uefa.europa', name: 'Europa League' },
+  { sport: 'soccer', league: 'mex.1', name: 'Liga MX' },
+
+  // Combat Sports
+  { sport: 'mma', league: 'ufc', name: 'UFC' },
+
+  // Golf
+  { sport: 'golf', league: 'pga', name: 'PGA' },
+
+  // Tennis
+  { sport: 'tennis', league: 'atp', name: 'ATP' },
+  { sport: 'tennis', league: 'wta', name: 'WTA' },
+
+  // Baseball
+  { sport: 'baseball', league: 'mlb', name: 'MLB' },
+
+  // Racing
+  { sport: 'racing', league: 'f1', name: 'Formula 1' },
+];
+
+// Background update interval reference
+let updateInterval = null;
+let isUpdating = false;
+
+/**
+ * Parse ESPN status to user-friendly format
+ * @param {object} status - ESPN status object
+ * @param {object} competition - ESPN competition object
+ * @returns {object} Parsed status info
+ */
+function parseGameStatus(status, competition) {
+  const statusType = status?.type?.name || 'STATUS_SCHEDULED';
+  const statusState = status?.type?.state || 'pre';
+  const statusDescription = status?.type?.description || 'Scheduled';
+  const clock = status?.displayClock || '';
+  const period = status?.period || 0;
+
+  let gameStatus = statusDescription;
+  let gameClock = '';
+  let isLive = false;
+
+  // Determine if game is live based on state
+  if (statusState === 'in') {
+    isLive = true;
+
+    // Build game clock based on sport type
+    if (clock && period) {
+      // Format varies by sport
+      gameClock = `${clock} - P${period}`;
+    } else if (clock) {
+      gameClock = clock;
+    } else if (period) {
+      gameClock = `Period ${period}`;
+    }
+  } else if (statusState === 'post') {
+    gameStatus = 'Final';
+    isLive = false;
+  } else if (statusState === 'pre') {
+    gameStatus = 'Scheduled';
+    isLive = false;
+  }
+
+  return {
+    statusType,
+    gameStatus,
+    gameClock,
+    isLive
+  };
+}
+
+/**
+ * Fetch scores from ESPN for a specific sport/league
+ * @param {string} sport - Sport type
+ * @param {string} league - League code
+ * @returns {Promise<Array>} Array of score updates
+ */
+async function fetchScoresFromESPN(sport, league) {
+  try {
+    const url = `${ESPN_BASE_URL}/${sport}/${league}/scoreboard`;
+
+    const response = await axios.get(url, { timeout: 8000 });
+
+    if (!response.data || !response.data.events) {
+      return [];
+    }
+
+    const scoreUpdates = [];
+
+    for (const event of response.data.events) {
+      const competition = event.competitions?.[0];
+      if (!competition) continue;
+
+      const competitors = competition.competitors || [];
+      const homeTeam = competitors.find(c => c.homeAway === 'home');
+      const awayTeam = competitors.find(c => c.homeAway === 'away');
+
+      const homeScore = homeTeam?.score ? parseInt(homeTeam.score, 10) : null;
+      const awayScore = awayTeam?.score ? parseInt(awayTeam.score, 10) : null;
+
+      const statusInfo = parseGameStatus(competition.status, competition);
+
+      scoreUpdates.push({
+        eventId: `espn_${event.id}`,
+        homeScore,
+        awayScore,
+        gameStatus: statusInfo.gameStatus,
+        gameClock: statusInfo.gameClock,
+        statusType: statusInfo.statusType,
+        isLive: statusInfo.isLive
+      });
+    }
+
+    return scoreUpdates;
+  } catch (error) {
+    // Only log errors for non-404s (some leagues may not have active games)
+    if (error.response?.status !== 404) {
+      logger.debug(`Error fetching scores for ${sport}/${league}:`, error.message);
+    }
+    return [];
+  }
+}
+
+/**
+ * Update scores in database for all sports
+ * @returns {Promise<object>} Update statistics
+ */
+async function updateAllScores() {
+  // Prevent concurrent updates
+  if (isUpdating) {
+    logger.debug('Score update already in progress, skipping...');
+    return { skipped: true };
+  }
+
+  isUpdating = true;
+  const startTime = Date.now();
+
+  try {
+    let totalUpdated = 0;
+    let liveGames = 0;
+
+    // Fetch scores for all sports in parallel (batched to avoid overwhelming ESPN)
+    const batchSize = 5;
+    for (let i = 0; i < SPORTS_CONFIG.length; i += batchSize) {
+      const batch = SPORTS_CONFIG.slice(i, i + batchSize);
+
+      const results = await Promise.all(
+        batch.map(({ sport, league }) => fetchScoresFromESPN(sport, league))
+      );
+
+      // Process all score updates
+      for (const scoreUpdates of results) {
+        for (const update of scoreUpdates) {
+          try {
+            const result = await postgresService.query(`
+              UPDATE live_events
+              SET
+                home_score = $1,
+                away_score = $2,
+                game_status = $3,
+                game_clock = $4,
+                status_type = $5,
+                is_live = $6,
+                scores_updated_at = CURRENT_TIMESTAMP
+              WHERE event_id = $7
+              RETURNING id
+            `, [
+              update.homeScore,
+              update.awayScore,
+              update.gameStatus,
+              update.gameClock,
+              update.statusType,
+              update.isLive,
+              update.eventId
+            ]);
+
+            if (result.rowCount > 0) {
+              totalUpdated++;
+              if (update.isLive) {
+                liveGames++;
+              }
+            }
+          } catch (dbError) {
+            logger.error(`Error updating score for ${update.eventId}:`, dbError.message);
+          }
+        }
+      }
+    }
+
+    const duration = Date.now() - startTime;
+    logger.info(`Scores updated: ${totalUpdated} events, ${liveGames} live games (${duration}ms)`);
+
+    return {
+      success: true,
+      totalUpdated,
+      liveGames,
+      duration
+    };
+  } catch (error) {
+    logger.error('Error updating scores:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  } finally {
+    isUpdating = false;
+  }
+}
+
+/**
+ * Get all live games with scores
+ * @returns {Promise<Array>} Array of live games with scores
+ */
+async function getLiveScores() {
+  try {
+    const result = await postgresService.query(`
+      SELECT
+        event_id,
+        event_name,
+        sport_type,
+        league_name,
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+        game_status,
+        game_clock,
+        is_live,
+        event_start,
+        scores_updated_at
+      FROM live_events
+      WHERE is_live = TRUE
+      ORDER BY sport_type, league_name, event_start
+    `);
+
+    return result.rows || [];
+  } catch (error) {
+    logger.error('Error fetching live scores:', error);
+    return [];
+  }
+}
+
+/**
+ * Get scores for a specific event
+ * @param {string} eventId - Event ID
+ * @returns {Promise<object|null>} Score data or null
+ */
+async function getScoreByEventId(eventId) {
+  try {
+    const result = await postgresService.query(`
+      SELECT
+        event_id,
+        event_name,
+        sport_type,
+        league_name,
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+        game_status,
+        game_clock,
+        is_live,
+        scores_updated_at
+      FROM live_events
+      WHERE event_id = $1
+    `, [eventId]);
+
+    return result.rows[0] || null;
+  } catch (error) {
+    logger.error(`Error fetching score for ${eventId}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Get all events with their current scores (live and recent)
+ * @returns {Promise<Array>} Array of events with scores
+ */
+async function getAllScores() {
+  try {
+    const result = await postgresService.query(`
+      SELECT
+        event_id,
+        event_name,
+        sport_type,
+        league_name,
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+        game_status,
+        game_clock,
+        status_type,
+        is_live,
+        event_start,
+        event_end,
+        scores_updated_at
+      FROM live_events
+      WHERE event_start >= NOW() - INTERVAL '12 hours'
+        AND event_start <= NOW() + INTERVAL '24 hours'
+      ORDER BY
+        is_live DESC,
+        event_start ASC
+    `);
+
+    return result.rows || [];
+  } catch (error) {
+    logger.error('Error fetching all scores:', error);
+    return [];
+  }
+}
+
+/**
+ * Start the background score update job
+ * @param {number} intervalMs - Update interval in milliseconds (default 30000 = 30s)
+ */
+function startBackgroundUpdates(intervalMs = 30000) {
+  if (updateInterval) {
+    logger.warn('Background score updates already running');
+    return;
+  }
+
+  logger.info(`Starting background score updates (every ${intervalMs / 1000}s)`);
+
+  // Run immediately on start
+  updateAllScores();
+
+  // Then run on interval
+  updateInterval = setInterval(() => {
+    updateAllScores();
+  }, intervalMs);
+}
+
+/**
+ * Stop the background score update job
+ */
+function stopBackgroundUpdates() {
+  if (updateInterval) {
+    clearInterval(updateInterval);
+    updateInterval = null;
+    logger.info('Background score updates stopped');
+  }
+}
+
+/**
+ * Check if background updates are running
+ * @returns {boolean}
+ */
+function isBackgroundUpdatesRunning() {
+  return updateInterval !== null;
+}
+
+module.exports = {
+  updateAllScores,
+  getLiveScores,
+  getScoreByEventId,
+  getAllScores,
+  startBackgroundUpdates,
+  stopBackgroundUpdates,
+  isBackgroundUpdatesRunning
+};

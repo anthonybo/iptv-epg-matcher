@@ -362,6 +362,7 @@ const multiviewRoutes = require('./routes/multiview');
 const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
 const userLocationsRoutes = require('./routes/userLocations');
+const liveScoresRoutes = require('./routes/liveScores');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -413,6 +414,7 @@ app.use('/api/multiview', multiviewRoutes); // Multiview streams management
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news
+app.use('/api/live-scores', liveScoresRoutes); // Live sports scores
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));
@@ -1082,6 +1084,11 @@ cron.schedule('0 6 * * *', async () => {
 });
 
 logger.info('Automatic live events refresh schedule configured successfully');
+
+// Start live scores background updates (every 30 seconds)
+const liveScoresService = require('./services/liveScoresService');
+liveScoresService.startBackgroundUpdates(30000); // 30 seconds
+logger.info('Live scores background updates started (30s interval)');
 
 // Serve static frontend files if build directory exists
 const frontendBuildPath = path.join(__dirname, '../frontend/build');

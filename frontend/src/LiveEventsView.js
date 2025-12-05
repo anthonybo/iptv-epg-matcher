@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import apiClient from './utils/apiClient';
 import IPTVPlayer from './IPTVPlayer';
 import VideoQualityBadge from './components/VideoQualityBadge';
 import { addToMultiview, getMultiviewStreams } from './utils/multiviewManager';
 import { showToast } from './components/Toast';
+import LiveScoresTicker from './components/LiveScoresTicker';
+import EventCard from './components/EventCard';
 
 /**
  * LiveEventsView - Displays all live sports events for today
@@ -36,6 +38,7 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
   const [selectedLeagues, setSelectedLeagues] = useState(new Set());
   const [multiviewUpdateTrigger, setMultiviewUpdateTrigger] = useState(0);
   const [multiviewStreams, setMultiviewStreams] = useState([]);
+  const [liveScores, setLiveScores] = useState({}); // Map of event_id -> score data
 
   // Get unique sports and leagues with counts
   const getAvailableSports = () => {
@@ -488,123 +491,43 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     };
   }, []);
 
-  const formatTime = (isoString) => {
-    const date = new Date(isoString);
-    return date.toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    });
-  };
+  // Fetch live scores on mount only (ticker handles polling)
+  useEffect(() => {
+    let ignore = false;
 
-  const formatDate = (isoString) => {
-    const date = new Date(isoString);
-    const today = new Date();
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const fetchLiveScores = async () => {
+      try {
+        const response = await apiClient.get('/live-scores/all');
+        if (!ignore && response.data.success && response.data.scores) {
+          const scoresMap = {};
+          response.data.scores.forEach(score => {
+            scoresMap[score.event_id] = score;
+          });
+          setLiveScores(scoresMap);
+        }
+      } catch (err) {
+        if (!ignore) {
+          console.error('Error fetching live scores:', err);
+        }
+      }
+    };
 
-    if (date.toDateString() === today.toDateString()) {
-      return 'Today';
-    } else if (date.toDateString() === tomorrow.toDateString()) {
-      return 'Tomorrow';
-    } else {
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    }
-  };
+    fetchLiveScores();
 
-  const getLeagueColor = (leagueName) => {
-    // Football (American)
-    if (leagueName === 'NFL' || leagueName === 'NCAAF') return 'bg-purple-500/20 text-purple-300';
-    // Basketball
-    if (['NBA', 'NCAAB', 'WCAAB', 'WNBA'].includes(leagueName)) return 'bg-orange-500/20 text-orange-300';
-    // Hockey
-    if (leagueName === 'NHL') return 'bg-blue-500/20 text-blue-300';
-    // Soccer
-    if (['Premier League', 'MLS', 'La Liga', 'Bundesliga', 'Serie A', 'Ligue 1', 'Champions League',
-         'Europa League', 'Liga MX', 'EFL Championship', 'Eredivisie', 'Primeira Liga'].includes(leagueName)) {
-      return 'bg-emerald-500/20 text-emerald-300';
-    }
-    // Combat Sports
-    if (leagueName === 'UFC' || leagueName === 'Boxing') return 'bg-red-500/20 text-red-300';
-    // Golf
-    if (leagueName === 'PGA' || leagueName === 'LPGA') return 'bg-teal-500/20 text-teal-300';
-    // Tennis
-    if (leagueName === 'ATP' || leagueName === 'WTA') return 'bg-yellow-500/20 text-yellow-300';
-    // Baseball
-    if (leagueName === 'MLB' || leagueName === 'College Baseball') return 'bg-indigo-500/20 text-indigo-300';
-    // Racing
-    if (['Formula 1', 'NASCAR', 'IndyCar'].includes(leagueName)) return 'bg-pink-500/20 text-pink-300';
-    // Default
-    return 'bg-slate-500/20 text-slate-300';
-  };
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
-  // Check if event has any channels in multiview
-  const isEventInMultiview = (eventId) => {
-    // Check if any stream in multiview has matching ESPN event ID
-    return multiviewStreams.some(stream => {
-      return stream.espnEventId === eventId;
-    });
-  };
+  // Check if event has any channels in multiview - memoized for stable reference
+  const isEventInMultiview = useCallback((eventId) => {
+    return multiviewStreams.some(stream => stream.espnEventId === eventId);
+  }, [multiviewStreams]);
 
-  const EventCard = ({ event, isLive }) => {
-    // Use multiviewUpdateTrigger to force re-render when multiview changes
-    const inMultiview = React.useMemo(() => {
-      return isEventInMultiview(event.event_id);
-    }, [event.event_id, multiviewUpdateTrigger]);
-
-    const borderColor = inMultiview
-      ? 'border-red-500/30 bg-red-500/5 hover:border-red-500/50'
-      : isLive
-        ? 'border-green-500/30 bg-green-500/5 hover:border-green-500/50'
-        : 'border-slate-800/70 bg-slate-950/40 hover:border-slate-700';
-
-    return (
-      <button
-        onClick={() => handleEventClick(event)}
-        className={`w-full rounded-xl border p-4 text-left transition-all hover:scale-[1.02] hover:shadow-lg ${borderColor}`}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex-1">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <span className="rounded-md bg-slate-800/80 px-2 py-0.5 text-xs font-semibold text-slate-300">
-                {event.sport_type}
-              </span>
-              <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${getLeagueColor(event.league_name)}`}>
-                {event.league_name}
-              </span>
-              {inMultiview && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-red-500/20 px-2.5 py-0.5 text-xs font-medium text-red-300">
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-400"></span>
-                  ACTIVE
-                </span>
-              )}
-              {isLive && !inMultiview && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-green-500/20 px-2.5 py-0.5 text-xs font-medium text-green-300">
-                  <span className="h-2 w-2 animate-pulse rounded-full bg-green-400"></span>
-                  LIVE
-                </span>
-              )}
-            </div>
-            <h3 className="mb-1 text-base font-semibold text-slate-100">
-              {event.event_name}
-            </h3>
-            <div className="flex items-center gap-3 text-sm text-slate-400">
-              <div className="flex items-center gap-1.5">
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="10" />
-                  <polyline points="12 6 12 12 16 14" />
-                </svg>
-                <span>{formatDate(event.event_start)} at {formatTime(event.event_start)}</span>
-              </div>
-            </div>
-          </div>
-          <svg className="h-5 w-5 flex-shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M9 18l6-6-6-6" />
-          </svg>
-        </div>
-      </button>
-    );
-  };
+  // Create a Set of multiview event IDs for O(1) lookup
+  const multiviewEventIds = useMemo(() => {
+    return new Set(multiviewStreams.map(stream => stream.espnEventId).filter(Boolean));
+  }, [multiviewStreams]);
 
   if (loading) {
     return (
@@ -740,7 +663,14 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {filteredLiveEvents.map((event) => (
-              <EventCard key={event.event_id} event={event} isLive={true} />
+              <EventCard
+                key={event.event_id}
+                event={event}
+                isLive={true}
+                score={liveScores[event.event_id]}
+                inMultiview={multiviewEventIds.has(event.event_id)}
+                onClick={() => handleEventClick(event)}
+              />
             ))}
           </div>
         )}
@@ -773,7 +703,14 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {filteredUpcomingEvents.map((event) => (
-              <EventCard key={event.event_id} event={event} isLive={false} />
+              <EventCard
+                key={event.event_id}
+                event={event}
+                isLive={false}
+                score={liveScores[event.event_id]}
+                inMultiview={multiviewEventIds.has(event.event_id)}
+                onClick={() => handleEventClick(event)}
+              />
             ))}
           </div>
         )}
@@ -1048,6 +985,9 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
           </div>
         </div>
       )}
+
+      {/* Live Scores Ticker */}
+      <LiveScoresTicker position="bottom" updateInterval={60000} />
     </div>
   );
 };
