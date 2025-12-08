@@ -28,7 +28,10 @@ const IPTVPlayer = ({
   showDebug: externalShowDebug,
   onQualityDetected,
   muted = false,
-  useResilientProxy = null // null = auto (true in theatre mode, false otherwise)
+  useResilientProxy = null, // null = auto (true in theatre mode, false otherwise)
+  skipRecovery = false, // When true, skip retry logic (for auto-test mode)
+  onStreamPlaying = null, // Callback when stream starts playing successfully
+  onStreamError = null // Callback when stream fails (after skipRecovery or exhausted retries)
 }) => {
   // Determine if we should use the resilient proxy
   // Auto mode: use resilient proxy in theatre mode (multi-view) by default
@@ -517,6 +520,17 @@ const IPTVPlayer = ({
 
   // Unified recovery mechanism with progressive backoff
   const attemptRecovery = (errorContext = '') => {
+    // Skip recovery entirely in auto-test mode - we want to fail fast and move to next channel
+    if (skipRecovery) {
+      log('info', 'Skip recovery enabled (auto-test mode) - not retrying');
+      setError('Stream failed');
+      // Notify parent that stream failed (for auto-test mode to advance)
+      if (onStreamError) {
+        onStreamError();
+      }
+      return;
+    }
+
     // FIRST: Check global pause (emergency stop across all streams)
     if (theatreMode && window.iptvRecoveryQueue.globalPaused) {
       log('info', 'Global recovery paused - too many failures across all streams');
@@ -786,6 +800,16 @@ const IPTVPlayer = ({
   const MAX_SOFT_RECOVERIES = 3;
 
   const attemptSoftRecovery = (errorContext = '') => {
+    // Skip soft recovery in auto-test mode - fail fast and let parent handle it
+    if (skipRecovery) {
+      log('info', 'Skip recovery enabled (auto-test mode) - not attempting soft recovery');
+      setError('Stream failed');
+      if (onStreamError) {
+        onStreamError();
+      }
+      return;
+    }
+
     // FIRST: Check global pause (emergency stop across all streams)
     if (theatreMode && window.iptvRecoveryQueue.globalPaused) {
       log('info', 'Global recovery paused - too many failures across all streams');
@@ -1607,6 +1631,11 @@ const IPTVPlayer = ({
 
           // CRITICAL: Reset initialization lock when player successfully starts
           isInitializingRef.current = false;
+
+          // Notify parent that stream is playing (for auto-test mode)
+          if (onStreamPlaying) {
+            onStreamPlaying();
+          }
 
           // Clear stall timer when playing resumes
           if (stallTimerRef.current) {

@@ -30,9 +30,6 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
   const autoTestingRef = React.useRef(false);
   const currentTestIndexRef = React.useRef(0);
   const matchingChannelsRef = React.useRef([]);
-  const playerErrorListenerRef = React.useRef(null);
-  const originalConsoleErrorRef = React.useRef(null);
-  const errorDebounceRef = React.useRef(null);
   const isAdvancingRef = React.useRef(false);
   const [selectedSports, setSelectedSports] = useState(new Set());
   const [selectedLeagues, setSelectedLeagues] = useState(new Set());
@@ -210,11 +207,6 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       clearTimeout(autoTestTimerRef.current);
       autoTestTimerRef.current = null;
     }
-    if (errorDebounceRef.current) {
-      clearTimeout(errorDebounceRef.current);
-      errorDebounceRef.current = null;
-    }
-    cleanupErrorListener();
     setShowPipPlayer(false);
     setPipChannel(null);
     setPipVideoQuality(null); // Reset quality
@@ -266,15 +258,13 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     });
     setPipVideoQuality(null); // Reset quality when starting auto-test
 
-    // Set up error listener
-    setupErrorListener();
-
-    // Set long fallback timeout (60 seconds) to prevent getting stuck on frozen streams
-    // This should rarely trigger - errors should cause advancement instead
+    // Set reasonable timeout (15 seconds) for auto-test mode
+    // Streams should start playing within a few seconds if they're working
+    // This timeout is a fallback for streams that hang without errors
     autoTestTimerRef.current = setTimeout(() => {
-      console.log('[Auto-Test] Timeout reached (60s), moving to next channel...');
+      console.log('[Auto-Test] Timeout reached (15s), moving to next channel...');
       handleNextChannel();
-    }, 60000);
+    }, 15000);
   };
 
   const handleNextChannel = () => {
@@ -290,12 +280,6 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     if (autoTestTimerRef.current) {
       clearTimeout(autoTestTimerRef.current);
       autoTestTimerRef.current = null;
-    }
-
-    // Clear error debounce
-    if (errorDebounceRef.current) {
-      clearTimeout(errorDebounceRef.current);
-      errorDebounceRef.current = null;
     }
 
     // Use refs to get current values
@@ -342,11 +326,11 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       isAdvancingRef.current = false;
     }, 500);
 
-    // Set long fallback timeout (60 seconds) - only advances on error or timeout
+    // Set reasonable timeout (15 seconds) - only advances on error or timeout
     autoTestTimerRef.current = setTimeout(() => {
-      console.log('[Auto-Test] Timeout reached (60s), moving to next channel...');
+      console.log('[Auto-Test] Timeout reached (15s), moving to next channel...');
       handleNextChannel();
-    }, 60000);
+    }, 15000);
   };
 
   const handleStopAutoTest = () => {
@@ -354,11 +338,6 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       clearTimeout(autoTestTimerRef.current);
       autoTestTimerRef.current = null;
     }
-    if (errorDebounceRef.current) {
-      clearTimeout(errorDebounceRef.current);
-      errorDebounceRef.current = null;
-    }
-    cleanupErrorListener();
     setAutoTesting(false);
     autoTestingRef.current = false;
     isAdvancingRef.current = false;
@@ -386,55 +365,31 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
     );
   }, [pipChannel, multiviewStreams]);
 
-  const setupErrorListener = () => {
-    // Clean up any existing listener
-    cleanupErrorListener();
+  // Callback when stream successfully starts playing - stop auto-test
+  const handleStreamPlaying = React.useCallback(() => {
+    if (!autoTestingRef.current) return;
 
-    // Store the original console.error if not already stored
-    if (!originalConsoleErrorRef.current) {
-      originalConsoleErrorRef.current = console.error;
+    console.log('[Auto-Test] ✓ Working stream found! Stopping auto-test.');
+
+    // Clear the timeout - we found a working stream!
+    if (autoTestTimerRef.current) {
+      clearTimeout(autoTestTimerRef.current);
+      autoTestTimerRef.current = null;
     }
 
-    // Listen for console errors from mpegts player
-    playerErrorListenerRef.current = (...args) => {
-      // Call original console.error
-      originalConsoleErrorRef.current.apply(console, args);
+    // Stop auto-testing but keep the stream playing
+    setAutoTesting(false);
+    autoTestingRef.current = false;
+    isAdvancingRef.current = false;
+  }, []);
 
-      // Check if this is an mpegts player error
-      const errorString = args.join(' ');
-      const isError = errorString.includes('[ERROR] mpegts player error') ||
-                     errorString.includes('HttpStatusCodeInvalid') ||
-                     errorString.includes('NetworkError') ||
-                     errorString.includes('Failed to fetch') ||
-                     errorString.includes('404') ||
-                     errorString.includes('403');
+  // Callback when stream fails - advance to next channel
+  const handleStreamError = React.useCallback(() => {
+    if (!autoTestingRef.current || isAdvancingRef.current) return;
 
-      if (isError) {
-        // Only auto-advance if we're still auto-testing (use ref for current value)
-        if (autoTestingRef.current && !isAdvancingRef.current) {
-          // In auto-test mode, skip immediately on first error - no retries needed
-          // Only advance once (debounce prevents multiple errors from same channel triggering multiple advances)
-          if (!errorDebounceRef.current) {
-            console.log('[Auto-Test] Stream error detected, moving to next channel immediately...');
-            errorDebounceRef.current = setTimeout(() => {
-              errorDebounceRef.current = null;
-              handleNextChannel();
-            }, 500); // Small delay to ensure error is fully processed
-          }
-        }
-      }
-    };
-
-    console.error = playerErrorListenerRef.current;
-  };
-
-  const cleanupErrorListener = () => {
-    if (playerErrorListenerRef.current && originalConsoleErrorRef.current) {
-      // Restore original console.error
-      console.error = originalConsoleErrorRef.current;
-      playerErrorListenerRef.current = null;
-    }
-  };
+    console.log('[Auto-Test] Stream error, moving to next channel...');
+    handleNextChannel();
+  }, []);
 
   useEffect(() => {
     fetchLiveEvents();
@@ -444,10 +399,6 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
       if (autoTestTimerRef.current) {
         clearTimeout(autoTestTimerRef.current);
       }
-      if (errorDebounceRef.current) {
-        clearTimeout(errorDebounceRef.current);
-      }
-      cleanupErrorListener();
     };
   }, []);
 
@@ -981,6 +932,9 @@ const LiveEventsView = ({ onNavigateToPlayer, sessionId }) => {
               matchedChannels={{}}
               theatreMode={false}
               onQualityDetected={setPipVideoQuality}
+              skipRecovery={autoTesting}
+              onStreamPlaying={handleStreamPlaying}
+              onStreamError={handleStreamError}
             />
           </div>
         </div>
