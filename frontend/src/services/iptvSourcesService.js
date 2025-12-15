@@ -159,6 +159,21 @@ class IPTVSourcesService {
       throw error;
     }
   }
+
+  /**
+   * Test stream connectivity for a source
+   * @param {number} sourceId - Source ID
+   * @returns {Promise<Object>} Stream diagnostics
+   */
+  async testStreams(sourceId) {
+    try {
+      const response = await apiClient.post(`/iptv/sources/${sourceId}/test-streams`);
+      return response.data;
+    } catch (error) {
+      console.error('Error testing streams:', error);
+      throw error;
+    }
+  }
 }
 
 export default new IPTVSourcesService();

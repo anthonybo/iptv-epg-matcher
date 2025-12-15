@@ -6,6 +6,11 @@ const epgService = require('../services/epgService');
 const logger = require('../config/logger');
 const postgresService = require('../services/postgresService');
 const dns = require('dns').promises;
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+
+// Promisify execFile for stream testing
+const execFileAsync = promisify(execFile);
 
 /**
  * Lookup server location from IP address using free ip-api.com service
@@ -724,6 +729,352 @@ router.patch('/channels/:channelId/live-prefix', requireAuth, async (req, res) =
         res.status(500).json({
             success: false,
             error: error.message || 'Failed to update live prefix setting'
+        });
+    }
+});
+
+/**
+ * POST /api/iptv/sources/:sourceId/test-streams
+ * Test stream connectivity for a source (on-demand, triggered by user)
+ * Prioritizes US channels for better success rates
+ */
+router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const sourceId = parseInt(req.params.sourceId);
+
+        // Get source info
+        const sources = await iptvDatabaseService.getUserSources(userId, null);
+        const source = sources.find(s => s.id === sourceId);
+
+        if (!source) {
+            return res.status(404).json({
+                success: false,
+                error: 'Source not found'
+            });
+        }
+
+        // Get channels for this source (include source metadata for URL building)
+        const channelsResult = await iptvDatabaseService.pool.query(`
+            SELECT channel_id, name, stream_url, group_title,
+                   source_type, source_url, source_username, source_password, source_mac
+            FROM iptv_channels
+            WHERE source_id = $1
+        `, [sourceId]);
+
+        const channels = channelsResult.rows;
+
+        if (channels.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'No channels found for this source. Try refreshing first.'
+            });
+        }
+
+        // Initialize diagnostics
+        const streamDiagnostics = {
+            tested: 0,
+            passed: 0,
+            failed: 0,
+            results: [],
+            errorBreakdown: {
+                auth: 0,
+                timeout: 0,
+                connection: 0,
+                notFound: 0,
+                noVideo: 0,
+                other: 0
+            },
+            serverLocation: null,
+            suggestions: [],
+            overallStatus: 'unknown'
+        };
+
+        // Get server location
+        if (source.server_country || source.server_city) {
+            streamDiagnostics.serverLocation = {
+                country: source.server_country,
+                city: source.server_city
+            };
+        } else {
+            const location = await lookupServerLocation(source.url);
+            if (location) {
+                streamDiagnostics.serverLocation = location;
+            }
+        }
+
+        // Smart channel selection: prioritize US channels
+        const usPatterns = [
+            /\bUS\b/i, /\bUSA\b/i, /\bUnited States\b/i, /\bAmerica\b/i,
+            /\bCBS\b/i, /\bNBC\b/i, /\bABC\b/i, /\bFOX\b/i, /\bESPN\b/i,
+            /\bCNN\b/i, /\bHBO\b/i, /\bShowtime\b/i, /\bNFL\b/i, /\bNBA\b/i,
+            /\bMLB\b/i, /\bNHL\b/i, /\bHD\b/i, /\bFHD\b/i
+        ];
+
+        // Score channels by likelihood of being US/working
+        const scoredChannels = channels.map(ch => {
+            let score = 0;
+            const name = ch.name || '';
+            const group = ch.group_title || '';
+            const combined = `${name} ${group}`;
+
+            for (const pattern of usPatterns) {
+                if (pattern.test(combined)) {
+                    score += 10;
+                }
+            }
+
+            // Prefer channels with HD in name (usually more reliable)
+            if (/HD|FHD|4K/i.test(name)) {
+                score += 5;
+            }
+
+            // Penalize channels that look like they might be regional/foreign
+            if (/\b(UK|CA|MX|AR|BR|DE|FR|IT|ES|PT|RU|IN|PK)\b/i.test(combined)) {
+                score -= 5;
+            }
+
+            return { ...ch, score };
+        });
+
+        // Sort by score descending, then shuffle within score tiers for variety
+        scoredChannels.sort((a, b) => b.score - a.score);
+
+        // Take top 20 by score, then randomly pick 5 from those
+        const topChannels = scoredChannels.slice(0, Math.min(20, scoredChannels.length));
+        const channelsToTest = [];
+        const testCount = Math.min(5, topChannels.length);
+
+        for (let i = 0; i < testCount; i++) {
+            const randomIndex = Math.floor(Math.random() * topChannels.length);
+            channelsToTest.push(topChannels.splice(randomIndex, 1)[0]);
+        }
+
+        logger.info(`Testing ${channelsToTest.length} streams for source ${sourceId} (${source.name})`);
+
+        // Test each channel
+        for (const testChannel of channelsToTest) {
+            streamDiagnostics.tested++;
+            const result = {
+                channelName: testChannel.name,
+                category: testChannel.group_title || 'Unknown',
+                status: 'unknown',
+                error: null,
+                errorType: null,
+                resolution: null,
+                responseTime: null
+            };
+
+            const startTime = Date.now();
+
+            try {
+                let streamUrl = testChannel.stream_url;
+                let ffprobeHeaders = null;
+
+                // Build URL based on source type (matching liveEvents.js logic)
+                if (!streamUrl || testChannel.source_type === 'xtream') {
+                    if (testChannel.source_type === 'xtream' && testChannel.source_url && testChannel.source_username && testChannel.source_password) {
+                        // Extract channel number from channel_id (e.g., "xtream_12345" -> "12345")
+                        const channelNum = testChannel.channel_id.replace(/^xtream_/, '');
+                        const baseUrl = testChannel.source_url.replace(/\/+$/, '');
+                        streamUrl = `${baseUrl}/live/${testChannel.source_username}/${testChannel.source_password}/${channelNum}.ts`;
+                    }
+                }
+
+                // Handle Stalker portal - need to get fresh token
+                if (testChannel.source_type === 'stalker' && streamUrl && streamUrl.includes('portal.php') && streamUrl.includes('action=create_link')) {
+                    try {
+                        const axios = require('axios');
+                        const stalkerHeaders = {
+                            'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+                            'X-User-Agent': 'Model: MAG250; Link: WiFi'
+                        };
+                        if (testChannel.source_mac) {
+                            stalkerHeaders['Cookie'] = `mac=${testChannel.source_mac}; stb_lang=en; timezone=America/New_York`;
+                        }
+
+                        const createLinkResponse = await axios.get(streamUrl, {
+                            headers: stalkerHeaders,
+                            timeout: 5000
+                        });
+
+                        if (createLinkResponse.data?.js?.cmd) {
+                            const freshCmd = createLinkResponse.data.js.cmd;
+                            // Extract fresh play_token from response
+                            const freshTokenMatch = freshCmd.match(/play_token=([^&\s"]+)/);
+                            const freshToken = freshTokenMatch ? freshTokenMatch[1] : null;
+
+                            // Extract stream ID from ORIGINAL URL
+                            const originalCmdMatch = streamUrl.match(/cmd=([^&]+)/);
+                            if (originalCmdMatch && freshToken) {
+                                const originalCmd = decodeURIComponent(originalCmdMatch[1]);
+                                const originalStreamMatch = originalCmd.match(/stream=(\d+)/);
+                                const originalStreamId = originalStreamMatch ? originalStreamMatch[1] : null;
+
+                                if (originalStreamId) {
+                                    const baseUrlMatch = freshCmd.match(/http[s]?:\/\/[^\/]+/);
+                                    const macParam = testChannel.source_mac ? `mac=${testChannel.source_mac}` : '';
+                                    if (baseUrlMatch) {
+                                        streamUrl = `${baseUrlMatch[0]}/play/live.php?${macParam}&stream=${originalStreamId}&extension=ts&play_token=${freshToken}`;
+                                        ffprobeHeaders = `Cookie: mac=${testChannel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`;
+                                    }
+                                }
+                            }
+
+                            // Fallback: try to extract URL directly from response
+                            if (!streamUrl || streamUrl.includes('portal.php')) {
+                                const match = freshCmd.match(/http[s]?:\/\/[^\s"]+/);
+                                if (match && !match[0].includes('stream=&')) {
+                                    streamUrl = match[0];
+                                    ffprobeHeaders = `Cookie: mac=${testChannel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`;
+                                }
+                            }
+                        }
+                    } catch (stalkerError) {
+                        result.status = 'failed';
+                        result.error = `Stalker auth failed: ${stalkerError.message}`;
+                        result.errorType = 'connection';
+                        streamDiagnostics.errorBreakdown.connection++;
+                        streamDiagnostics.failed++;
+                        streamDiagnostics.results.push(result);
+                        continue;
+                    }
+                }
+
+                if (!streamUrl) {
+                    result.status = 'failed';
+                    result.error = 'No stream URL available';
+                    result.errorType = 'other';
+                    streamDiagnostics.errorBreakdown.other++;
+                    streamDiagnostics.failed++;
+                    streamDiagnostics.results.push(result);
+                    continue;
+                }
+
+                logger.info(`Testing stream: ${testChannel.name} (${testChannel.source_type}) URL: ${streamUrl?.substring(0, 100)}...`);
+
+                // Use ffprobe to validate stream (matching liveEvents.js args)
+                const FFPROBE_TIMEOUT = 5000;
+                const ffprobeArgs = [
+                    '-v', 'error',
+                    '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height,codec_name',
+                    '-of', 'json',
+                    '-timeout', String(FFPROBE_TIMEOUT * 1000)
+                ];
+
+                if (ffprobeHeaders) {
+                    ffprobeArgs.push('-headers', ffprobeHeaders);
+                }
+                ffprobeArgs.push(streamUrl);
+
+                const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
+                    timeout: FFPROBE_TIMEOUT + 2000,
+                    maxBuffer: 1024 * 1024
+                });
+
+                result.responseTime = Date.now() - startTime;
+                const probeData = JSON.parse(stdout);
+                const videoStream = probeData.streams?.[0];
+
+                if (videoStream) {
+                    result.status = 'passed';
+                    result.resolution = videoStream.height ? `${videoStream.height}p` : 'unknown';
+                    streamDiagnostics.passed++;
+                    logger.info(`Stream test PASSED: ${testChannel.name} (${result.resolution})`);
+                } else {
+                    result.status = 'failed';
+                    result.error = 'No video stream found';
+                    result.errorType = 'noVideo';
+                    streamDiagnostics.errorBreakdown.noVideo++;
+                    streamDiagnostics.failed++;
+                }
+            } catch (streamError) {
+                result.responseTime = Date.now() - startTime;
+                result.status = 'failed';
+                const errorMsg = streamError.message || String(streamError);
+                result.error = errorMsg.split('\n')[0].substring(0, 200);
+
+                if (errorMsg.includes('401') || errorMsg.includes('Unauthorized')) {
+                    result.errorType = 'auth';
+                    result.error = 'HTTP 401 Unauthorized';
+                    streamDiagnostics.errorBreakdown.auth++;
+                } else if (errorMsg.includes('403') || errorMsg.includes('Forbidden')) {
+                    result.errorType = 'auth';
+                    result.error = 'HTTP 403 Forbidden';
+                    streamDiagnostics.errorBreakdown.auth++;
+                } else if (errorMsg.includes('404') || errorMsg.includes('Not Found')) {
+                    result.errorType = 'notFound';
+                    result.error = 'HTTP 404 Not Found';
+                    streamDiagnostics.errorBreakdown.notFound++;
+                } else if (errorMsg.includes('timed out') || errorMsg.includes('ETIMEDOUT') || errorMsg.includes('timeout')) {
+                    result.errorType = 'timeout';
+                    result.error = 'Connection timed out';
+                    streamDiagnostics.errorBreakdown.timeout++;
+                } else if (errorMsg.includes('ECONNREFUSED') || errorMsg.includes('ECONNRESET') || errorMsg.includes('ENOTFOUND')) {
+                    result.errorType = 'connection';
+                    result.error = 'Connection failed';
+                    streamDiagnostics.errorBreakdown.connection++;
+                } else {
+                    result.errorType = 'other';
+                    streamDiagnostics.errorBreakdown.other++;
+                }
+
+                streamDiagnostics.failed++;
+                logger.warn(`Stream test FAILED: ${testChannel.name} - ${result.error}`);
+            }
+
+            streamDiagnostics.results.push(result);
+        }
+
+        // Determine overall status
+        const passRate = streamDiagnostics.tested > 0 ? streamDiagnostics.passed / streamDiagnostics.tested : 0;
+
+        if (passRate === 1) {
+            streamDiagnostics.overallStatus = 'healthy';
+        } else if (passRate >= 0.5) {
+            streamDiagnostics.overallStatus = 'partial';
+            streamDiagnostics.suggestions.push('Some channels are working. Dead channels are normal for IPTV (30-50% is common).');
+        } else if (passRate > 0) {
+            streamDiagnostics.overallStatus = 'degraded';
+            streamDiagnostics.suggestions.push('Most channels failed. This source may have issues.');
+        } else {
+            streamDiagnostics.overallStatus = 'failing';
+        }
+
+        // Generate suggestions based on error patterns
+        if (streamDiagnostics.failed > 0 && streamDiagnostics.errorBreakdown.auth > 0) {
+            const authPercent = Math.round((streamDiagnostics.errorBreakdown.auth / streamDiagnostics.failed) * 100);
+            if (authPercent >= 50) {
+                streamDiagnostics.suggestions.push('Authentication errors detected. Possible causes:');
+                streamDiagnostics.suggestions.push('• Your IP may be geo-blocked - try using a VPN');
+                if (streamDiagnostics.serverLocation?.city || streamDiagnostics.serverLocation?.country) {
+                    streamDiagnostics.suggestions.push(`• Suggested VPN location: ${streamDiagnostics.serverLocation.city || streamDiagnostics.serverLocation.country}`);
+                }
+                streamDiagnostics.suggestions.push('• Check for concurrent connection limits');
+                streamDiagnostics.suggestions.push('• Verify subscription is active');
+            }
+        }
+
+        if (streamDiagnostics.errorBreakdown.timeout > streamDiagnostics.tested * 0.5) {
+            streamDiagnostics.suggestions.push('Many timeout errors. Server may be slow or overloaded.');
+        }
+
+        if (streamDiagnostics.errorBreakdown.connection > streamDiagnostics.tested * 0.5) {
+            streamDiagnostics.suggestions.push('Connection errors. Server may be down or blocked by ISP.');
+        }
+
+        logger.info(`Stream test complete for source ${sourceId}: ${streamDiagnostics.passed}/${streamDiagnostics.tested} passed (${streamDiagnostics.overallStatus})`);
+
+        res.json({
+            success: true,
+            diagnostics: streamDiagnostics
+        });
+    } catch (error) {
+        logger.error(`Error testing streams: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Failed to test streams'
         });
     }
 });

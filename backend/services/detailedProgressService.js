@@ -517,13 +517,14 @@ async function processChannels(sessionId, channels, userId = null, options = {})
           logger.warn(`Failed to create user preference: ${prefError.message}`);
         }
       }
+
     }
   } catch (dbError) {
     logger.error(`Error saving to database: ${dbError.message}`, { stack: dbError.stack });
     // Don't fail the whole process if database save fails
   }
 
-  // Send completion event with more detailed info
+  // Send completion event with more detailed info (no stream diagnostics)
   broadcastSSEUpdate({
     type: 'complete',
     message: 'Data processing completed successfully',
@@ -822,7 +823,7 @@ function generateChannelId(name, count) {
   const nameHash = name.split('').reduce((hash, char) => {
     return ((hash << 5) - hash) + char.charCodeAt(0);
   }, 0);
-  
+
   return Math.abs(nameHash + count).toString(36);
 }
 

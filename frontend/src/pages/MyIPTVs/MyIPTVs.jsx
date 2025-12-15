@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import iptvSourcesService from '../../services/iptvSourcesService';
 import Configuration from '../../Configuration';
+import StreamDiagnosticsModal from '../../components/StreamDiagnosticsModal';
 
 /**
  * Source card component
  */
-const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo, onEditCredentials, refreshStatus }) => {
+const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccountInfo, onEditCredentials, onTestStreams, refreshStatus }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [nickname, setNickname] = useState(source.nickname || source.name);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
   const [showEditCredentials, setShowEditCredentials] = useState(false);
   const [credentials, setCredentials] = useState({
     url: source.url || '',
@@ -46,6 +48,18 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
       console.error('Error refreshing account info:', error);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleTest = async () => {
+    if (!onTestStreams) return;
+    setIsTesting(true);
+    try {
+      await onTestStreams(source.id);
+    } catch (error) {
+      console.error('Error testing streams:', error);
+    } finally {
+      setIsTesting(false);
     }
   };
 
@@ -113,23 +127,42 @@ const SourceCard = ({ source, onEdit, onDelete, onViewChannels, onRefreshAccount
           </h3>
           <div className="flex items-center gap-1">
             {(source.type === 'xtream' || source.type === 'stalker') && (
-              <button
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-blue-400 transition-opacity disabled:opacity-50"
-                title="Refresh channels and account info"
-              >
-                {isRefreshing ? (
-                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                )}
-              </button>
+              <>
+                <button
+                  onClick={handleRefresh}
+                  disabled={isRefreshing || isTesting}
+                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-blue-400 transition-opacity disabled:opacity-50"
+                  title="Refresh channels and account info"
+                >
+                  {isRefreshing ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  )}
+                </button>
+                <button
+                  onClick={handleTest}
+                  disabled={isRefreshing || isTesting}
+                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-emerald-400 transition-opacity disabled:opacity-50"
+                  title="Test stream connectivity"
+                >
+                  {isTesting ? (
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  )}
+                </button>
+              </>
             )}
             {source.type === 'xtream' && (
               <button
@@ -515,6 +548,7 @@ const MyIPTVs = ({
   const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
   const [sourceRefreshStatus, setSourceRefreshStatus] = useState({}); // Track status per source: { sourceId: 'loading' | 'success' | 'error' }
   const [refreshSummary, setRefreshSummary] = useState(null); // { successCount, failCount, duration }
+  const [diagnosticsModal, setDiagnosticsModal] = useState({ isOpen: false, diagnostics: null, sourceName: '' });
 
   // Load sources on mount
   useEffect(() => {
@@ -588,7 +622,6 @@ const MyIPTVs = ({
     try {
       const result = await iptvSourcesService.refreshAccountInfo(sourceId);
 
-      // Show success message with channel count
       if (result.success) {
         setNotification({
           type: 'success',
@@ -608,6 +641,56 @@ const MyIPTVs = ({
     } catch (err) {
       console.error('Error refreshing source:', err);
       const errorMsg = err.response?.data?.error || 'Failed to refresh source data';
+      setNotification({
+        type: 'error',
+        message: errorMsg
+      });
+      setTimeout(() => setNotification(null), 5000);
+    }
+  };
+
+  const handleTestStreams = async (sourceId) => {
+    const source = sources.find(s => s.id === sourceId);
+    const sourceName = source?.nickname || source?.name || 'Source';
+
+    setNotification({
+      type: 'info',
+      message: `Testing streams for ${sourceName}...`
+    });
+
+    try {
+      const result = await iptvSourcesService.testStreams(sourceId);
+
+      if (result.success && result.diagnostics) {
+        const diag = result.diagnostics;
+        let message = `Stream test complete: ${diag.passed}/${diag.tested} passed.`;
+
+        setNotification({
+          type: diag.overallStatus === 'failing' ? 'warning' : diag.overallStatus === 'healthy' ? 'success' : 'info',
+          message,
+          action: {
+            label: 'View Details',
+            onClick: () => {
+              setDiagnosticsModal({
+                isOpen: true,
+                diagnostics: diag,
+                sourceName
+              });
+            }
+          }
+        });
+        setTimeout(() => setNotification(null), 8000);
+
+        // Auto-show diagnostics modal
+        setDiagnosticsModal({
+          isOpen: true,
+          diagnostics: diag,
+          sourceName
+        });
+      }
+    } catch (err) {
+      console.error('Error testing streams:', err);
+      const errorMsg = err.response?.data?.error || 'Failed to test streams';
       setNotification({
         type: 'error',
         message: errorMsg
@@ -783,6 +866,8 @@ const MyIPTVs = ({
             ? 'bg-green-900/90 border-green-700 text-green-100'
             : notification.type === 'warning'
             ? 'bg-yellow-900/90 border-yellow-700 text-yellow-100'
+            : notification.type === 'info'
+            ? 'bg-blue-900/90 border-blue-700 text-blue-100'
             : 'bg-red-900/90 border-red-700 text-red-100'
         }`}>
           <div className="flex items-start gap-3">
@@ -794,6 +879,11 @@ const MyIPTVs = ({
               <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
+            ) : notification.type === 'info' ? (
+              <svg className="w-5 h-5 flex-shrink-0 mt-0.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
             ) : (
               <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -801,6 +891,17 @@ const MyIPTVs = ({
             )}
             <div className="flex-1">
               <p className="text-sm font-medium">{notification.message}</p>
+              {notification.action && (
+                <button
+                  onClick={() => {
+                    notification.action.onClick();
+                    setNotification(null);
+                  }}
+                  className="mt-2 text-sm underline hover:no-underline opacity-90 hover:opacity-100"
+                >
+                  {notification.action.label}
+                </button>
+              )}
             </div>
             <button
               onClick={() => setNotification(null)}
@@ -956,6 +1057,7 @@ const MyIPTVs = ({
               onViewChannels={handleViewChannels}
               onRefreshAccountInfo={handleRefreshAccountInfo}
               onEditCredentials={handleEditCredentials}
+              onTestStreams={handleTestStreams}
               refreshStatus={sourceRefreshStatus[source.id]}
             />
           ))}
@@ -989,7 +1091,12 @@ const MyIPTVs = ({
                 setBackgroundLoadings(new Map()); // Clear all background loadings on completion
                 await loadSources();
                 if (onSourcesUpdated) onSourcesUpdated();
-                // Note: handleLoad will switch to 'channels' tab, but App.js will handle staying on myiptvs
+
+                setNotification({
+                  type: 'success',
+                  message: `Source added with ${data.channelCount || 0} channels. Use the test button to check stream connectivity.`
+                });
+                setTimeout(() => setNotification(null), 5000);
               }}
               error={loadingError}
               allowedTabs={['xtream', 'stalker']}
@@ -1025,6 +1132,14 @@ const MyIPTVs = ({
         </div>
       </div>
       )}
+
+      {/* Stream Diagnostics Modal */}
+      <StreamDiagnosticsModal
+        isOpen={diagnosticsModal.isOpen}
+        onClose={() => setDiagnosticsModal({ isOpen: false, diagnostics: null, sourceName: '' })}
+        diagnostics={diagnosticsModal.diagnostics}
+        sourceName={diagnosticsModal.sourceName}
+      />
     </div>
   );
 };
