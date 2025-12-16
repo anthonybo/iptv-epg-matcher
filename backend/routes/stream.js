@@ -26,17 +26,254 @@ const metricsService = require('../services/metricsService');
 // Store active resilient stream connections for monitoring
 const resilientStreams = new Map();
 
+// ============================================================================
+// STREAM REQUEST THROTTLING - Prevent rapid reconnection storms
+// ============================================================================
+// Track recent stream requests per channel to prevent connection flooding
+const recentStreamRequests = new Map(); // channelId -> { timestamp, count, abortController }
+const THROTTLE_WINDOW_MS = 3000;  // 3 second window
+const MAX_REQUESTS_PER_WINDOW = 2; // Max 2 requests per channel in window
+const COOLDOWN_AFTER_THROTTLE_MS = 5000; // 5 second cooldown if throttled
+
+// ============================================================================
+// CIRCUIT BREAKER - Stop trying unstable sources
+// ============================================================================
+// Track source failures to implement circuit breaker pattern
+const sourceFailures = new Map(); // sourceUrl -> { failures, lastFailure, circuitOpen }
+const CIRCUIT_BREAKER_CONFIG = {
+    failureThreshold: 3,       // Open circuit after 3 failures
+    resetTimeout: 30000,       // Try again after 30 seconds
+    halfOpenRequests: 1,       // Allow 1 test request when half-open
+};
+
+// ============================================================================
+// ACTIVE STREAM TRACKING - Prevent duplicate streams
+// ============================================================================
+// Track active streams per user/channel to prevent duplicates
+const activeStreams = new Map(); // `${userId}_${channelId}` -> { controller, timestamp }
+
 // Configuration for resilient streaming
 const RESILIENT_CONFIG = {
-    maxRetries: 5,              // Max retry attempts before giving up
+    maxRetries: 3,              // Reduced from 5 - fail faster, let frontend decide
     initialRetryDelay: 1000,    // Start with 1 second delay
-    maxRetryDelay: 8000,        // Max 8 second delay between retries
+    maxRetryDelay: 4000,        // Reduced from 8s - don't wait too long
     backoffMultiplier: 1.5,     // Exponential backoff multiplier
-    connectionTimeout: 15000,   // 15 second timeout for initial connection
-    healthCheckInterval: 10000, // Check stream health every 10 seconds
-    staleDataThreshold: 30000,  // Consider stream stale if no data for 30 seconds
+    connectionTimeout: 10000,   // Reduced from 15s - fail faster
+    healthCheckInterval: 15000, // Increased from 10s - less overhead
+    staleDataThreshold: 20000,  // Reduced from 30s - detect stale streams faster
     maxStreamDuration: 4 * 60 * 60 * 1000, // 4 hour max stream duration
 };
+
+/**
+ * Check if a stream request should be throttled
+ * Returns { throttled: boolean, reason?: string }
+ */
+function checkStreamThrottle(channelId, userId) {
+    const key = `${userId || 'anon'}_${channelId}`;
+    const now = Date.now();
+    const existing = recentStreamRequests.get(key);
+
+    if (existing) {
+        const timeSinceFirst = now - existing.firstRequestTime;
+
+        // If we're in cooldown period, reject
+        if (existing.cooldownUntil && now < existing.cooldownUntil) {
+            const remainingMs = existing.cooldownUntil - now;
+            return {
+                throttled: true,
+                reason: `Cooldown active (${Math.ceil(remainingMs/1000)}s remaining)`,
+                remainingMs
+            };
+        }
+
+        // If within throttle window, check count
+        if (timeSinceFirst < THROTTLE_WINDOW_MS) {
+            existing.count++;
+            if (existing.count > MAX_REQUESTS_PER_WINDOW) {
+                // Set cooldown
+                existing.cooldownUntil = now + COOLDOWN_AFTER_THROTTLE_MS;
+                logger.warn(`[THROTTLE] Too many requests for ${channelId} (${existing.count} in ${timeSinceFirst}ms), cooling down`);
+                return {
+                    throttled: true,
+                    reason: `Too many requests (${existing.count} in ${Math.ceil(timeSinceFirst/1000)}s)`,
+                    remainingMs: COOLDOWN_AFTER_THROTTLE_MS
+                };
+            }
+        } else {
+            // Window expired, reset
+            existing.firstRequestTime = now;
+            existing.count = 1;
+            existing.cooldownUntil = null;
+        }
+    } else {
+        // First request for this channel
+        recentStreamRequests.set(key, {
+            firstRequestTime: now,
+            count: 1,
+            cooldownUntil: null
+        });
+    }
+
+    return { throttled: false };
+}
+
+/**
+ * Check circuit breaker for a source URL
+ * Returns { open: boolean, reason?: string }
+ */
+function checkCircuitBreaker(sourceUrl) {
+    // Normalize URL to host level for circuit breaker
+    let host;
+    try {
+        host = new URL(sourceUrl).host;
+    } catch {
+        return { open: false }; // Can't parse URL, let it through
+    }
+
+    const circuit = sourceFailures.get(host);
+    if (!circuit) {
+        return { open: false };
+    }
+
+    const now = Date.now();
+    const timeSinceLastFailure = now - circuit.lastFailure;
+
+    // If circuit is open and timeout hasn't passed, reject
+    if (circuit.circuitOpen && timeSinceLastFailure < CIRCUIT_BREAKER_CONFIG.resetTimeout) {
+        const remainingMs = CIRCUIT_BREAKER_CONFIG.resetTimeout - timeSinceLastFailure;
+        return {
+            open: true,
+            reason: `Circuit open for ${host} (${Math.ceil(remainingMs/1000)}s until retry)`,
+            remainingMs
+        };
+    }
+
+    // If timeout passed, move to half-open state
+    if (circuit.circuitOpen && timeSinceLastFailure >= CIRCUIT_BREAKER_CONFIG.resetTimeout) {
+        circuit.circuitOpen = false;
+        circuit.halfOpen = true;
+        circuit.halfOpenRequests = 0;
+        logger.info(`[CIRCUIT] Half-open for ${host}, allowing test request`);
+    }
+
+    return { open: false, halfOpen: circuit.halfOpen };
+}
+
+/**
+ * Record a source failure for circuit breaker
+ */
+function recordSourceFailure(sourceUrl, error) {
+    let host;
+    try {
+        host = new URL(sourceUrl).host;
+    } catch {
+        return;
+    }
+
+    const circuit = sourceFailures.get(host) || {
+        failures: 0,
+        lastFailure: 0,
+        circuitOpen: false,
+        halfOpen: false
+    };
+
+    circuit.failures++;
+    circuit.lastFailure = Date.now();
+
+    // If in half-open state and failed, reopen circuit
+    if (circuit.halfOpen) {
+        circuit.circuitOpen = true;
+        circuit.halfOpen = false;
+        logger.warn(`[CIRCUIT] Re-opening circuit for ${host} after half-open failure`);
+    }
+    // If failures exceed threshold, open circuit
+    else if (circuit.failures >= CIRCUIT_BREAKER_CONFIG.failureThreshold) {
+        circuit.circuitOpen = true;
+        logger.warn(`[CIRCUIT] Opening circuit for ${host} after ${circuit.failures} failures`);
+    }
+
+    sourceFailures.set(host, circuit);
+}
+
+/**
+ * Record a source success for circuit breaker
+ */
+function recordSourceSuccess(sourceUrl) {
+    let host;
+    try {
+        host = new URL(sourceUrl).host;
+    } catch {
+        return;
+    }
+
+    const circuit = sourceFailures.get(host);
+    if (circuit) {
+        // Reset circuit on success
+        circuit.failures = 0;
+        circuit.circuitOpen = false;
+        circuit.halfOpen = false;
+        logger.info(`[CIRCUIT] Reset circuit for ${host} after success`);
+    }
+}
+
+/**
+ * Abort existing stream for a user/channel if one exists
+ */
+function abortExistingStream(channelId, userId) {
+    const key = `${userId || 'anon'}_${channelId}`;
+    const existing = activeStreams.get(key);
+
+    if (existing && existing.controller) {
+        const streamAge = Date.now() - existing.timestamp;
+        logger.info(`[STREAM] Aborting existing stream for ${channelId} (age: ${Math.ceil(streamAge/1000)}s)`);
+        try {
+            existing.controller.abort();
+        } catch (e) {
+            // Ignore abort errors
+        }
+        activeStreams.delete(key);
+    }
+}
+
+/**
+ * Track an active stream
+ */
+function trackActiveStream(channelId, userId, controller) {
+    const key = `${userId || 'anon'}_${channelId}`;
+    activeStreams.set(key, {
+        controller,
+        timestamp: Date.now()
+    });
+}
+
+/**
+ * Remove stream from tracking
+ */
+function untrackActiveStream(channelId, userId) {
+    const key = `${userId || 'anon'}_${channelId}`;
+    activeStreams.delete(key);
+}
+
+// Clean up stale throttle entries every 30 seconds
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, data] of recentStreamRequests.entries()) {
+        if (now - data.firstRequestTime > THROTTLE_WINDOW_MS * 10) {
+            recentStreamRequests.delete(key);
+        }
+    }
+}, 30000);
+
+// Clean up stale circuit breaker entries every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [host, circuit] of sourceFailures.entries()) {
+        // Remove entries that haven't had failures in 10 minutes
+        if (now - circuit.lastFailure > 10 * 60 * 1000) {
+            sourceFailures.delete(host);
+        }
+    }
+}, 5 * 60 * 1000);
 
 // Connection pooling agents for efficient HTTP/HTTPS requests
 // Increased limits to handle multi-view with many concurrent streams
@@ -71,6 +308,20 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         const format = req.query.format || 'ts'; // Default to ts format
         const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null; // Get source_id if provided
         const userId = req.user?.id; // Get user ID if authenticated
+
+        // Check throttling to prevent rapid reconnection storms
+        const throttleCheck = checkStreamThrottle(channelId, userId);
+        if (throttleCheck.throttled) {
+            logger.warn(`[THROTTLE] Rejecting stream request for ${channelId}: ${throttleCheck.reason}`);
+            return res.status(429).json({
+                error: 'Too many requests',
+                details: throttleCheck.reason,
+                retryAfter: Math.ceil((throttleCheck.remainingMs || 5000) / 1000)
+            });
+        }
+
+        // Abort any existing stream for this user/channel to prevent duplicates
+        abortExistingStream(channelId, userId);
 
         logger.info(`Stream request for session ${sessionId}, channel ${channelId}, format ${format}, userId ${userId || 'none'}, sourceId ${sourceId || 'all'}`);
 
@@ -422,6 +673,17 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         // Option 2: Proxy the stream with potential format conversion
         // Stream video using pipe (more efficient for large data)
         try {
+            // Check circuit breaker before attempting to connect
+            const circuitCheck = checkCircuitBreaker(streamUrl);
+            if (circuitCheck.open) {
+                logger.warn(`[CIRCUIT] Rejecting stream for ${channelId}: ${circuitCheck.reason}`);
+                return res.status(503).json({
+                    error: 'Source temporarily unavailable',
+                    details: circuitCheck.reason,
+                    retryAfter: Math.ceil((circuitCheck.remainingMs || 30000) / 1000)
+                });
+            }
+
             // Set appropriate headers for streaming
             res.setHeader('Content-Type', format === 'ts' ? 'video/mp2t' : 'video/mp4');
             res.setHeader('Transfer-Encoding', 'chunked');
@@ -431,6 +693,9 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             // Fetch and pipe the stream with proper timeout using AbortController
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout for stream to start
+
+            // Track this stream so we can abort it if a new request comes in for same channel
+            trackActiveStream(channelId, userId, controller);
 
             const streamResponse = await fetch(streamUrl, {
                 method: 'GET',
@@ -442,15 +707,20 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             });
 
             clearTimeout(timeoutId);
-            
+
             if (!streamResponse.ok) {
                 logger.error(`Failed to fetch stream: ${streamResponse.status} ${streamResponse.statusText}`);
-                return res.status(502).json({ 
+                recordSourceFailure(streamUrl, new Error(`HTTP ${streamResponse.status}`));
+                untrackActiveStream(channelId, userId);
+                return res.status(502).json({
                     error: 'Failed to fetch stream from source',
                     status: streamResponse.status,
                     message: streamResponse.statusText
                 });
             }
+
+            // Stream connected successfully - record success for circuit breaker
+            recordSourceSuccess(streamUrl);
             
             // Create a pass-through stream for better error handling
             const passThrough = new PassThrough();
@@ -499,11 +769,14 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 passThrough.destroy();
             });
 
-            // Handle client disconnect
+            // Handle client disconnect - clean up everything immediately
             req.on('close', () => {
                 try {
                     logger.info(`Stream closed for channel ${channelId}`);
                     metricsService.trackStreamEnd(streamKey);
+                    untrackActiveStream(channelId, userId);
+                    // Abort the fetch if still pending
+                    controller.abort();
                     streamResponse.body.destroy();
                     passThrough.destroy();
                 } catch (err) {
@@ -514,26 +787,33 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             // Pipe through our pass-through stream for better control
             streamResponse.body.pipe(passThrough).pipe(res);
 
-            // Set a timeout on the whole operation
+            // Set a timeout on the whole operation - reduced to 90 seconds
+            // Long timeouts can cause connection accumulation in multi-view
             const streamTimeout = setTimeout(() => {
                 logger.warn(`Stream timeout for channel ${channelId}`);
                 metricsService.trackStreamEnd(streamKey);
+                untrackActiveStream(channelId, userId);
                 streamResponse.body.destroy(new Error('Stream timeout'));
                 passThrough.destroy(new Error('Stream timeout'));
-            }, 300000); // 5 minute timeout
+            }, 90000); // 90 second timeout (reduced from 5 minutes)
 
             // Clear timeout when stream ends or errors
             passThrough.on('end', () => {
                 logger.info(`Stream completed successfully for channel ${channelId}`);
                 metricsService.trackStreamEnd(streamKey);
+                untrackActiveStream(channelId, userId);
                 clearTimeout(streamTimeout);
             });
 
             passThrough.on('error', () => {
+                untrackActiveStream(channelId, userId);
                 clearTimeout(streamTimeout);
             });
             
         } catch (streamError) {
+            // Always clean up tracking on error
+            untrackActiveStream(channelId, userId);
+
             // Handle aborted requests gracefully - these are normal when clients disconnect
             // (e.g., user changes channel, closes player, or layout changes in multi-view)
             if (streamError.name === 'AbortError' || streamError.message?.includes('aborted')) {
@@ -543,6 +823,11 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                     res.status(499).end(); // 499 = Client Closed Request (nginx convention)
                 }
                 return;
+            }
+
+            // Record failure for circuit breaker (if we have the URL)
+            if (streamUrl) {
+                recordSourceFailure(streamUrl, streamError);
             }
 
             // Handle common stream errors
@@ -558,6 +843,9 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 statusCode = 504;
             } else if (streamError.code === 'ECONNREFUSED' || streamError.message.includes('ECONNREFUSED')) {
                 errorMessage = 'Stream source connection was refused';
+                statusCode = 502;
+            } else if (streamError.code === 'ECONNRESET' || streamError.message.includes('ECONNRESET')) {
+                errorMessage = 'Stream source connection was reset';
                 statusCode = 502;
             }
 
@@ -789,6 +1077,9 @@ async function createResilientStreamConnection(streamUrl, streamKey, channel, re
             state.retryCount = 0; // Reset retry count on successful connection
             state.retryDelay = RESILIENT_CONFIG.initialRetryDelay; // Reset delay
 
+            // Record success for circuit breaker
+            recordSourceSuccess(streamUrl);
+
             logger.info(`[RESILIENT ${streamKey}] Connected successfully`);
             return true;
 
@@ -796,6 +1087,9 @@ async function createResilientStreamConnection(streamUrl, streamKey, channel, re
             if (state.isDestroyed) {
                 return false;
             }
+
+            // Record failure for circuit breaker
+            recordSourceFailure(streamUrl, error);
 
             logger.warn(`[RESILIENT ${streamKey}] Connection failed: ${error.message}`);
             state.retryCount++;
@@ -986,6 +1280,20 @@ router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) 
         const sourceId = req.query.source_id ? parseInt(req.query.source_id) : null;
         const userId = req.user?.id;
 
+        // Check throttling to prevent rapid reconnection storms
+        const throttleCheck = checkStreamThrottle(channelId, userId);
+        if (throttleCheck.throttled) {
+            logger.warn(`[RESILIENT THROTTLE] Rejecting stream request for ${channelId}: ${throttleCheck.reason}`);
+            return res.status(429).json({
+                error: 'Too many requests',
+                details: throttleCheck.reason,
+                retryAfter: Math.ceil((throttleCheck.remainingMs || 5000) / 1000)
+            });
+        }
+
+        // Abort any existing resilient stream for this user/channel
+        abortExistingStream(channelId, userId);
+
         logger.info(`[RESILIENT] Stream request for session ${sessionId}, channel ${channelId}, sourceId ${sourceId}`);
 
         // Fetch channel from database (reuse existing logic)
@@ -1099,6 +1407,17 @@ router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) 
 
         logger.info(`[RESILIENT] Streaming channel: ${channel.name} from: ${streamUrl.substring(0, 80)}...`);
 
+        // Check circuit breaker before attempting to stream
+        const circuitCheck = checkCircuitBreaker(streamUrl);
+        if (circuitCheck.open) {
+            logger.warn(`[RESILIENT CIRCUIT] Rejecting stream for ${channelId}: ${circuitCheck.reason}`);
+            return res.status(503).json({
+                error: 'Source temporarily unavailable',
+                details: circuitCheck.reason,
+                retryAfter: Math.ceil((circuitCheck.remainingMs || 30000) / 1000)
+            });
+        }
+
         // Set streaming headers
         res.setHeader('Content-Type', format === 'ts' ? 'video/mp2t' : 'video/mp4');
         res.setHeader('Transfer-Encoding', 'chunked');
@@ -1109,7 +1428,7 @@ router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) 
         // Create unique stream key
         const streamKey = `resilient_${sessionId}_${channelId}_${Date.now()}`;
 
-        // Start resilient streaming
+        // Start resilient streaming (pass streamUrl for circuit breaker recording)
         await createResilientStreamConnection(streamUrl, streamKey, channel, res, req, logger);
 
     } catch (error) {
@@ -1144,6 +1463,91 @@ router.get('/resilient/status', authMiddleware, (req, res) => {
         activeStreams: streams.length,
         streams,
         config: RESILIENT_CONFIG,
+    });
+});
+
+/**
+ * GET /diagnostics
+ * Get diagnostics for throttling, circuit breakers, and active streams
+ */
+router.get('/diagnostics', authMiddleware, (req, res) => {
+    const now = Date.now();
+
+    // Collect throttle status
+    const throttleStatus = [];
+    for (const [key, data] of recentStreamRequests.entries()) {
+        throttleStatus.push({
+            key,
+            requestCount: data.count,
+            firstRequestTime: data.firstRequestTime,
+            ageMs: now - data.firstRequestTime,
+            cooldownUntil: data.cooldownUntil,
+            inCooldown: data.cooldownUntil ? now < data.cooldownUntil : false,
+            cooldownRemainingMs: data.cooldownUntil ? Math.max(0, data.cooldownUntil - now) : 0
+        });
+    }
+
+    // Collect circuit breaker status
+    const circuitStatus = [];
+    for (const [host, circuit] of sourceFailures.entries()) {
+        circuitStatus.push({
+            host,
+            failures: circuit.failures,
+            lastFailure: circuit.lastFailure,
+            lastFailureAgeMs: now - circuit.lastFailure,
+            circuitOpen: circuit.circuitOpen,
+            halfOpen: circuit.halfOpen || false,
+            resetIn: circuit.circuitOpen ? Math.max(0, CIRCUIT_BREAKER_CONFIG.resetTimeout - (now - circuit.lastFailure)) : 0
+        });
+    }
+
+    // Collect active streams
+    const activeStreamStatus = [];
+    for (const [key, data] of activeStreams.entries()) {
+        activeStreamStatus.push({
+            key,
+            timestamp: data.timestamp,
+            ageMs: now - data.timestamp
+        });
+    }
+
+    // Collect resilient streams
+    const resilientStatus = [];
+    for (const [key, data] of resilientStreams.entries()) {
+        resilientStatus.push({
+            key,
+            channel: data.channel,
+            startTime: data.startTime,
+            durationMs: now - data.startTime,
+            retryCount: data.state?.retryCount || 0,
+            bytesStreamed: data.state?.totalBytesStreamed || 0,
+            lastDataTimeAgeMs: data.state?.lastDataTime ? now - data.state.lastDataTime : null
+        });
+    }
+
+    res.json({
+        timestamp: now,
+        throttling: {
+            config: {
+                windowMs: THROTTLE_WINDOW_MS,
+                maxRequestsPerWindow: MAX_REQUESTS_PER_WINDOW,
+                cooldownMs: COOLDOWN_AFTER_THROTTLE_MS
+            },
+            channels: throttleStatus
+        },
+        circuitBreaker: {
+            config: CIRCUIT_BREAKER_CONFIG,
+            sources: circuitStatus
+        },
+        activeStreams: {
+            count: activeStreamStatus.length,
+            streams: activeStreamStatus
+        },
+        resilientStreams: {
+            config: RESILIENT_CONFIG,
+            count: resilientStatus.length,
+            streams: resilientStatus
+        }
     });
 });
 

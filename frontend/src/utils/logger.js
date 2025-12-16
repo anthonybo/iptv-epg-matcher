@@ -11,11 +11,57 @@ class FrontendLogger {
     this.maxQueueSize = 50;
     this.enabled = process.env.NODE_ENV !== 'test';
 
+    // Rate limiting for repeated errors (prevents "Script error" spam)
+    this.errorCounts = new Map(); // message -> { count, lastLogged }
+    this.errorThrottleMs = 10000; // Only log same error once per 10 seconds
+    this.errorThrottleMax = 5; // After 5 occurrences, throttle more aggressively
+
     // Start auto-flush
     if (this.enabled) {
       setInterval(() => this.flush(), this.flushInterval);
       this.setupGlobalErrorHandlers();
+
+      // Clean up old error counts every minute
+      setInterval(() => {
+        const now = Date.now();
+        for (const [key, data] of this.errorCounts.entries()) {
+          if (now - data.lastLogged > 60000) {
+            this.errorCounts.delete(key);
+          }
+        }
+      }, 60000);
     }
+  }
+
+  /**
+   * Check if an error should be throttled
+   * Returns true if the error should be suppressed
+   */
+  shouldThrottleError(message) {
+    const key = message || 'unknown';
+    const now = Date.now();
+    const data = this.errorCounts.get(key);
+
+    if (!data) {
+      this.errorCounts.set(key, { count: 1, lastLogged: now });
+      return false; // First occurrence, don't throttle
+    }
+
+    data.count++;
+    const timeSinceLastLog = now - data.lastLogged;
+
+    // If error has occurred many times, throttle more aggressively
+    const throttleTime = data.count > this.errorThrottleMax
+      ? this.errorThrottleMs * 3 // 30 seconds for repeated errors
+      : this.errorThrottleMs;    // 10 seconds normally
+
+    if (timeSinceLastLog < throttleTime) {
+      return true; // Throttle this error
+    }
+
+    // Enough time has passed, log it again
+    data.lastLogged = now;
+    return false;
   }
 
   /**
@@ -104,8 +150,15 @@ class FrontendLogger {
       });
     });
 
-    // Catch global errors
+    // Catch global errors - with throttling to prevent spam from repeated errors
     window.addEventListener('error', (event) => {
+      const errorKey = event.message || 'Script error';
+
+      // Throttle repeated errors (especially "Script error" from mpegts.js)
+      if (this.shouldThrottleError(errorKey)) {
+        return; // Skip logging this repeated error
+      }
+
       this.error('Global Error', {
         message: event.message,
         filename: event.filename,

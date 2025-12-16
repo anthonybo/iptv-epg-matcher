@@ -85,6 +85,8 @@ const IPTVPlayer = ({
   const lastErrorTimeRef = useRef(0); // Track when last error occurred
   const isRecoveringRef = useRef(false); // Prevent multiple simultaneous recovery attempts
   const recoveryTimeoutRef = useRef(null); // Timeout to detect if recovery attempt failed
+  // CRITICAL: Track event listeners for cleanup to prevent memory leaks
+  const videoListenersRef = useRef([]); // Array of { event, handler } for cleanup
 
   // Global recovery rate limiter (shared across all instances)
   // Uses a queue-based approach to prevent stack overflow in multi-view
@@ -98,6 +100,16 @@ const IPTVPlayer = ({
       globalRecoveryCount: 0, // Track total recoveries across all streams
       globalRecoveryWindowStart: 0, // When the current window started
       globalPaused: false // Emergency stop if too many global recoveries
+    };
+  }
+
+  // Global Script error tracker - detects mpegts.js crashes that don't trigger normal error handlers
+  // Script errors from third-party libraries don't give details due to cross-origin, but we can count them
+  if (typeof window.iptvScriptErrorTracker === 'undefined') {
+    window.iptvScriptErrorTracker = {
+      errorCounts: new Map(), // channelId -> { count, firstError, lastError }
+      maxErrors: 10, // After 10 script errors in 60s, mark stream as crashed
+      windowMs: 60000 // 60 second window
     };
   }
 
@@ -127,6 +139,51 @@ const IPTVPlayer = ({
     return true; // Allow recovery
   };
 
+  // Track and check script errors for this channel
+  // Returns true if too many script errors have occurred (stream is crashing)
+  const trackScriptError = useCallback(() => {
+    const tracker = window.iptvScriptErrorTracker;
+    const channelId = currentChannelIdRef.current;
+    if (!channelId) return false;
+
+    const now = Date.now();
+    let data = tracker.errorCounts.get(channelId);
+
+    if (!data) {
+      data = { count: 1, firstError: now, lastError: now };
+      tracker.errorCounts.set(channelId, data);
+      return false;
+    }
+
+    // Reset if window has passed
+    if (now - data.firstError > tracker.windowMs) {
+      data.count = 1;
+      data.firstError = now;
+      data.lastError = now;
+      return false;
+    }
+
+    data.count++;
+    data.lastError = now;
+
+    // Check if we've exceeded the threshold
+    if (data.count >= tracker.maxErrors) {
+      console.error(`[IPTVPlayer] Too many script errors (${data.count}) for channel ${channelId} - marking as crashed`);
+      return true; // Too many errors, stream is crashing
+    }
+
+    return false;
+  }, []);
+
+  // Clear script error count for this channel (called when stream starts playing)
+  const clearScriptErrors = useCallback(() => {
+    const tracker = window.iptvScriptErrorTracker;
+    const channelId = currentChannelIdRef.current;
+    if (channelId) {
+      tracker.errorCounts.delete(channelId);
+    }
+  }, []);
+
   // Track total recovery attempts for this instance to prevent infinite loops
   const totalRecoveryAttemptsRef = useRef(0);
   // Fewer total attempts in theatre mode - with 4 streams, 10 each = 40 total connections max
@@ -139,6 +196,10 @@ const IPTVPlayer = ({
   const RECOVERY_WINDOW_MS = theatreMode ? 30000 : 60000; // 30s window in theatre, 60s single
   const MAX_RECOVERIES_IN_WINDOW = theatreMode ? 4 : 6; // Fewer attempts in theatre mode
   const streamUnstableRef = useRef(false); // Flag to mark stream as unstable
+
+  // Maximum time (ms) to wait for a stale stream before completely giving up
+  // This prevents mpegts.js from crashing repeatedly on dead streams
+  const MAX_STALE_TIME_MS = 120000; // 2 minutes - after this, completely stop the player
   
   // Enhanced logging function - optimized for multi-view performance
   const log = (level, message, data = null) => {
@@ -176,6 +237,14 @@ const IPTVPlayer = ({
     ].slice(-20));
   };
 
+  // Helper to add event listener with tracking for cleanup
+  // CRITICAL: Use this instead of direct addEventListener to prevent memory leaks
+  const addTrackedListener = useCallback((element, event, handler) => {
+    if (!element) return;
+    element.addEventListener(event, handler);
+    videoListenersRef.current.push({ event, handler });
+  }, []);
+
   // Track video element changes to sync muted state
   const [videoElementKey, setVideoElementKey] = useState(0);
 
@@ -203,6 +272,33 @@ const IPTVPlayer = ({
       cleanupPlayer();
     };
   }, []);
+
+  // Track global Script errors to detect mpegts.js crashes
+  // These don't trigger normal error handlers due to cross-origin, so we catch them globally
+  useEffect(() => {
+    const handleGlobalError = (event) => {
+      // Only track "Script error" which is what cross-origin errors show as
+      if (event.message === 'Script error.' || event.message === 'Script error') {
+        // Check if we're actively playing (have a channel ID)
+        if (currentChannelIdRef.current && playerInstanceRef.current) {
+          const tooManyErrors = trackScriptError();
+          if (tooManyErrors) {
+            // Too many script errors - stop the player completely
+            console.error('[IPTVPlayer] Stopping player due to repeated Script errors (mpegts.js crash loop)');
+            streamUnstableRef.current = true;
+            cleanupPlayer();
+            setError('Player crashed repeatedly. Try "Find Alternative" or refresh.');
+          }
+        }
+      }
+    };
+
+    window.addEventListener('error', handleGlobalError);
+
+    return () => {
+      window.removeEventListener('error', handleGlobalError);
+    };
+  }, [trackScriptError]);
 
   // Try to load EPG data when channel changes
   // Skip in theatre mode (multi-view) since EPG overlay is not shown
@@ -379,9 +475,15 @@ const IPTVPlayer = ({
     setLoading(true);
 
     // Wait a brief moment for scripts to load if needed
-    setTimeout(() => {
+    // CRITICAL: Track this timeout so we can clear it on cleanup/unmount
+    const initTimeout = setTimeout(() => {
       initializePlayer();
     }, 100);
+
+    // Cleanup function to prevent race conditions and memory leaks
+    return () => {
+      clearTimeout(initTimeout);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, channelId, channelSourceId, channelRefreshKey, playbackMethod]);
 
@@ -426,6 +528,21 @@ const IPTVPlayer = ({
 
     // DON'T reset isRecoveringRef here - let recovery logic manage it
     // Otherwise we get into infinite recovery loops
+
+    // CRITICAL: Remove all tracked event listeners to prevent memory leaks
+    // This must happen BEFORE removing the video element from DOM
+    if (videoElementRef.current && videoListenersRef.current.length > 0) {
+      // Use console.log directly so this shows even in theatre mode
+      console.log(`[IPTVPlayer] Cleanup: Removing ${videoListenersRef.current.length} event listeners`);
+      for (const { event, handler } of videoListenersRef.current) {
+        try {
+          videoElementRef.current.removeEventListener(event, handler);
+        } catch (e) {
+          // Ignore errors during cleanup
+        }
+      }
+      videoListenersRef.current = []; // Clear the tracking array
+    }
 
     // CRITICAL: Immediately stop video element before destroying player
     // This prevents video decoder from continuing to run
@@ -1035,10 +1152,22 @@ const IPTVPlayer = ({
           // When using resilient proxy, backend handles reconnection
           // Only show error if frozen for a very long time (backend should have reconnected by now)
           if (shouldUseResilientProxy) {
+            // CRITICAL: If stream has been stale for too long (2+ minutes), completely stop the player
+            // This prevents mpegts.js from crashing repeatedly on dead streams
+            if (timeSinceLastPlaying >= MAX_STALE_TIME_MS) {
+              log('error', `Stream dead for ${Math.round(timeSinceLastPlaying / 1000)}s - completely stopping player`);
+              streamUnstableRef.current = true; // Mark as unstable to prevent recovery
+              cleanupPlayer(); // Completely stop mpegts.js to prevent crash loops
+              setError('Stream unavailable. The stream has been dead for too long. Try "Find Alternative" or refresh.');
+              return;
+            }
+
             // With resilient proxy, allow more time - backend might be reconnecting
             // Only show error after 30+ seconds frozen (backend retries take time)
             if (timeSinceLastPlaying >= 30000) {
-              setError('Stream frozen. Backend retries may have failed. Try "Find Alternative" or refresh.');
+              log('warn', `Stream frozen for ${Math.round(timeSinceLastPlaying / 1000)}s - still waiting for backend`);
+              // Restart health check to keep monitoring (will trigger MAX_STALE_TIME check if it continues)
+              startHealthCheck();
             } else {
               // Otherwise, just wait - backend is likely reconnecting
               log('info', 'Stream frozen but using resilient proxy - waiting for backend reconnect');
@@ -1085,6 +1214,7 @@ const IPTVPlayer = ({
     recoveryTimestampsRef.current = []; // Clear recovery history for new channel
     streamUnstableRef.current = false; // Clear unstable flag for new channel
     currentChannelIdRef.current = newChannelId; // Track current channel
+    clearScriptErrors(); // Clear script error count for new channel
 
     if (!containerRef.current) {
       log('error', 'Player container not available');
@@ -1228,6 +1358,9 @@ const IPTVPlayer = ({
         setError(null);
         setRecoveryStatus(null); // Clear recovery status on initial playback
 
+        // Clear script error count - stream is playing successfully
+        clearScriptErrors();
+
         // Cancel recovery timeout if it exists
         if (recoveryTimeoutRef.current) {
           clearTimeout(recoveryTimeoutRef.current);
@@ -1258,9 +1391,8 @@ const IPTVPlayer = ({
         if (!theatreMode) {
           const videoEl = videoElementRef.current;
           if (videoEl) {
-            videoEl.addEventListener('resize', () => {
-              detectQualityClappr('resize');
-            });
+            const resizeHandler = () => detectQualityClappr('resize');
+            addTrackedListener(videoEl, 'resize', resizeHandler);
           }
         }
       });
@@ -1605,11 +1737,15 @@ const IPTVPlayer = ({
           }
         };
 
-        videoEl.addEventListener('playing', () => {
+        // CRITICAL: Use addTrackedListener for all video events to prevent memory leaks
+        const playingHandler = () => {
           log('info', 'Video playing');
           setLoading(false);
           setError(null);
           setRecoveryStatus(null); // Clear recovery status on initial playback
+
+          // Clear script error count - stream is playing successfully
+          clearScriptErrors();
 
           // Cancel recovery timeout if it exists
           if (recoveryTimeoutRef.current) {
@@ -1648,21 +1784,21 @@ const IPTVPlayer = ({
 
           // Start proactive health check
           startHealthCheck();
-        });
+        };
+        addTrackedListener(videoEl, 'playing', playingHandler);
 
         // Listen for resolution changes (adaptive bitrate streams)
         // Skip in theatre mode - initial detection is enough, saves event processing
         if (!theatreMode) {
-          videoEl.addEventListener('resize', () => {
-            detectQualityMpegts('resize');
-          });
+          const resizeHandler = () => detectQualityMpegts('resize');
+          addTrackedListener(videoEl, 'resize', resizeHandler);
         }
 
         // Throttled timeupdate handler - fires ~4x/sec per video, too frequent for multi-view
         let lastTimeUpdate = 0;
         const timeUpdateThrottle = theatreMode ? 1000 : 250; // 1s in multi-view, 250ms single
 
-        videoEl.addEventListener('timeupdate', () => {
+        const timeupdateHandler = () => {
           const now = Date.now();
           if (now - lastTimeUpdate < timeUpdateThrottle) return;
           lastTimeUpdate = now;
@@ -1675,7 +1811,8 @@ const IPTVPlayer = ({
             clearTimeout(stallTimerRef.current);
             stallTimerRef.current = null;
           }
-        });
+        };
+        addTrackedListener(videoEl, 'timeupdate', timeupdateHandler);
 
         // Stall detection - when video stops buffering/loading
         const handleStall = (eventType) => {
@@ -1708,10 +1845,12 @@ const IPTVPlayer = ({
           }, stallTimeout);
         };
 
-        videoEl.addEventListener('waiting', () => handleStall('waiting'));
-        videoEl.addEventListener('stalled', () => handleStall('stalled'));
+        const waitingHandler = () => handleStall('waiting');
+        const stalledHandler = () => handleStall('stalled');
+        addTrackedListener(videoEl, 'waiting', waitingHandler);
+        addTrackedListener(videoEl, 'stalled', stalledHandler);
 
-        videoEl.addEventListener('error', () => {
+        const errorHandler = () => {
           log('error', 'Video error', { error: videoEl.error });
           setLoading(false);
           isInitializingRef.current = false;
@@ -1723,10 +1862,11 @@ const IPTVPlayer = ({
           }
 
           attemptRecovery('Video element error');
-        });
+        };
+        addTrackedListener(videoEl, 'error', errorHandler);
 
         // Handle unexpected stream end for live streams
-        videoEl.addEventListener('ended', () => {
+        const endedHandler = () => {
           log('warn', 'Live stream ended unexpectedly');
 
           // Don't recover if channel has changed
@@ -1737,7 +1877,8 @@ const IPTVPlayer = ({
 
           // Try soft recovery first - stream ended naturally, might just need reload
           attemptSoftRecovery('Stream ended (video element)');
-        });
+        };
+        addTrackedListener(videoEl, 'ended', endedHandler);
 
         player.play().catch(e => {
           // Autoplay prevented is normal browser behavior - don't log it
@@ -1838,15 +1979,15 @@ const IPTVPlayer = ({
   // Initialize test video player with a known good source
   const initializeTestVideo = () => {
     log('info', 'Initializing test video');
-    
+
     // Known reliable test stream (Big Buck Bunny)
     const testUrl = 'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-    
+
     // Create new player container
     while (containerRef.current.firstChild) {
       containerRef.current.removeChild(containerRef.current.firstChild);
     }
-    
+
     const videoEl = document.createElement('video');
     videoEl.style.width = '100%';
     videoEl.style.height = '100%';
@@ -1854,19 +1995,25 @@ const IPTVPlayer = ({
     videoEl.muted = muted; // Set muted state
     videoEl.src = testUrl;
     containerRef.current.appendChild(videoEl);
-    
-    videoEl.addEventListener('playing', () => {
+
+    // Store reference for cleanup
+    videoElementRef.current = videoEl;
+
+    // Use tracked listeners to prevent memory leaks
+    const playingHandler = () => {
       log('info', 'Test video playing');
       setLoading(false);
       setError(null);
-    });
-    
-    videoEl.addEventListener('error', () => {
+    };
+    addTrackedListener(videoEl, 'playing', playingHandler);
+
+    const errorHandler = () => {
       log('error', 'Test video error', { error: videoEl.error });
       setError('Error playing test video.');
       setLoading(false);
-    });
-    
+    };
+    addTrackedListener(videoEl, 'error', errorHandler);
+
     videoEl.play().catch(e => {
       // Autoplay prevented is normal browser behavior - don't log it
     });

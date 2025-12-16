@@ -58,6 +58,13 @@ const SPORTS_CONFIG = [
 let updateInterval = null;
 let isUpdating = false;
 
+// Adaptive polling - slow down when no live games
+let currentIntervalMs = 30000;
+const FAST_INTERVAL_MS = 30000;  // 30 seconds when games are live
+const SLOW_INTERVAL_MS = 300000; // 5 minutes when no games are live
+let consecutiveNoLiveGames = 0;
+const SLOW_DOWN_THRESHOLD = 3; // Switch to slow mode after 3 updates with no live games
+
 /**
  * Parse ESPN status to user-friendly format
  * @param {object} status - ESPN status object
@@ -225,6 +232,23 @@ async function updateAllScores() {
     const duration = Date.now() - startTime;
     logger.info(`Scores updated: ${totalUpdated} events, ${liveGames} live games (${duration}ms)`);
 
+    // Adaptive polling: adjust interval based on whether there are live games
+    if (liveGames > 0) {
+      consecutiveNoLiveGames = 0;
+      if (currentIntervalMs !== FAST_INTERVAL_MS) {
+        currentIntervalMs = FAST_INTERVAL_MS;
+        restartWithNewInterval();
+        logger.info(`[Scores] Live games detected, switching to fast polling (${FAST_INTERVAL_MS/1000}s)`);
+      }
+    } else {
+      consecutiveNoLiveGames++;
+      if (consecutiveNoLiveGames >= SLOW_DOWN_THRESHOLD && currentIntervalMs !== SLOW_INTERVAL_MS) {
+        currentIntervalMs = SLOW_INTERVAL_MS;
+        restartWithNewInterval();
+        logger.info(`[Scores] No live games, switching to slow polling (${SLOW_INTERVAL_MS/1000}s)`);
+      }
+    }
+
     return {
       success: true,
       totalUpdated,
@@ -239,6 +263,19 @@ async function updateAllScores() {
     };
   } finally {
     isUpdating = false;
+  }
+}
+
+/**
+ * Restart the background updates with a new interval
+ * Used for adaptive polling
+ */
+function restartWithNewInterval() {
+  if (updateInterval) {
+    clearInterval(updateInterval);
+    updateInterval = setInterval(() => {
+      updateAllScores();
+    }, currentIntervalMs);
   }
 }
 
