@@ -31,7 +31,8 @@ const IPTVPlayer = ({
   useResilientProxy = null, // null = auto (true in theatre mode, false otherwise)
   skipRecovery = false, // When true, skip retry logic (for auto-test mode)
   onStreamPlaying = null, // Callback when stream starts playing successfully
-  onStreamError = null // Callback when stream fails (after skipRecovery or exhausted retries)
+  onStreamError = null, // Callback when stream fails (after skipRecovery or exhausted retries)
+  onStreamDead = null // Callback when stream is dead and needs alternative (for multi-view auto-recovery)
 }) => {
   // Determine if we should use the resilient proxy
   // Auto mode: use resilient proxy in theatre mode (multi-view) by default
@@ -85,6 +86,7 @@ const IPTVPlayer = ({
   const lastErrorTimeRef = useRef(0); // Track when last error occurred
   const isRecoveringRef = useRef(false); // Prevent multiple simultaneous recovery attempts
   const recoveryTimeoutRef = useRef(null); // Timeout to detect if recovery attempt failed
+  const hasCalledOnStreamDeadRef = useRef(false); // Prevent multiple onStreamDead calls for same failure
   // CRITICAL: Track event listeners for cleanup to prevent memory leaks
   const videoListenersRef = useRef([]); // Array of { event, handler } for cleanup
 
@@ -100,16 +102,6 @@ const IPTVPlayer = ({
       globalRecoveryCount: 0, // Track total recoveries across all streams
       globalRecoveryWindowStart: 0, // When the current window started
       globalPaused: false // Emergency stop if too many global recoveries
-    };
-  }
-
-  // Global Script error tracker - detects mpegts.js crashes that don't trigger normal error handlers
-  // Script errors from third-party libraries don't give details due to cross-origin, but we can count them
-  if (typeof window.iptvScriptErrorTracker === 'undefined') {
-    window.iptvScriptErrorTracker = {
-      errorCounts: new Map(), // channelId -> { count, firstError, lastError }
-      maxErrors: 10, // After 10 script errors in 60s, mark stream as crashed
-      windowMs: 60000 // 60 second window
     };
   }
 
@@ -138,51 +130,6 @@ const IPTVPlayer = ({
 
     return true; // Allow recovery
   };
-
-  // Track and check script errors for this channel
-  // Returns true if too many script errors have occurred (stream is crashing)
-  const trackScriptError = useCallback(() => {
-    const tracker = window.iptvScriptErrorTracker;
-    const channelId = currentChannelIdRef.current;
-    if (!channelId) return false;
-
-    const now = Date.now();
-    let data = tracker.errorCounts.get(channelId);
-
-    if (!data) {
-      data = { count: 1, firstError: now, lastError: now };
-      tracker.errorCounts.set(channelId, data);
-      return false;
-    }
-
-    // Reset if window has passed
-    if (now - data.firstError > tracker.windowMs) {
-      data.count = 1;
-      data.firstError = now;
-      data.lastError = now;
-      return false;
-    }
-
-    data.count++;
-    data.lastError = now;
-
-    // Check if we've exceeded the threshold
-    if (data.count >= tracker.maxErrors) {
-      console.error(`[IPTVPlayer] Too many script errors (${data.count}) for channel ${channelId} - marking as crashed`);
-      return true; // Too many errors, stream is crashing
-    }
-
-    return false;
-  }, []);
-
-  // Clear script error count for this channel (called when stream starts playing)
-  const clearScriptErrors = useCallback(() => {
-    const tracker = window.iptvScriptErrorTracker;
-    const channelId = currentChannelIdRef.current;
-    if (channelId) {
-      tracker.errorCounts.delete(channelId);
-    }
-  }, []);
 
   // Track total recovery attempts for this instance to prevent infinite loops
   const totalRecoveryAttemptsRef = useRef(0);
@@ -237,6 +184,20 @@ const IPTVPlayer = ({
     ].slice(-20));
   };
 
+  // Wrapper to call onStreamDead only once per failure
+  // Prevents multiple calls from different code paths (error + stale + recovery exhausted)
+  const notifyStreamDead = (reason = '') => {
+    if (hasCalledOnStreamDeadRef.current) {
+      log('info', `Skipping duplicate onStreamDead call (reason: ${reason})`);
+      return;
+    }
+    if (onStreamDead) {
+      hasCalledOnStreamDeadRef.current = true;
+      log('info', `Notifying parent: stream dead (reason: ${reason})`);
+      onStreamDead(reason);
+    }
+  };
+
   // Helper to add event listener with tracking for cleanup
   // CRITICAL: Use this instead of direct addEventListener to prevent memory leaks
   const addTrackedListener = useCallback((element, event, handler) => {
@@ -273,32 +234,12 @@ const IPTVPlayer = ({
     };
   }, []);
 
-  // Track global Script errors to detect mpegts.js crashes
-  // These don't trigger normal error handlers due to cross-origin, so we catch them globally
-  useEffect(() => {
-    const handleGlobalError = (event) => {
-      // Only track "Script error" which is what cross-origin errors show as
-      if (event.message === 'Script error.' || event.message === 'Script error') {
-        // Check if we're actively playing (have a channel ID)
-        if (currentChannelIdRef.current && playerInstanceRef.current) {
-          const tooManyErrors = trackScriptError();
-          if (tooManyErrors) {
-            // Too many script errors - stop the player completely
-            console.error('[IPTVPlayer] Stopping player due to repeated Script errors (mpegts.js crash loop)');
-            streamUnstableRef.current = true;
-            cleanupPlayer();
-            setError('Player crashed repeatedly. Try "Find Alternative" or refresh.');
-          }
-        }
-      }
-    };
-
-    window.addEventListener('error', handleGlobalError);
-
-    return () => {
-      window.removeEventListener('error', handleGlobalError);
-    };
-  }, [trackScriptError]);
+  // NOTE: We do NOT use global window error handlers to crash players
+  // Global "Script error" events can't tell us WHICH player failed
+  // Instead, we rely on per-player error handling:
+  // 1. player.on(mpegts.Events.ERROR) - fires for the specific player that errored
+  // 2. player.on(mpegts.Events.LOADING_COMPLETE) - fires when stream ends
+  // 3. Health check (stale detection) - catches frozen/dead streams per-player
 
   // Try to load EPG data when channel changes
   // Skip in theatre mode (multi-view) since EPG overlay is not shown
@@ -652,12 +593,16 @@ const IPTVPlayer = ({
     if (theatreMode && window.iptvRecoveryQueue.globalPaused) {
       log('info', 'Global recovery paused - too many failures across all streams');
       setError('Multiple streams failing. Please wait or refresh the page.');
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
     // Check if stream has been marked as chronically unstable
     if (streamUnstableRef.current) {
       log('info', 'Stream marked as unstable, not attempting recovery');
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -665,6 +610,8 @@ const IPTVPlayer = ({
     if (isStreamChronicallyUnstable()) {
       setError('Stream is unstable. Try "Find Alternative" or refresh the page.');
       isRecoveringRef.current = false;
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -672,6 +619,8 @@ const IPTVPlayer = ({
     if (theatreMode && !checkGlobalRecoveryLimits()) {
       setError('Too many stream failures. Please wait or refresh the page.');
       isRecoveringRef.current = false;
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -681,6 +630,8 @@ const IPTVPlayer = ({
       log('error', `Maximum total recovery attempts (${MAX_TOTAL_RECOVERY_ATTEMPTS}) exceeded - giving up`);
       setError('Stream unavailable after multiple recovery attempts. Please refresh the page.');
       isRecoveringRef.current = false;
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -802,6 +753,8 @@ const IPTVPlayer = ({
             } else {
               log('error', 'Recovery timeout and all retries exhausted');
               setError('Stream unavailable. Please try another channel or refresh the page.');
+              // Notify parent for auto-recovery in multi-view
+              notifyStreamDead('timeout_exhausted');
             }
           }
         }, recoveryTimeout);
@@ -878,6 +831,8 @@ const IPTVPlayer = ({
             } else {
               log('error', 'Fresh start timeout and all fresh starts exhausted');
               setError('Stream unavailable. Please try another channel or refresh the page.');
+              // Notify parent for auto-recovery in multi-view
+              notifyStreamDead('fresh_start_exhausted');
             }
           }
         }, freshStartTimeout);
@@ -907,6 +862,8 @@ const IPTVPlayer = ({
       log('error', `Stream failed after ${MAX_RETRIES} retries and ${MAX_FRESH_STARTS} fresh starts`);
       setError('Stream unavailable. Please try another channel or refresh the page.');
       clearRecoveryState(true); // Decrement activeRecoveries since we're done
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
     }
   };
 
@@ -931,12 +888,16 @@ const IPTVPlayer = ({
     if (theatreMode && window.iptvRecoveryQueue.globalPaused) {
       log('info', 'Global recovery paused - too many failures across all streams');
       setError('Multiple streams failing. Please wait or refresh the page.');
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
     // Check if stream has been marked as chronically unstable
     if (streamUnstableRef.current) {
       log('info', 'Stream marked as unstable, not attempting soft recovery');
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -944,6 +905,8 @@ const IPTVPlayer = ({
     if (isStreamChronicallyUnstable()) {
       setError('Stream is unstable. Try "Find Alternative" or refresh the page.');
       isRecoveringRef.current = false;
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -951,6 +914,8 @@ const IPTVPlayer = ({
     if (theatreMode && !checkGlobalRecoveryLimits()) {
       setError('Too many stream failures. Please wait or refresh the page.');
       isRecoveringRef.current = false;
+      // Notify parent for auto-recovery in multi-view
+      notifyStreamDead();
       return;
     }
 
@@ -1120,7 +1085,8 @@ const IPTVPlayer = ({
         // When using resilient proxy, don't trigger frontend recovery - backend handles it
         // Just show the error if the stream completely ended
         if (shouldUseResilientProxy) {
-          setError('Stream ended. Try "Find Alternative" or refresh.');
+          setError('Stream ended. Finding alternative...');
+          notifyStreamDead('ended');
           return;
         }
 
@@ -1152,13 +1118,15 @@ const IPTVPlayer = ({
           // When using resilient proxy, backend handles reconnection
           // Only show error if frozen for a very long time (backend should have reconnected by now)
           if (shouldUseResilientProxy) {
-            // CRITICAL: If stream has been stale for too long (2+ minutes), completely stop the player
-            // This prevents mpegts.js from crashing repeatedly on dead streams
+            // CRITICAL: If stream has been stale for too long (2 min), completely stop the player
+            // This prevents resource exhaustion from dead streams
             if (timeSinceLastPlaying >= MAX_STALE_TIME_MS) {
               log('error', `Stream dead for ${Math.round(timeSinceLastPlaying / 1000)}s - completely stopping player`);
               streamUnstableRef.current = true; // Mark as unstable to prevent recovery
               cleanupPlayer(); // Completely stop mpegts.js to prevent crash loops
-              setError('Stream unavailable. The stream has been dead for too long. Try "Find Alternative" or refresh.');
+              setError('Stream unavailable. Finding alternative...');
+              // Notify parent to find alternative stream automatically
+              notifyStreamDead('stale');
               return;
             }
 
@@ -1213,8 +1181,8 @@ const IPTVPlayer = ({
     softRecoveryCountRef.current = 0; // Reset soft recovery counter for new channel
     recoveryTimestampsRef.current = []; // Clear recovery history for new channel
     streamUnstableRef.current = false; // Clear unstable flag for new channel
+    hasCalledOnStreamDeadRef.current = false; // Reset onStreamDead guard for new channel
     currentChannelIdRef.current = newChannelId; // Track current channel
-    clearScriptErrors(); // Clear script error count for new channel
 
     if (!containerRef.current) {
       log('error', 'Player container not available');
@@ -1357,9 +1325,6 @@ const IPTVPlayer = ({
         setLoading(false);
         setError(null);
         setRecoveryStatus(null); // Clear recovery status on initial playback
-
-        // Clear script error count - stream is playing successfully
-        clearScriptErrors();
 
         // Cancel recovery timeout if it exists
         if (recoveryTimeoutRef.current) {
@@ -1667,8 +1632,10 @@ const IPTVPlayer = ({
               errorMsg.includes('stack') ||
               errorDetail === 'Exception') {
             log('error', 'Fatal internal error - not attempting recovery', { errorMsg });
-            setError('Stream data is corrupted. Try "Find Alternative" or another channel.');
+            setError('Stream corrupted. Finding alternative...');
             streamUnstableRef.current = true; // Mark as unstable to prevent any recovery
+            // Notify parent to find alternative stream automatically
+            notifyStreamDead('corrupted');
             return;
           }
 
@@ -1690,7 +1657,8 @@ const IPTVPlayer = ({
           // In this case, just show the error - don't attempt frontend-level recovery
           if (shouldUseResilientProxy) {
             log('info', 'Using resilient proxy - backend retry exhausted, showing error');
-            setError(`${errorContext}. Backend retries exhausted. Try "Find Alternative" or refresh.`);
+            setError(`${errorContext}. Finding alternative...`);
+            notifyStreamDead('exhausted');
             return;
           }
 
@@ -1713,7 +1681,8 @@ const IPTVPlayer = ({
           // Don't attempt frontend recovery - just show the error
           if (shouldUseResilientProxy) {
             log('info', 'Using resilient proxy - backend connection closed, showing error');
-            setError('Stream ended. Backend retries exhausted. Try "Find Alternative" or refresh.');
+            setError('Stream ended. Finding alternative...');
+            notifyStreamDead('closed');
             return;
           }
 
@@ -1744,9 +1713,6 @@ const IPTVPlayer = ({
           setError(null);
           setRecoveryStatus(null); // Clear recovery status on initial playback
 
-          // Clear script error count - stream is playing successfully
-          clearScriptErrors();
-
           // Cancel recovery timeout if it exists
           if (recoveryTimeoutRef.current) {
             clearTimeout(recoveryTimeoutRef.current);
@@ -1767,6 +1733,9 @@ const IPTVPlayer = ({
 
           // CRITICAL: Reset initialization lock when player successfully starts
           isInitializingRef.current = false;
+
+          // Reset the onStreamDead guard - stream is now playing, allow future dead notifications
+          hasCalledOnStreamDeadRef.current = false;
 
           // Notify parent that stream is playing (for auto-test mode)
           if (onStreamPlaying) {

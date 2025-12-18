@@ -276,26 +276,27 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 // Connection pooling agents for efficient HTTP/HTTPS requests
-// Increased limits to handle multi-view with many concurrent streams
+// CRITICAL: Keep socket limits LOW to prevent network exhaustion
+// Multi-view with 6 streams only needs 6-12 connections total
 const httpAgent = new http.Agent({
   keepAlive: true,           // Reuse connections
-  maxSockets: 50,            // Max 50 concurrent connections per host (increased for multi-view)
-  maxFreeSockets: 10,        // Keep 10 idle connections ready for reuse
-  timeout: 30000,            // 30 second socket timeout (reduced to release stuck sockets faster)
-  keepAliveMsecs: 10000,     // Send keep-alive packets every 10s
+  maxSockets: 15,            // Max 15 concurrent connections per host (reduced to prevent exhaustion)
+  maxFreeSockets: 5,         // Keep 5 idle connections ready for reuse
+  timeout: 20000,            // 20 second socket timeout (faster release of stuck sockets)
+  keepAliveMsecs: 5000,      // Send keep-alive packets every 5s
   scheduling: 'fifo'         // First-in-first-out for fair socket allocation
 });
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 50,
-  maxFreeSockets: 10,
-  timeout: 30000,
-  keepAliveMsecs: 10000,
+  maxSockets: 15,
+  maxFreeSockets: 5,
+  timeout: 20000,
+  keepAliveMsecs: 5000,
   scheduling: 'fifo'
 });
 
-logger.info('HTTP/HTTPS connection pooling enabled (maxSockets: 50, keepAlive: true)');
+logger.info('HTTP/HTTPS connection pooling enabled (maxSockets: 15, keepAlive: true)');
 
 /**
  * GET /:sessionId/:channelId
@@ -1138,6 +1139,12 @@ async function createResilientStreamConnection(streamUrl, streamKey, channel, re
             if (timeSinceData > RESILIENT_CONFIG.staleDataThreshold) {
                 logger.warn(`[RESILIENT ${streamKey}] Stream stale (no data for ${timeSinceData}ms), attempting reconnect`);
 
+                // CRITICAL: Clear health check timer BEFORE reconnecting to prevent timer accumulation
+                if (state.healthCheckTimer) {
+                    clearInterval(state.healthCheckTimer);
+                    state.healthCheckTimer = null;
+                }
+
                 // Destroy current connection and reconnect
                 if (state.currentBody) {
                     state.currentBody.destroy();
@@ -1579,19 +1586,24 @@ function sseHeaders(req, res, next) {
     }
   }, 30000); // Every 30 seconds
   
-  // Clean up on client disconnect
-  req.on('close', () => {
+  // Cleanup function to ensure interval is cleared (runs only once)
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     clearInterval(heartbeatInterval);
-    
-    // Get the sessionId from params - check for null or invalid values
     const sessionId = req.params.sessionId || null;
     if (sessionId && sessionId !== 'null' && sessionId !== 'undefined') {
       removeSSEClient(sessionId, res);
-    } else {
-      logger.warn('Client disconnected with invalid session ID');
     }
-  });
-  
+  };
+
+  // Clean up on client disconnect - multiple event handlers for safety
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('error', cleanup);
+  res.on('finish', cleanup);
+
   next();
 }
 
@@ -1638,6 +1650,7 @@ router.get('/:sessionId', sseHeaders, (req, res) => {
 
 // Store active HLS transcoding sessions
 const hlsSessions = new Map();
+const MAX_HLS_SESSIONS = 10; // Maximum concurrent HLS sessions to prevent resource exhaustion
 
 // Clean up HLS session
 function cleanupHLSSession(sessionKey) {
@@ -1696,6 +1709,12 @@ router.get('/:sessionId/:channelId/hls.m3u8', authMiddleware, async (req, res) =
     let hlsSession = hlsSessions.get(sessionKey);
 
     if (!hlsSession) {
+      // Check if we've hit the max session limit
+      if (hlsSessions.size >= MAX_HLS_SESSIONS) {
+        logger.warn(`Max HLS sessions (${MAX_HLS_SESSIONS}) reached, rejecting new session`);
+        return res.status(503).json({ error: 'Too many active HLS sessions, please try again later' });
+      }
+
       logger.info(`Creating new HLS transcoding session for ${sessionKey}`);
 
       // Create temporary directory for HLS segments

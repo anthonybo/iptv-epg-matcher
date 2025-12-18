@@ -71,6 +71,17 @@ const MultiViewPage = ({ sessionId }) => {
   // Find alternative stream state
   const [findingAlternativeFor, setFindingAlternativeFor] = useState(null);
 
+  // Auto-find alternative rate limiting to prevent network exhaustion
+  const autoFindRateLimitRef = useRef({
+    lastAutoFind: 0,
+    autoFindCount: 0,
+    windowStart: 0,
+    cooldownMs: 10000,      // 10 seconds between auto-finds
+    maxAutoFinds: 3,        // Max 3 auto-finds per minute
+    windowMs: 60000,        // 1 minute window
+    isPaused: false         // Emergency pause
+  });
+
   // Local news state
   const [searchingNews, setSearchingNews] = useState(false);
 
@@ -785,8 +796,57 @@ const MultiViewPage = ({ sessionId }) => {
     }
   };
 
-  const handleFindAlternative = async (stream) => {
+  const handleFindAlternative = async (stream, isAutomatic = false) => {
     const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
+
+    // Rate limiting for automatic (onStreamDead) calls to prevent network exhaustion
+    if (isAutomatic) {
+      const rateLimit = autoFindRateLimitRef.current;
+      const now = Date.now();
+
+      // Check if paused
+      if (rateLimit.isPaused) {
+        console.log('[Find Alternative] Auto-find paused due to too many failures');
+        return;
+      }
+
+      // Check cooldown
+      if (now - rateLimit.lastAutoFind < rateLimit.cooldownMs) {
+        console.log(`[Find Alternative] Rate limited - cooldown (${Math.round((rateLimit.cooldownMs - (now - rateLimit.lastAutoFind)) / 1000)}s remaining)`);
+        return;
+      }
+
+      // Check window limit
+      if (now - rateLimit.windowStart > rateLimit.windowMs) {
+        // Reset window
+        rateLimit.windowStart = now;
+        rateLimit.autoFindCount = 0;
+      }
+
+      if (rateLimit.autoFindCount >= rateLimit.maxAutoFinds) {
+        console.log(`[Find Alternative] Rate limited - max ${rateLimit.maxAutoFinds} auto-finds per minute reached`);
+        rateLimit.isPaused = true;
+        // Auto-unpause after 2 minutes
+        setTimeout(() => {
+          rateLimit.isPaused = false;
+          rateLimit.autoFindCount = 0;
+          console.log('[Find Alternative] Auto-find unpaused');
+        }, 120000);
+        return;
+      }
+
+      // Update rate limit tracking
+      rateLimit.lastAutoFind = now;
+      rateLimit.autoFindCount++;
+      console.log(`[Find Alternative] Auto-find triggered (${rateLimit.autoFindCount}/${rateLimit.maxAutoFinds} this window)`);
+    }
+
+    // Already finding alternative for another stream - skip
+    if (findingAlternativeFor && findingAlternativeFor !== streamKey) {
+      console.log(`[Find Alternative] Already finding alternative for another stream, skipping ${stream.name}`);
+      return;
+    }
+
     setFindingAlternativeFor(streamKey);
 
     try {

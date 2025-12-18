@@ -147,7 +147,8 @@ const MultiViewGrid = ({
                   isFindingAlternative={findingAlternativeFor === streamKey}
                   onToggleMute={() => onToggleMute(streamKey)}
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
-                  onFindAlternative={() => onFindAlternative(stream)}
+                  onFindAlternative={() => onFindAlternative(stream, false)}
+                  onStreamDead={() => onFindAlternative(stream, true)}
                   onBlacklist={() => onBlacklist(stream.name)}
                   onRemove={() => onRemove(stream.id, stream.sourceId)}
                   onQualityDetected={(quality) => onQualityDetected(streamKey, quality)}

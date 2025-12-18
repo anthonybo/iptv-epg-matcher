@@ -169,6 +169,7 @@ const StreamCellInner = memo(({
   onToggleMute,
   onRefresh,
   onFindAlternative,
+  onStreamDead,
   onBlacklist,
   onRemove,
   onQualityDetected,
@@ -301,6 +302,7 @@ const StreamCellInner = memo(({
           theatreMode={true}
           muted={isMuted}
           onQualityDetected={onQualityDetected}
+          onStreamDead={onStreamDead}
           useResilientProxy={true} // Always use backend retry for multi-view streams
         />
       </div>
@@ -331,6 +333,7 @@ export const SortableStreamCell = ({
   onToggleMute,
   onRefresh,
   onFindAlternative,
+  onStreamDead,
   onBlacklist,
   onRemove,
   onQualityDetected
@@ -369,6 +372,7 @@ export const SortableStreamCell = ({
         onToggleMute={onToggleMute}
         onRefresh={onRefresh}
         onFindAlternative={onFindAlternative}
+        onStreamDead={onStreamDead}
         onBlacklist={onBlacklist}
         onRemove={onRemove}
         onQualityDetected={onQualityDetected}
