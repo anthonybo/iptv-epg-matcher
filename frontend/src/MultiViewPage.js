@@ -71,6 +71,9 @@ const MultiViewPage = ({ sessionId }) => {
   // Find alternative stream state
   const [findingAlternativeFor, setFindingAlternativeFor] = useState(null);
 
+  // Track exhausted searches - when a search exhausts, reset offset to 0 on next attempt
+  const exhaustedSearchesRef = useRef(new Set());
+
   // Auto-find alternative rate limiting to prevent network exhaustion
   const autoFindRateLimitRef = useRef({
     lastAutoFind: 0,
@@ -851,12 +854,13 @@ const MultiViewPage = ({ sessionId }) => {
 
     try {
       // Exclude sources already in use in multiview (one source = one stream)
+      // This is required because some sources (especially stalker) only allow one concurrent stream
       let excludeSourceIds = [];
       if (stream.sourceId) {
         excludeSourceIds.push(stream.sourceId);
       }
 
-      // Always exclude other sources in multiview - one source per stream
+      // Also exclude other sources in multiview to maintain one source per stream rule
       const otherSourceIds = streams
         .filter(s => s.id !== stream.id || s.sourceId !== stream.sourceId)
         .map(s => s.sourceId)
@@ -876,6 +880,7 @@ const MultiViewPage = ({ sessionId }) => {
       // Use stored search query or event name if available, otherwise extract from channel name
       // Priority: searchQuery > espnEventName > cleaned channel name
       let searchName = stream.searchQuery || stream.espnEventName;
+      // Use stored offset to continue from where we left off
       let searchOffset = stream.searchOffset || 0;
 
       if (!searchName) {
@@ -903,6 +908,14 @@ const MultiViewPage = ({ sessionId }) => {
         searchOffset = 0;
       }
 
+      // If this search query was previously exhausted, reset to 0 and try again
+      const searchKey = searchName.toLowerCase();
+      if (exhaustedSearchesRef.current.has(searchKey)) {
+        console.log(`[Find Alternative] Previous search for "${searchName}" was exhausted, resetting to offset 0`);
+        searchOffset = 0;
+        exhaustedSearchesRef.current.delete(searchKey);
+      }
+
       console.log(`[Find Alternative] Stream data: searchQuery="${stream.searchQuery}", espnEventName="${stream.espnEventName}", name="${stream.name}"`);
       console.log(`[Find Alternative] Searching for "${searchName}" starting at offset ${searchOffset}`);
 
@@ -924,6 +937,9 @@ const MultiViewPage = ({ sessionId }) => {
       const data = await response.json();
 
       if (data.success && data.channel) {
+        // Clear exhausted flag since we found a working channel
+        exhaustedSearchesRef.current.delete(searchKey);
+
         const removeSuccess = await removeFromMultiview(stream.id, stream.sourceId);
         if (removeSuccess) {
           // Update local state immediately to unmount the old player
@@ -948,6 +964,9 @@ const MultiViewPage = ({ sessionId }) => {
           showToast('Failed to add replacement channel', 'error');
         }
       } else {
+        // Mark this search as exhausted so next attempt starts from 0
+        exhaustedSearchesRef.current.add(searchKey);
+        console.log(`[Find Alternative] Search exhausted for "${searchName}", will reset offset on next attempt`);
         showToast(data.message || 'No alternative channel found', 'error');
       }
     } catch (error) {

@@ -1293,11 +1293,20 @@ router.post('/search-channel', async (req, res) => {
 
         channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-        const minScore = 35;
+        // For event searches with both teams, require higher relevance to avoid
+        // false positives like "Louisville" matching "Louis" or "Yorkshire" matching "York"
+        // Score 200 = at least one full team name matched, or both teams partially matched
+        // Score 100 = only one partial match (too loose for event searches)
+        const minScore = (homeTeam && awayTeam) ? 200 : 100;
+        const beforeFilter = channels.length;
         channels = channels.filter(c => c.relevanceScore >= minScore);
 
+        if (beforeFilter > channels.length) {
+          logger.info(`[Batch ${batchNum + 1}] Filtered ${beforeFilter - channels.length} low-relevance channels (minScore: ${minScore})`);
+        }
+
         if (channels.length === 0) {
-          logger.info(`[Batch ${batchNum + 1}] All channels filtered by relevance, fetching next batch...`);
+          logger.info(`[Batch ${batchNum + 1}] All channels filtered by relevance (minScore: ${minScore}), fetching next batch...`);
           currentDbOffset += BATCH_SIZE;
           continue;
         }
