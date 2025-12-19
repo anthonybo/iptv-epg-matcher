@@ -924,7 +924,20 @@ const MultiViewPage = ({ sessionId }) => {
       const data = await response.json();
 
       if (data.success && data.channel) {
-        await removeFromMultiview(stream.id, stream.sourceId);
+        const removeSuccess = await removeFromMultiview(stream.id, stream.sourceId);
+        if (removeSuccess) {
+          // Update local state immediately to unmount the old player
+          setStreams(prevStreams => prevStreams.filter(
+            s => !(s.id === stream.id && s.sourceId === stream.sourceId)
+          ));
+          // Clean up quality tracking for removed stream
+          const streamKey = `${stream.sourceId}_${stream.id}`;
+          setStreamQualities(prev => {
+            const { [streamKey]: removed, ...rest } = prev;
+            return rest;
+          });
+        }
+
         const success = await addToMultiview(data.channel);
 
         if (success) {

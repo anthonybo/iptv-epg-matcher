@@ -1043,6 +1043,8 @@ router.post('/random-any-channel', async (req, res) => {
  * POST /api/live-events/search-channel
  * Search for a channel by name and return a working stream
  * Avoids sources already in use in multiview
+ * Uses incremental batching - fetches 50 channels at a time, tests them,
+ * and continues fetching more batches until a working stream is found or all exhausted
  */
 router.post('/search-channel', async (req, res) => {
   try {
@@ -1063,9 +1065,10 @@ router.post('/search-channel', async (req, res) => {
 
     const searchQuery = query.trim();
     const minHeight = parseInt(minQuality) || 0;
-    const offset = parseInt(searchOffset) || 0;
+    const startOffset = parseInt(searchOffset) || 0;
 
-    logger.info(`[Find Alternative] Received search request: query="${searchQuery}", offset=${offset}, minQuality=${minHeight}p`);
+    logger.info(`[Find Alternative] Received search request: query="${searchQuery}", offset=${startOffset}, minQuality=${minHeight}p`);
+
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(
       'SELECT channel_name FROM blacklisted_channels WHERE user_id = $1',
@@ -1074,14 +1077,12 @@ router.post('/search-channel', async (req, res) => {
     const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
 
     // Extract search terms using fuzzy matching logic (handles event names like "Temple Owls at Villanova Wildcats")
-    // Check if query looks like an event name (contains "at" or "vs" between teams)
     const eventMatch = searchQuery.match(/^(.+?)\s+(?:at|vs\.?|@)\s+(.+?)$/i);
     let searchTerms;
     let homeTeam = null;
     let awayTeam = null;
 
     if (eventMatch) {
-      // Query is an event name - extract team search terms
       awayTeam = eventMatch[1].trim();
       homeTeam = eventMatch[2].trim();
       const homeTerms = extractSearchTerms(homeTeam);
@@ -1089,40 +1090,20 @@ router.post('/search-channel', async (req, res) => {
       searchTerms = [...new Set([...homeTerms, ...awayTerms])];
       logger.info(`Search channel: Detected event format - home: "${homeTeam}", away: "${awayTeam}", terms: ${searchTerms.join(', ')}`);
     } else {
-      // Simple search - just use the full query as a single search term
-      // Don't break it apart or we'll match "network" in "NHL Network" to everything
       searchTerms = [searchQuery];
       logger.info(`Search channel: Simple search for "${searchQuery}"`);
     }
 
     logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
 
-    // For event searches, prioritize team mascots/nicknames (last word of team name)
-    // e.g., "Anaheim Ducks" -> prioritize "Ducks", "St. Louis Blues" -> prioritize "Blues"
-    let priorityTerms = [];
-    if (homeTeam && awayTeam) {
-      const homeWords = homeTeam.split(/\s+/);
-      const awayWords = awayTeam.split(/\s+/);
-      // Last word is usually the mascot/nickname
-      if (homeWords.length > 0) priorityTerms.push(homeWords[homeWords.length - 1]);
-      if (awayWords.length > 0) priorityTerms.push(awayWords[awayWords.length - 1]);
-      // Filter out short words
-      priorityTerms = priorityTerms.filter(t => t.length >= 4);
-      logger.info(`Priority search terms (mascots): ${priorityTerms.join(', ')}`);
-    }
+    // Build base query parameters (without LIMIT/OFFSET which will be added per batch)
+    const channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+    const searchParams = searchTerms.map(term => `%${term}%`);
+    let baseQueryParams = [userId, ...searchParams];
 
-    // Build query - use ALL search terms (same as autofill) for better coverage
-    let channelConditions;
-    let searchParams;
-    // Use all search terms for matching, not just mascots
-    channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
-    searchParams = searchTerms.map(term => `%${term}%`);
-    let queryParams = [userId, ...searchParams];
-
-    // Build scoring conditions for SQL - only used for event searches (same as autofill)
+    // Build scoring conditions for SQL
     let scoringCase = null;
     if (homeTeam && awayTeam) {
-      // Event search - prioritize channels with both teams
       scoringCase = 'CASE ';
       scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') AND LOWER(c.name) LIKE LOWER('%${awayTeam.replace(/'/g, "''")}%') THEN 3 `;
       scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') THEN 2 `;
@@ -1132,127 +1113,33 @@ router.post('/search-channel', async (req, res) => {
     // Build source exclusion clause
     let sourceExclusion = '';
     if (excludeSourceIds.length > 0) {
-      const sourceParamIndex = queryParams.length + 1;
+      const sourceParamIndex = baseQueryParams.length + 1;
       const sourcePlaceholders = excludeSourceIds.map((_, i) => `$${sourceParamIndex + i}`).join(', ');
       sourceExclusion = `AND s.id NOT IN (${sourcePlaceholders})`;
-      queryParams.push(...excludeSourceIds);
+      baseQueryParams.push(...excludeSourceIds);
     }
 
     // Build channel exclusion clause
     let channelExclusion = '';
     if (excludeChannelIds.length > 0) {
-      const channelParamIndex = queryParams.length + 1;
+      const channelParamIndex = baseQueryParams.length + 1;
       const channelPlaceholders = excludeChannelIds.map((_, i) => `$${channelParamIndex + i}`).join(', ');
       channelExclusion = `AND c.channel_id NOT IN (${channelPlaceholders})`;
-      queryParams.push(...excludeChannelIds);
+      baseQueryParams.push(...excludeChannelIds);
     }
 
     // Build blacklist conditions
     let blacklistConditions = '1=1';
     if (blacklistedChannels.length > 0) {
-      const startParamIndex = queryParams.length + 1;
+      const startParamIndex = baseQueryParams.length + 1;
       const blacklistPlaceholders = blacklistedChannels.map((name, i) => {
         return `c.name != $${startParamIndex + i}`;
       });
-      queryParams.push(...blacklistedChannels);
+      baseQueryParams.push(...blacklistedChannels);
       blacklistConditions = blacklistPlaceholders.join(' AND ');
     }
 
-    // Search for matching channels using OR conditions for all search terms
-    // Use scoring case to prioritize channels matching both teams (only for event searches)
     const orderClause = scoringCase ? `${scoringCase} DESC, c.name` : 'c.name';
-    const channelsResult = await postgresService.query(`
-      SELECT
-        c.channel_id as id,
-        c.name,
-        c.logo_url as logo,
-        c.stream_url as url,
-        c.tvg_id as epg_channel_id,
-        c.group_title as category,
-        s.id as source_id,
-        s.name as source_name,
-        s.type as source_type,
-        s.url as source_url,
-        s.username as source_username,
-        s.password as source_password,
-        s.mac_address as source_mac
-      FROM iptv_channels c
-      JOIN iptv_sources s ON c.source_id = s.id
-      WHERE s.user_id = $1
-        AND (${channelConditions})
-        ${sourceExclusion}
-        ${channelExclusion}
-        AND ${blacklistConditions}
-      ORDER BY ${orderClause}
-      LIMIT 50
-    `, queryParams);
-
-    let channels = channelsResult.rows || [];
-
-    if (channels.length === 0) {
-      return res.json({
-        success: false,
-        error: 'No channels found',
-        message: `No channels found matching "${searchQuery}"`
-      });
-    }
-
-    // Only apply relevance scoring if we detected an event format (homeTeam/awayTeam set)
-    // For simple searches, all channels matched the SQL ILIKE so they're all relevant
-    if (homeTeam || awayTeam) {
-      // Score and sort channels using fuzzy relevance scoring
-      channels = channels.map(channel => {
-        const score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
-        return { ...channel, relevanceScore: score };
-      });
-
-      // Sort by relevance score (highest first) and filter low-relevance channels
-      channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
-
-      // Log top scoring channels for debugging
-      if (channels.length > 0) {
-        const topChannels = channels.slice(0, 10).map(c => `${c.name.substring(0, 50)}: ${c.relevanceScore}`);
-        logger.info(`Top scoring channels: ${topChannels.join(' | ')}`);
-      }
-
-      // For event searches (both teams specified), filter low-relevance channels
-      // Score >= 200 means both teams matched (ideal)
-      // Score >= 100 means at least one full team matched
-      // Score >= 35 means fuzzy match found (same threshold as autofill)
-      // Filter out low scores but also prioritize high scores by testing them first
-      const minScore = 35; // Same as autofill for consistency
-      channels = channels.filter(c => c.relevanceScore >= minScore);
-
-      logger.info(`Filtered channels with minScore=${minScore}: ${channels.length} remaining (top score: ${channels[0]?.relevanceScore || 0})`);
-
-      if (channels.length === 0) {
-        return res.json({
-          success: false,
-          error: 'No relevant channels found',
-          message: `No channels found matching "${searchQuery}" (all filtered by relevance)`
-        });
-      }
-
-      logger.info(`Found ${channels.length} relevant channels matching "${searchQuery}" (top score: ${channels[0]?.relevanceScore}), testing streams...`);
-    } else {
-      logger.info(`Found ${channels.length} channels matching "${searchQuery}", testing streams...`);
-    }
-
-    // Apply offset for pagination (skip already-tried channels)
-    if (offset > 0) {
-      channels = channels.slice(offset);
-    }
-
-    if (channels.length === 0) {
-      return res.json({
-        success: false,
-        error: 'No more channels to try',
-        message: `All channels for "${searchQuery}" have been tried`
-      });
-    }
-
-    // Test streams using ffprobe validation
-    const PARALLEL_TESTS = 5; // Test 5 channels at a time for faster results
 
     // Helper function to test a single channel
     const testSingleChannel = async (channel, index) => {
@@ -1287,7 +1174,6 @@ router.post('/search-channel', async (req, res) => {
               if (match && match[1]) {
                 let freshUrl = match[1];
 
-                // Fix empty stream parameter
                 const originalCmdMatch = testUrl.match(/cmd=([^&]+)/);
                 if (originalCmdMatch) {
                   const originalCmd = decodeURIComponent(originalCmdMatch[1]);
@@ -1305,13 +1191,13 @@ router.post('/search-channel', async (req, res) => {
           }
         }
 
-        // Validate with ffprobe - use shorter timeout for faster results
+        // Validate with ffprobe
         const ffprobeArgs = [
           '-v', 'error',
           '-print_format', 'json',
           '-show_streams',
           '-read_intervals', '%+#1',
-          '-timeout', '5000000'  // 5 seconds (was 8)
+          '-timeout', '5000000'
         ];
 
         if (channel.source_type === 'stalker') {
@@ -1321,7 +1207,7 @@ router.post('/search-channel', async (req, res) => {
         ffprobeArgs.push(testUrl);
 
         const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
-          timeout: 5000,  // 5 seconds (was 8)
+          timeout: 5000,
           maxBuffer: 1024 * 1024
         });
 
@@ -1329,7 +1215,6 @@ router.post('/search-channel', async (req, res) => {
         const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
         const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
 
-        // MUST have video - audio-only streams (like radio) are not valid for IPTV
         if (videoStream) {
           const streamHeight = videoStream.height || 0;
           return { success: true, height: streamHeight, hasAudio, channel, index };
@@ -1341,71 +1226,174 @@ router.post('/search-channel', async (req, res) => {
       }
     };
 
-    // Test channels in parallel with concurrency limit
-    for (let i = 0; i < channels.length; i += PARALLEL_TESTS) {
-      const chunk = channels.slice(i, i + PARALLEL_TESTS);
-      const results = await Promise.all(chunk.map((channel, chunkIndex) => {
-        const globalIndex = i + chunkIndex;
-        logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
-        return testSingleChannel(channel, globalIndex);
-      }));
+    // Incremental batch processing
+    const BATCH_SIZE = 50;
+    const PARALLEL_TESTS = 5;
+    const MAX_BATCHES = 20; // Safety limit: 20 batches = 1000 channels max
+    let currentDbOffset = startOffset;
+    let totalChannelsTested = 0;
+    let totalChannelsMatched = 0;
+    let lowQualitySkipped = 0;
 
-      // Check results for a working channel (prioritize by original index order)
-      const successfulResults = results.filter(r => r.success).sort((a, b) => a.index - b.index);
+    for (let batchNum = 0; batchNum < MAX_BATCHES; batchNum++) {
+      // Fetch next batch from database
+      const limitParamIndex = baseQueryParams.length + 1;
+      const offsetParamIndex = baseQueryParams.length + 2;
+      const batchQueryParams = [...baseQueryParams, BATCH_SIZE, currentDbOffset];
 
-      for (const result of successfulResults) {
-        const channel = result.channel;
-        const streamHeight = result.height;
+      const channelsResult = await postgresService.query(`
+        SELECT
+          c.channel_id as id,
+          c.name,
+          c.logo_url as logo,
+          c.stream_url as url,
+          c.tvg_id as epg_channel_id,
+          c.group_title as category,
+          s.id as source_id,
+          s.name as source_name,
+          s.type as source_type,
+          s.url as source_url,
+          s.username as source_username,
+          s.password as source_password,
+          s.mac_address as source_mac
+        FROM iptv_channels c
+        JOIN iptv_sources s ON c.source_id = s.id
+        WHERE s.user_id = $1
+          AND (${channelConditions})
+          ${sourceExclusion}
+          ${channelExclusion}
+          AND ${blacklistConditions}
+        ORDER BY ${orderClause}
+        LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
+      `, batchQueryParams);
 
-        // Check quality requirement
-        if (minHeight > 0 && streamHeight < minHeight) {
-          logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
+      let channels = channelsResult.rows || [];
+
+      if (channels.length === 0) {
+        // No more channels to fetch
+        if (batchNum === 0) {
+          return res.json({
+            success: false,
+            error: 'No channels found',
+            message: `No channels found matching "${searchQuery}"`
+          });
+        }
+        break;
+      }
+
+      totalChannelsMatched += channels.length;
+      logger.info(`[Batch ${batchNum + 1}] Fetched ${channels.length} channels (offset: ${currentDbOffset})`);
+
+      // Apply relevance scoring for event searches
+      if (homeTeam || awayTeam) {
+        channels = channels.map(channel => {
+          const score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
+          return { ...channel, relevanceScore: score };
+        });
+
+        channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+        const minScore = 35;
+        channels = channels.filter(c => c.relevanceScore >= minScore);
+
+        if (channels.length === 0) {
+          logger.info(`[Batch ${batchNum + 1}] All channels filtered by relevance, fetching next batch...`);
+          currentDbOffset += BATCH_SIZE;
           continue;
         }
 
-        logger.info(`✓ Found working channel: ${channel.name} (${streamHeight}p)`);
-
-        // Next offset = current offset + position in list + 1 (to skip this one next time)
-        const nextSearchOffset = offset + result.index + 1;
-
-        return res.json({
-          success: true,
-          channel: {
-            id: channel.id,
-            name: channel.name,
-            logo: channel.logo,
-            url: channel.url,
-            sourceId: channel.source_id,
-            sourceName: channel.source_name,
-            sourceType: channel.source_type,
-            sourceUrl: channel.source_url,
-            sourceUsername: channel.source_username,
-            sourcePassword: channel.source_password,
-            sourceMac: channel.source_mac,
-            category: channel.category,
-            quality: streamHeight,
-            // Include search metadata for "find alternative" feature
-            searchQuery: searchQuery,
-            searchOffset: nextSearchOffset
-          }
-        });
-      }
-
-      // Log failed results
-      for (const result of results) {
-        if (!result.success) {
-          const channel = channels[result.index];
-          logger.info(`✗ Channel ${channel.name} failed: ${result.reason}`);
+        if (batchNum === 0) {
+          const topChannels = channels.slice(0, 5).map(c => `${c.name.substring(0, 40)}: ${c.relevanceScore}`);
+          logger.info(`Top scoring channels: ${topChannels.join(' | ')}`);
         }
       }
+
+      // Test channels in parallel batches
+      for (let i = 0; i < channels.length; i += PARALLEL_TESTS) {
+        const chunk = channels.slice(i, i + PARALLEL_TESTS);
+        const results = await Promise.all(chunk.map((channel, chunkIndex) => {
+          const globalIndex = i + chunkIndex;
+          logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+          return testSingleChannel(channel, globalIndex);
+        }));
+
+        totalChannelsTested += chunk.length;
+
+        // Check results for a working channel
+        const successfulResults = results.filter(r => r.success).sort((a, b) => a.index - b.index);
+
+        for (const result of successfulResults) {
+          const channel = result.channel;
+          const streamHeight = result.height;
+
+          // Check quality requirement
+          if (minHeight > 0 && streamHeight < minHeight) {
+            logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
+            lowQualitySkipped++;
+            continue;
+          }
+
+          logger.info(`✓ Found working channel: ${channel.name} (${streamHeight}p) after testing ${totalChannelsTested} channels`);
+
+          // Calculate next offset for future searches
+          const nextSearchOffset = currentDbOffset + i + result.index + 1;
+
+          return res.json({
+            success: true,
+            channel: {
+              id: channel.id,
+              name: channel.name,
+              logo: channel.logo,
+              url: channel.url,
+              sourceId: channel.source_id,
+              sourceName: channel.source_name,
+              sourceType: channel.source_type,
+              sourceUrl: channel.source_url,
+              sourceUsername: channel.source_username,
+              sourcePassword: channel.source_password,
+              sourceMac: channel.source_mac,
+              category: channel.category,
+              quality: streamHeight,
+              searchQuery: searchQuery,
+              searchOffset: nextSearchOffset
+            }
+          });
+        }
+
+        // Log failed results
+        for (const result of results) {
+          if (!result.success) {
+            const channel = channels[result.index];
+            if (channel) {
+              logger.info(`✗ Channel ${channel.name} failed: ${result.reason}`);
+            }
+          }
+        }
+      }
+
+      // Move to next batch
+      currentDbOffset += BATCH_SIZE;
+
+      // If we got fewer than BATCH_SIZE, we've exhausted results
+      if (channelsResult.rows.length < BATCH_SIZE) {
+        break;
+      }
     }
+
+    // Build informative error message
+    let errorMessage;
+    if (lowQualitySkipped > 0 && minHeight > 0) {
+      errorMessage = `Tested ${totalChannelsTested} channels matching "${searchQuery}" - ${lowQualitySkipped} were working but below ${minHeight}p quality`;
+    } else {
+      errorMessage = `Tested ${totalChannelsTested} of ${totalChannelsMatched} channels matching "${searchQuery}" but none were working`;
+    }
+
+    logger.info(`[Find Alternative] Search exhausted: ${errorMessage}`);
 
     return res.json({
       success: false,
       error: 'No working streams found',
-      message: minHeight > 0
-        ? `Found ${channels.length} channels matching "${searchQuery}" but none met the ${minHeight}p quality requirement`
-        : `Found ${channels.length} channels matching "${searchQuery}" but none were working`
+      message: errorMessage
     });
 
   } catch (error) {
