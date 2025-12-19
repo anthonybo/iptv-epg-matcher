@@ -189,6 +189,35 @@ const SettingsModal = ({
             <LocationSelector compact={false} showLabel={true} className="w-full" />
           </div>
 
+          {/* Display Settings Divider */}
+          <div className="border-t border-slate-700 pt-4">
+            <h3 className="text-sm font-medium text-slate-300 mb-4">Display Settings</h3>
+          </div>
+
+          {/* Live Scores Ticker Toggle */}
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="block text-sm font-medium text-slate-300">
+                Live Scores Ticker
+              </label>
+              <p className="text-xs text-slate-500">
+                Show live sports scores at the bottom
+              </p>
+            </div>
+            <button
+              onClick={() => setAutoFillSettings(prev => ({ ...prev, showLiveScoresTicker: !prev.showLiveScoresTicker }))}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                autoFillSettings.showLiveScoresTicker ? 'bg-emerald-600' : 'bg-slate-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  autoFillSettings.showLiveScoresTicker ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
           {/* Current Status */}
           <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700">
             <div className="flex items-center gap-2 text-sm text-slate-400">

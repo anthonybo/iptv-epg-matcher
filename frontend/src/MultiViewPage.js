@@ -19,6 +19,7 @@ import {
   SettingsModal,
   BlacklistModal
 } from './components/MultiView';
+import LiveScoresTicker from './components/LiveScoresTicker';
 
 /**
  * MultiViewPage - Display multiple streams in an auto-layout grid
@@ -53,7 +54,8 @@ const MultiViewPage = ({ sessionId }) => {
       maxSlots: 4,
       avoidDuplicateSources: true,
       avoidDuplicateEvents: true,
-      minQuality: 0
+      minQuality: 0,
+      showLiveScoresTicker: false
     };
     if (saved) {
       const parsed = JSON.parse(saved);
@@ -799,6 +801,84 @@ const MultiViewPage = ({ sessionId }) => {
     }
   };
 
+  // Handle clicking on a live score event in the ticker
+  const handleTickerEventClick = async (score) => {
+    // Check if we're already at max slots
+    if (streams.length >= autoFillSettings.maxSlots) {
+      showToast(`Already at max slots (${autoFillSettings.maxSlots})`, 'info');
+      return;
+    }
+
+    setSearchingStream(true);
+
+    try {
+      const currentSourceIds = autoFillSettings.avoidDuplicateSources
+        ? streams.map(s => s.sourceId).filter(id => id)
+        : [];
+      const currentChannelIds = streams.map(s => s.id).filter(id => id);
+      // Check if we already have this event
+      const currentEventIds = streams.map(s => s.espnEventId).filter(id => id);
+      if (currentEventIds.includes(score.event_id)) {
+        showToast('This game is already in your Multi-View', 'info');
+        setSearchingStream(false);
+        return;
+      }
+
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+
+      if (!token) {
+        showToast('Authentication required', 'error');
+        setSearchingStream(false);
+        return;
+      }
+
+      // Create a search query from the teams - use "Team1 at Team2" format to match backend parsing
+      const searchQuery = `${score.away_team} at ${score.home_team}`;
+
+      const response = await fetch('/api/live-events/search-channel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          query: searchQuery,
+          excludeSourceIds: currentSourceIds,
+          excludeChannelIds: currentChannelIds,
+          minQuality: autoFillSettings.minQuality,
+          espnEventId: score.event_id // Pass event ID for better matching
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success && data.channel) {
+        // Add the event ID to the channel data for duplicate detection
+        const channelWithEvent = {
+          ...data.channel,
+          espnEventId: score.event_id,
+          espnEventName: `${score.away_team} vs ${score.home_team}`
+        };
+
+        const success = await addToMultiview(channelWithEvent);
+        if (success) {
+          window.dispatchEvent(new Event('multiviewUpdate'));
+          const qualityText = data.channel.quality ? ` (${data.channel.quality}p)` : '';
+          showToast(`Added stream for ${score.away_team} vs ${score.home_team}${qualityText}`, 'success');
+        } else {
+          showToast('Failed to add channel to Multi-View', 'error');
+        }
+      } else {
+        showToast(data.message || `No working stream found for ${score.away_team} vs ${score.home_team}`, 'error');
+      }
+    } catch (error) {
+      console.error('[Ticker Event Click] Error:', error);
+      showToast('Failed to find stream for this game', 'error');
+    } finally {
+      setSearchingStream(false);
+    }
+  };
+
   const handleFindAlternative = async (stream, isAutomatic = false) => {
     const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
 
@@ -1122,6 +1202,15 @@ const MultiViewPage = ({ sessionId }) => {
         autoFillSettings={autoFillSettings}
         setAutoFillSettings={setAutoFillSettings}
       />
+
+      {/* Live Scores Ticker */}
+      {autoFillSettings.showLiveScoresTicker && (
+        <LiveScoresTicker
+          position="bottom"
+          updateInterval={60000}
+          onEventClick={handleTickerEventClick}
+        />
+      )}
     </div>
   );
 };

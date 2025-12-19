@@ -30,8 +30,9 @@ function getColorClass(sportType) {
 }
 
 // Render a single score item to HTML string (for DOM injection)
-function renderScoreItem(score) {
+function renderScoreItem(score, clickable = false) {
   const colorClass = getColorClass(score.sport_type);
+  const clickableClass = clickable ? 'cursor-pointer hover:brightness-125 transition-all' : '';
   const liveIndicator = score.is_live
     ? '<span class="h-1.5 w-1.5 rounded-full bg-red-500"></span>'
     : '';
@@ -40,7 +41,7 @@ function renderScoreItem(score) {
     : '';
 
   return `
-    <div class="flex-shrink-0 flex items-center gap-2 rounded border px-3 py-1.5 text-xs ${colorClass}" data-event-id="${score.event_id}">
+    <div class="flex-shrink-0 flex items-center gap-2 rounded border px-3 py-1.5 text-xs ${colorClass} ${clickableClass}" data-event-id="${score.event_id}">
       ${liveIndicator}
       <span class="text-slate-400">${score.league_name}</span>
       <span class="text-slate-200">${score.away_team}</span>
@@ -51,7 +52,7 @@ function renderScoreItem(score) {
   `;
 }
 
-function LiveScoresTicker({ position = 'bottom', updateInterval = 60000 }) {
+function LiveScoresTicker({ position = 'bottom', updateInterval = 60000, onEventClick }) {
   // Only track loading state for initial render - everything else uses refs
   const [isLoading, setIsLoading] = useState(true);
   const [hasScores, setHasScores] = useState(false);
@@ -68,6 +69,10 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000 }) {
   const scoresRef = useRef([]);
   const contentWidthRef = useRef(0);
   const needsRenderRef = useRef(false); // Flag to indicate DOM render needed after ref available
+  const onEventClickRef = useRef(onEventClick);
+
+  // Keep callback ref updated
+  onEventClickRef.current = onEventClick;
 
   // Scroll speed in pixels per second
   const SCROLL_SPEED = 50;
@@ -110,7 +115,8 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000 }) {
     }
 
     // Generate HTML for scores (duplicated for seamless loop)
-    const scoresHtml = scores.map(renderScoreItem).join('');
+    const isClickable = !!onEventClickRef.current;
+    const scoresHtml = scores.map(s => renderScoreItem(s, isClickable)).join('');
     contentRef.current.innerHTML = scoresHtml + scoresHtml;
 
     // Measure content width after render
@@ -279,10 +285,28 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000 }) {
     fetchScores(false);
   }, [fetchScores]);
 
+  // Handle click on score item (event delegation)
+  const handleContentClick = useCallback((e) => {
+    if (!onEventClickRef.current) return;
+
+    // Find the score item element (could click on a child span)
+    const scoreItem = e.target.closest('[data-event-id]');
+    if (!scoreItem) return;
+
+    const eventId = scoreItem.getAttribute('data-event-id');
+    if (!eventId) return;
+
+    // Find the score data from our ref
+    const score = scoresRef.current.find(s => s.event_id === eventId);
+    if (score) {
+      onEventClickRef.current(score);
+    }
+  }, []);
+
   // Don't render if loading or no scores
   if (isLoading) {
     return (
-      <div className={`fixed left-0 right-0 z-40 bg-slate-900/95 border-slate-800 ${position === 'top' ? 'top-0 border-b' : 'bottom-0 border-t'}`}>
+      <div className={`fixed left-0 right-0 z-[60] bg-slate-900/95 border-slate-800 ${position === 'top' ? 'top-0 border-b' : 'bottom-0 border-t'}`}>
         <div className="flex items-center h-12 px-4">
           <span className="text-sm text-slate-400">Loading scores...</span>
         </div>
@@ -300,13 +324,13 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000 }) {
     <div
       id="ticker-body"
       ref={containerRef}
-      className={`fixed left-0 right-0 z-40 bg-slate-900/95 border-slate-800 transition-transform duration-300 ${positionClass} translate-y-0`}
+      className={`fixed left-0 right-0 z-[60] bg-slate-900/95 border-slate-800 transition-transform duration-300 ${positionClass} translate-y-0`}
     >
       {/* Toggle button */}
       <button
         id="ticker-toggle-btn"
         onClick={handleToggleVisibility}
-        className={`absolute ${position === 'top' ? '-bottom-7' : '-top-7'} left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-400 hover:text-slate-200 z-50`}
+        className={`absolute ${position === 'top' ? '-bottom-7' : '-top-7'} left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-400 hover:text-slate-200 z-[61]`}
       >
         Hide
       </button>
@@ -328,6 +352,7 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000 }) {
             ref={contentRef}
             className="inline-flex gap-3 px-4 whitespace-nowrap"
             style={{ willChange: 'transform' }}
+            onClick={handleContentClick}
           />
         </div>
 
