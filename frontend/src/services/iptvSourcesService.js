@@ -152,7 +152,10 @@ class IPTVSourcesService {
    */
   async refreshAccountInfo(sourceId) {
     try {
-      const response = await apiClient.post(`/iptv/sources/${sourceId}/refresh-account-info`);
+      // Use a 10-minute timeout since large sources can take 5+ minutes to process
+      const response = await apiClient.post(`/iptv/sources/${sourceId}/refresh-account-info`, {}, {
+        timeout: 600000 // 10 minutes
+      });
       return response.data;
     } catch (error) {
       console.error('Error refreshing account info:', error);

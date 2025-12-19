@@ -339,6 +339,28 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
 });
 
 /**
+ * Helper function to update refresh status to error in database
+ * Called on all failure paths to ensure consistent error tracking
+ */
+async function updateRefreshStatusError(sourceId, errorMessage, refreshStartTime) {
+    try {
+        const refreshDuration = Date.now() - refreshStartTime;
+        await iptvDatabaseService.pool.query(`
+            UPDATE iptv_sources
+            SET last_refresh_status = 'error',
+                last_refresh_error = $1,
+                last_refresh_attempt = CURRENT_TIMESTAMP,
+                last_refresh_duration_ms = $3,
+                failure_count = COALESCE(failure_count, 0) + 1,
+                last_failure_time = CURRENT_TIMESTAMP
+            WHERE id = $2
+        `, [errorMessage, sourceId, refreshDuration]);
+    } catch (updateError) {
+        logger.error(`Failed to update refresh status: ${updateError.message}`);
+    }
+}
+
+/**
  * POST /api/iptv/sources/:sourceId/refresh-account-info
  * Re-fetch channels and account information from Xtream API or Stalker portal
  */
@@ -358,6 +380,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         logger.info(`[REFRESH DEBUG] Source found: ${JSON.stringify(source, null, 2)}`);
 
         if (!source) {
+            // Source not found - can't update DB status since we don't know if it exists
             return res.status(404).json({
                 success: false,
                 error: 'Source not found'
@@ -399,20 +422,24 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
 
         if (source.type === 'xtream') {
             if (!source.url || !source.username || !source.password) {
-                logger.error('[REFRESH DEBUG] Xtream source validation failed - missing credentials');
+                const errorMsg = 'Xtream source missing required credentials';
+                logger.error(`[REFRESH DEBUG] ${errorMsg}`);
+                await updateRefreshStatusError(sourceId, errorMsg, refreshStartTime);
                 return res.status(400).json({
                     success: false,
-                    error: 'Xtream source missing required credentials'
+                    error: errorMsg
                 });
             }
         } else if (source.type === 'stalker') {
             // Check both mac_address and mac columns (PostgreSQL has both)
             const macAddress = source.mac_address || source.mac;
             if (!source.url || !macAddress) {
+                const errorMsg = 'Stalker source missing required credentials (URL or MAC address)';
                 logger.error(`[REFRESH DEBUG] Stalker source validation failed - url: ${!!source.url}, mac_address: ${!!source.mac_address}, mac: ${!!source.mac}`);
+                await updateRefreshStatusError(sourceId, errorMsg, refreshStartTime);
                 return res.status(400).json({
                     success: false,
-                    error: 'Stalker source missing required credentials'
+                    error: errorMsg
                 });
             }
             // Normalize to mac_address for consistency
@@ -420,10 +447,12 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 source.mac_address = source.mac;
             }
         } else {
-            logger.error(`[REFRESH DEBUG] Unknown source type: ${source.type}`);
+            const errorMsg = `Unsupported source type: ${source.type}. Can only refresh Xtream or Stalker sources`;
+            logger.error(`[REFRESH DEBUG] ${errorMsg}`);
+            await updateRefreshStatusError(sourceId, errorMsg, refreshStartTime);
             return res.status(400).json({
                 success: false,
-                error: 'Can only refresh Xtream or Stalker sources'
+                error: errorMsg
             });
         }
 
@@ -601,21 +630,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         logger.error(`Error refreshing source data: ${error.message}`);
 
         // Update refresh status to error and increment failure count
-        try {
-            const refreshDuration = Date.now() - refreshStartTime;
-            await iptvDatabaseService.pool.query(`
-                UPDATE iptv_sources
-                SET last_refresh_status = 'error',
-                    last_refresh_error = $1,
-                    last_refresh_attempt = CURRENT_TIMESTAMP,
-                    last_refresh_duration_ms = $3,
-                    failure_count = COALESCE(failure_count, 0) + 1,
-                    last_failure_time = CURRENT_TIMESTAMP
-                WHERE id = $2
-            `, [error.message, sourceId, refreshDuration]);
-        } catch (updateError) {
-            logger.error(`Failed to update refresh status: ${updateError.message}`);
-        }
+        await updateRefreshStatusError(sourceId, error.message, refreshStartTime);
 
         res.status(500).json({
             success: false,

@@ -39,12 +39,22 @@ apiClient.interceptors.request.use(
   }
 );
 
-// Add response interceptor to catch session errors
+// Add response interceptor to catch session and auth errors
 apiClient.interceptors.response.use(
   (response) => {
     return response;
   },
   (error) => {
+    // Check if this is an authentication error (401)
+    if (error.response && error.response.status === 401) {
+      console.warn('Authentication expired, clearing auth token and redirecting to login');
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('user');
+      // Redirect to login page
+      window.location.href = '/login';
+      return Promise.reject(new Error('Your session has expired. Please log in again.'));
+    }
+
     // Check if this is a session not found error
     if (error.response && error.response.status === 404) {
       // Look for "Session not found" in the error message
@@ -55,7 +65,7 @@ apiClient.interceptors.response.use(
         return Promise.reject(new Error('Your session has expired. Please reload your data.'));
       }
     }
-    
+
     return Promise.reject(error);
   }
 );
