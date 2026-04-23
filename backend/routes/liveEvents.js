@@ -1765,24 +1765,42 @@ router.post('/random-sports-channel', async (req, res) => {
  * Avoids duplicate sources and duplicate events
  */
 router.post('/auto-fill-streams', async (req, res) => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  const {
+    sportType,
+    leagueName,
+    maxStreams = 4,
+    excludeSourceIds = [],
+    excludeEventIds = [],
+    excludeChannelIds = [],
+    minQuality = 0
+  } = req.body;
+
+  const minHeight = parseInt(minQuality) || 0;
+
+  // Stream channels back as NDJSON so the UI can fill slots progressively
+  // instead of waiting for every ffprobe test to complete.
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  const writeLine = (obj) => {
+    if (res.writableEnded || res.destroyed) return false;
+    res.write(JSON.stringify(obj) + '\n');
+    if (typeof res.flush === 'function') res.flush();
+    return true;
+  };
+
+  let clientGone = false;
+  req.on('close', () => { clientGone = true; });
+
   try {
-    const userId = req.user?.id;
-
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    const {
-      sportType,
-      leagueName,
-      maxStreams = 4,
-      excludeSourceIds = [],
-      excludeEventIds = [],
-      excludeChannelIds = [],
-      minQuality = 0
-    } = req.body;
-
-    const minHeight = parseInt(minQuality) || 0;
 
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(
@@ -1827,11 +1845,12 @@ router.post('/auto-fill-streams', async (req, res) => {
 
     if (events.length === 0) {
       logger.info('Auto-fill: No live events found');
-      return res.json({
-        success: true,
-        channels: [],
+      writeLine({
+        type: 'done',
+        total: 0,
         message: sportType ? `No live ${sportType} events available` : 'No live events available'
       });
+      return res.end();
     }
 
     logger.info(`Auto-fill: Found ${events.length} matching live events`);
@@ -1952,9 +1971,11 @@ router.post('/auto-fill-streams', async (req, res) => {
     const maxPasses = 5; // Try up to 5 passes through the events
 
     for (let pass = 0; pass < maxPasses && foundChannels.length < maxStreams; pass++) {
+      if (clientGone) break;
       logger.info(`Auto-fill: Pass ${pass + 1}/${maxPasses} - ${foundChannels.length}/${maxStreams} streams found`);
 
       for (const event of events) {
+        if (clientGone) break;
         if (foundChannels.length >= maxStreams) {
           break;
         }
@@ -2143,7 +2164,7 @@ router.post('/auto-fill-streams', async (req, res) => {
             const best = workingChannels[0];
             const channel = best.channel;
 
-            foundChannels.push({
+            const payload = {
               id: channel.id,
               name: channel.name,
               logo: channel.logo,
@@ -2158,7 +2179,13 @@ router.post('/auto-fill-streams', async (req, res) => {
               espnEventId: event.event_id,
               espnEventName: event.event_name,
               quality: best.result.height
-            });
+            };
+
+            foundChannels.push(payload);
+
+            // Stream this channel to the client immediately so the UI can
+            // fill the slot without waiting for the remaining slots.
+            writeLine({ type: 'channel', channel: payload });
 
             // Mark source and event as used
             usedSourceIds.add(parseInt(channel.source_id));
@@ -2176,20 +2203,20 @@ router.post('/auto-fill-streams', async (req, res) => {
 
     logger.info(`Auto-fill: Completed - Found ${foundChannels.length} working channels after ${maxPasses} passes`);
 
-    return res.json({
-      success: true,
-      channels: foundChannels,
+    writeLine({
+      type: 'done',
+      total: foundChannels.length,
       message: foundChannels.length === 0
         ? (minHeight > 0 ? `No streams found meeting ${minHeight}p quality requirement` : 'No working streams found')
         : `Found ${foundChannels.length} working stream${foundChannels.length !== 1 ? 's' : ''}`
     });
+    return res.end();
 
   } catch (error) {
     logger.error('Auto-fill streams failed:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    // Headers are already sent at this point, so we stream the error too.
+    writeLine({ type: 'error', error: error.message });
+    if (!res.writableEnded) res.end();
   }
 });
 
