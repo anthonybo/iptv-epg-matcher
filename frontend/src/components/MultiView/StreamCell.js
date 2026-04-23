@@ -46,7 +46,7 @@ const StreamInfoTooltip = ({ stream, quality }) => {
 
       {isVisible && (
         <div
-          className={`absolute right-0 top-full mt-1 z-50 w-64 rounded-lg border bg-slate-900/95 backdrop-blur-sm shadow-xl shadow-black/50 p-3 text-xs ${
+          className={`absolute right-0 top-full mt-1 z-50 w-64 rounded-lg border bg-slate-900/95 shadow-xl shadow-black/50 p-3 text-xs ${
             isPinned ? 'border-blue-500/50' : 'border-slate-700'
           }`}
           onMouseEnter={() => setIsHovered(true)}

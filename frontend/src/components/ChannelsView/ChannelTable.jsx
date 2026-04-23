@@ -133,7 +133,7 @@ const ChannelTable = ({
         {/* Table */}
         <div className="flex-1 overflow-auto">
           <table className="w-full">
-            <thead className="sticky top-0 z-10 bg-slate-900/90 backdrop-blur border-b border-slate-800/50">
+            <thead className="sticky top-0 z-10 bg-slate-900/90 border-b border-slate-800/50">
               <tr>
                 <th className="w-12 px-2 py-3"></th>
                 <th className="w-16 px-4 py-3 text-center text-xs font-semibold text-slate-400">#</th>
@@ -267,7 +267,7 @@ const ChannelTable = ({
       {/* Table */}
       <div className="flex-1 overflow-auto">
         <table className="w-full">
-          <thead className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur border-b border-slate-800/50">
+          <thead className="sticky top-0 z-10 bg-slate-900/95 border-b border-slate-800/50">
             <tr>
               <th className="w-12 px-2 py-3">
                 <div className="flex items-center justify-center">

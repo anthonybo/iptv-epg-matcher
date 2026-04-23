@@ -707,7 +707,7 @@ const GuideView = ({ sessionId, onChannelSelect, compactMode = false }) => {
 
       {/* Delete Confirmation Modal */}
       {channelToRemove && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
             {/* Header */}
             <div className="bg-slate-800 px-6 py-4 border-b border-slate-700">

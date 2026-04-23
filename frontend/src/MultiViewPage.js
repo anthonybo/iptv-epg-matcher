@@ -1142,7 +1142,7 @@ const MultiViewPage = ({ sessionId }) => {
       {isTheatreMode && (
         <button
           onClick={() => setIsTheatreMode(false)}
-          className="fixed top-4 right-4 z-50 flex items-center justify-center w-10 h-10 rounded-lg border border-slate-700 bg-slate-900/90 backdrop-blur-sm text-slate-300 transition hover:bg-slate-800 hover:text-slate-100 shadow-2xl"
+          className="fixed top-4 right-4 z-50 flex items-center justify-center w-10 h-10 rounded-lg border border-slate-700 bg-slate-900/90 text-slate-300 transition hover:bg-slate-800 hover:text-slate-100 shadow-2xl"
           title="Exit Theatre Mode"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

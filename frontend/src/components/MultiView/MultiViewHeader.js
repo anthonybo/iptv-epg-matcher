@@ -45,7 +45,7 @@ const MultiViewHeader = ({
   onShowClearConfirm
 }) => {
   return (
-    <div className="flex-shrink-0 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm px-4 py-2 relative z-[9999]">
+    <div className="flex-shrink-0 border-b border-slate-800 bg-slate-900/80 px-4 py-2 relative z-[9999]">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-lg font-bold text-slate-100">Multi-View</h1>

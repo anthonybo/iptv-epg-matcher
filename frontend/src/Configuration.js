@@ -6,6 +6,7 @@ import LoadingProgress from './LoadingProgress';
 import SessionManager from './utils/sessionManager';
 import { API_BASE_URL } from './config';
 import { registerSession } from './services/SSEService';
+import BulkAddSources from './components/BulkAddSources';
 
 const statusStyles = {
   info: 'border-blue-500/40 bg-blue-500/15 text-blue-200',
@@ -23,6 +24,9 @@ const Configuration = ({
   showFooter = true,
   showSummaryButton = true,
   onLoadingChange, // Callback when loading state changes: (isLoading, sessionId, status, variant)
+  onSourceCompleted, // Callback fired when a bulk-added source finishes loading (sessionId)
+  embedded = false, // When true, strips the outer card wrapper, heading block, and footer —
+                    // used when Configuration is rendered inside a parent modal that has its own chrome.
 }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [m3uFile, setM3uFile] = useState(null);
@@ -51,7 +55,8 @@ const Configuration = ({
   const isEpgAllowed = normalizedTabs.includes('epg');
   const isXtreamAllowed = normalizedTabs.includes('xtream');
   const isStalkerAllowed = normalizedTabs.includes('stalker');
-  const isEpgOnly = isEpgAllowed && !isXtreamAllowed && !isStalkerAllowed;
+  const isBulkAllowed = normalizedTabs.includes('bulk');
+  const isEpgOnly = isEpgAllowed && !isXtreamAllowed && !isStalkerAllowed && !isBulkAllowed;
 
   useEffect(() => {
     const preferredTab = initialTab && normalizedTabs.includes(initialTab)
@@ -387,29 +392,39 @@ const Configuration = ({
         'Match channels with guide entries and export what you need.',
       ];
 
+  const outerWrapperClass = embedded
+    ? 'text-slate-100'
+    : 'mx-auto max-w-6xl px-4 py-12 text-slate-100';
+  const panelWrapperClass = embedded
+    ? ''
+    : 'rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40';
+
   return (
-    <div className="mx-auto max-w-6xl px-4 py-12 text-slate-100">
+    <div className={outerWrapperClass}>
       {error && (
         <div className="mb-6 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm font-medium text-rose-200">
           <span className="font-semibold text-rose-100">Error:</span> {error}
         </div>
       )}
 
-      <div className="rounded-3xl border border-slate-800/70 bg-slate-950/70 p-8 shadow-2xl shadow-slate-950/40 backdrop-blur">
-        <header className="space-y-3">
-          <p className="text-xs font-semibold uppercase tracking-[0.35em] text-blue-400/70">Configuration</p>
-          <h2 className="text-3xl font-semibold text-slate-100">{effectiveHeading}</h2>
-          <p className="max-w-2xl text-sm text-slate-400">{effectiveDescription}</p>
-        </header>
+      <div className={panelWrapperClass}>
+        {!embedded && (
+          <header className="space-y-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.35em] text-blue-400/70">Configuration</p>
+            <h2 className="text-3xl font-semibold text-slate-100">{effectiveHeading}</h2>
+            <p className="max-w-2xl text-sm text-slate-400">{effectiveDescription}</p>
+          </header>
+        )}
 
         {status && (
-          <div className={`mt-6 rounded-2xl border px-4 py-3 text-sm font-medium ${statusStyles[statusVariant] || statusStyles.info}`}>
+          <div className={`${embedded ? '' : 'mt-6'} rounded-2xl border px-4 py-3 text-sm font-medium ${statusStyles[statusVariant] || statusStyles.info}`}>
             {status}
           </div>
         )}
 
         {normalizedTabs.length > 1 && (
-          <div className="mt-8 flex items-center gap-2 border-b border-slate-800/70 pb-2">
+          <div className={`${embedded ? 'mt-2' : 'mt-8'} flex items-center gap-2 border-b border-slate-800/70 pb-2`}>
+
             {isXtreamAllowed && (
               <button
                 type="button"
@@ -428,6 +443,16 @@ const Configuration = ({
                 disabled={isLoading && activeTab !== 'stalker'}
               >
                 MAG/Stalker
+              </button>
+            )}
+            {isBulkAllowed && (
+              <button
+                type="button"
+                className={tabButtonClasses('bulk')}
+                onClick={() => setActiveTab('bulk')}
+                disabled={isLoading && activeTab !== 'bulk'}
+              >
+                Bulk Add
               </button>
             )}
             {isEpgAllowed && (
@@ -599,6 +624,23 @@ const Configuration = ({
           </div>
         )}
 
+        {isBulkAllowed && activeTab === 'bulk' && (
+          <BulkAddSources
+            onSourceCompleted={(sessionId) => {
+              if (onSourceCompleted) onSourceCompleted(sessionId);
+            }}
+            onAllDone={({ done, failed, total }) => {
+              const message = failed
+                ? `${done} of ${total} sources loaded (${failed} failed).`
+                : `Loaded ${done} source${done === 1 ? '' : 's'}.`;
+              setStatusMessage(message, failed ? 'info' : 'success');
+              if (onLoad) {
+                onLoad({ bulk: true, done, failed, total });
+              }
+            }}
+          />
+        )}
+
         {isEpgAllowed && activeTab === 'epg' && (
           <div className="mt-8 space-y-8">
             <section className="space-y-3">
@@ -632,7 +674,7 @@ const Configuration = ({
           </div>
         )}
 
-        {showFooter && (
+        {!embedded && showFooter && (
           <footer className="mt-10 flex flex-col gap-6 lg:flex-row">
             <div className="flex-1 rounded-2xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-inner shadow-slate-950/30">
               <h3 className="text-lg font-semibold text-slate-100">Getting Started</h3>

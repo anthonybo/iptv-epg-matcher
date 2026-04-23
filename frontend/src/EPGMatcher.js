@@ -1278,7 +1278,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
     };
 
     return (
-        <div className={compactMode ? "epg-matcher-container flex h-full flex-col overflow-hidden p-3" : "epg-matcher-container mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl backdrop-blur"}>
+        <div className={compactMode ? "epg-matcher-container flex h-full flex-col overflow-hidden p-3" : "epg-matcher-container mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl"}>
             {/* Header - Hidden in compact mode */}
             {!compactMode && (
                 <div className="mb-4 flex items-center justify-between border-b border-slate-800 pb-3">

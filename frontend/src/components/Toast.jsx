@@ -71,7 +71,7 @@ const Toast = ({ message, type = 'success', duration = 3000, onClose }) => {
 
   return (
     <div
-      className={`fixed bottom-6 right-6 z-[10000] flex items-center gap-3 rounded-xl border-2 px-4 py-3 shadow-2xl backdrop-blur-sm transition-all duration-300 ${
+      className={`fixed bottom-6 right-6 z-[10000] flex items-center gap-3 rounded-xl border-2 px-4 py-3 shadow-2xl transition-all duration-300 ${
         style.bg
       } ${style.border} ${isExiting ? 'opacity-0 translate-y-2' : 'opacity-100 translate-y-0'}`}
       style={{ minWidth: '300px', maxWidth: '500px' }}

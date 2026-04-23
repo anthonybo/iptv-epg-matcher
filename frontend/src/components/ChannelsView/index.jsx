@@ -469,7 +469,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Header with search and stats */}
-        <div className="relative z-50 border-b border-slate-800 bg-slate-900/80 px-6 py-4 backdrop-blur">
+        <div className="relative z-50 border-b border-slate-800 bg-slate-900/80 px-6 py-4">
           {/* Error display */}
           {error && (
             <div className="mb-4 flex items-start rounded-xl border border-red-500/40 bg-red-500/10 p-3">

@@ -174,7 +174,7 @@ const Sidebar = ({
   };
 
   return (
-    <aside className={`${visibilityClass} sticky top-0 h-screen w-72 flex-col border-r border-slate-800/80 bg-slate-950/80 text-slate-200 backdrop-blur`}>
+    <aside className={`${visibilityClass} sticky top-0 h-screen w-72 flex-col border-r border-slate-800/80 bg-slate-950/80 text-slate-200`}>
       <div className="border-b border-slate-800/70 px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/20 text-blue-300">

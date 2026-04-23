@@ -15,7 +15,7 @@ const CategorySidebar = ({ categories, selectedCategories, onToggle, onClearAll,
   const hasSelected = selectedCategories.size > 0;
 
   return (
-    <div className="flex h-full w-72 flex-col border-r border-slate-800/80 bg-slate-950/80 backdrop-blur">
+    <div className="flex h-full w-72 flex-col border-r border-slate-800/80 bg-slate-950/80">
       {/* Header */}
       <div className="border-b border-slate-800/80 px-4 py-4">
         <div className="mb-3 flex items-center justify-between">

@@ -57,7 +57,7 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
       )}
 
       {!isTheatreMode && (
-        <header className="sticky top-0 z-[60] flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/80 px-3 py-1.5 shadow-lg shadow-slate-950/20 backdrop-blur-sm">
+        <header className="sticky top-0 z-[60] flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900/80 px-3 py-1.5 shadow-lg shadow-slate-950/20">
         <div className="flex items-center gap-2">
           <button
             type="button"

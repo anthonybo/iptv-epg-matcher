@@ -325,7 +325,7 @@ const LoadData = () => {
         </div>
       )}
 
-      <section className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-8 shadow-2xl shadow-slate-950/50 backdrop-blur">
+      <section className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-8 shadow-2xl shadow-slate-950/50">
         <div className="mb-8 flex items-center gap-2 border-b border-slate-800/70 pb-2">
           <button
             type="button"

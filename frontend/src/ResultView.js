@@ -50,7 +50,7 @@ const DeleteConfirmModal = ({ isOpen, onConfirm, onCancel }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div className="mx-4 w-full max-w-md rounded-2xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
         <div className="mb-4 flex items-start gap-3">
           <div className="rounded-full bg-rose-500/20 p-2">

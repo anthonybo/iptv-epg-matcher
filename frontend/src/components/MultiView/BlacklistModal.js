@@ -9,7 +9,7 @@ const BlacklistModal = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4">
       <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col">
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-700">

@@ -108,7 +108,7 @@ export function ServerStatusModal({ isOpen, onClose }) {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
       <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-lg w-full">
         <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
           <h3 className="text-xl font-semibold text-slate-100">Server Status</h3>

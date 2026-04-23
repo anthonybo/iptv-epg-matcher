@@ -1864,55 +1864,69 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
  * @returns {Promise<Object>} Account information
  */
 async function fetchXtreamAccountInfo(baseUrl, username, password) {
-    try {
-        // Normalize URL to ensure it ends with a slash
-        const normalizedUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    const normalizedUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    const apiUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}`;
 
-        // Fetch account info from Xtream API (no action parameter)
-        const apiUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}`;
-        logger.info(`Fetching account info from Xtream API: ${apiUrl}`);
+    // Retry transient failures (403 rate-limit, 429, 5xx, network/timeout).
+    // Concurrent bulk-adds regularly trip provider rate limits on this endpoint,
+    // which used to leave the account saved with null exp_date/status/connections.
+    const attemptDelays = [0, 3000, 8000]; // 3 attempts total
+    const isTransient = (err) => {
+        const msg = String(err?.message || '');
+        if (/HTTP error (403|408|425|429|5\d\d)/i.test(msg)) return true;
+        if (/timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|network/i.test(msg)) return true;
+        return false;
+    };
 
-        const response = await fetch(apiUrl, {
-            method: 'GET',
-            headers: {
-                'User-Agent': 'EPG-Matcher/1.0'
-            },
-            timeout: 15000 // 15 second timeout
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+    let lastError = null;
+    for (let attempt = 0; attempt < attemptDelays.length; attempt += 1) {
+        if (attemptDelays[attempt] > 0) {
+            await new Promise((resolve) => setTimeout(resolve, attemptDelays[attempt]));
         }
+        try {
+            logger.info(`Fetching account info from Xtream API (attempt ${attempt + 1}/${attemptDelays.length}): ${apiUrl}`);
+            const response = await fetch(apiUrl, {
+                method: 'GET',
+                headers: { 'User-Agent': 'EPG-Matcher/1.0' },
+                timeout: 15000,
+            });
 
-        // Parse JSON response
-        const data = await response.json();
+            if (!response.ok) {
+                throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
+            }
 
-        // Extract user_info and server_info
-        const userInfo = data.user_info || {};
-        const serverInfo = data.server_info || {};
+            const data = await response.json();
+            const userInfo = data.user_info || {};
 
-        logger.info(`Successfully fetched account info for user: ${username}`);
-
-        return {
-            exp_date: userInfo.exp_date || null,
-            max_connections: userInfo.max_connections ? parseInt(userInfo.max_connections) : null,
-            active_connections: userInfo.active_cons ? parseInt(userInfo.active_cons) : null,
-            account_status: userInfo.status || null,
-            is_trial: userInfo.is_trial === "1" || userInfo.is_trial === 1 ? 1 : 0,
-            account_created_at: userInfo.created_at || null
-        };
-    } catch (error) {
-        logger.error(`Error fetching Xtream account info: ${error.message}`);
-        // Return null values if we can't fetch account info
-        return {
-            exp_date: null,
-            max_connections: null,
-            active_connections: null,
-            account_status: null,
-            is_trial: 0,
-            account_created_at: null
-        };
+            logger.info(`Successfully fetched account info for user: ${username}`);
+            return {
+                exp_date: userInfo.exp_date || null,
+                max_connections: userInfo.max_connections ? parseInt(userInfo.max_connections) : null,
+                active_connections: userInfo.active_cons ? parseInt(userInfo.active_cons) : null,
+                account_status: userInfo.status || null,
+                is_trial: userInfo.is_trial === "1" || userInfo.is_trial === 1 ? 1 : 0,
+                account_created_at: userInfo.created_at || null
+            };
+        } catch (error) {
+            lastError = error;
+            const remaining = attemptDelays.length - attempt - 1;
+            if (remaining > 0 && isTransient(error)) {
+                logger.warn(`Xtream account info fetch failed (attempt ${attempt + 1}): ${error.message} — retrying in ${attemptDelays[attempt + 1]}ms`);
+                continue;
+            }
+            break;
+        }
     }
+
+    logger.error(`Error fetching Xtream account info after ${attemptDelays.length} attempts: ${lastError?.message}`);
+    return {
+        exp_date: null,
+        max_connections: null,
+        active_connections: null,
+        account_status: null,
+        is_trial: 0,
+        account_created_at: null,
+    };
 }
 
 /**
