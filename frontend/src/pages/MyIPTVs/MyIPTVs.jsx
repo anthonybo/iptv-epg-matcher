@@ -2,8 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import iptvSourcesService from '../../services/iptvSourcesService';
 import Configuration from '../../Configuration';
 import StreamDiagnosticsModal from '../../components/StreamDiagnosticsModal';
-import SourceCard from './SourceCard';
-import DomainGroupCard from './DomainGroupCard';
+import DomainSection from './DomainSection';
 import { groupSourcesByDomain, getRefreshHostKey } from './utils';
 
 /**
@@ -321,7 +320,7 @@ const MyIPTVs = ({
         message: errorMsg
       });
       setTimeout(() => setNotification(null), 5000);
-      throw err; // Re-throw so SourceCard can handle it
+      throw err; // Re-throw so the row's local state can settle
     }
   };
 
@@ -513,40 +512,22 @@ const MyIPTVs = ({
         </div>
       )}
 
-      {/* Sources grid — grouped by domain when a domain has multiple accounts */}
+      {/* Sources list — one section per domain, single column for easy scanning */}
       {!loading && !error && sources.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {domainGroups.map((group) => {
-            if (group.sources.length === 1) {
-              const source = group.sources[0];
-              return (
-                <SourceCard
-                  key={source.id}
-                  source={source}
-                  onEdit={handleEditNickname}
-                  onDelete={handleDelete}
-                  onViewChannels={handleViewChannels}
-                  onRefreshAccountInfo={handleRefreshAccountInfo}
-                  onEditCredentials={handleEditCredentials}
-                  onTestStreams={handleTestStreams}
-                  refreshStatus={sourceRefreshStatus[source.id]}
-                />
-              );
-            }
-            return (
-              <DomainGroupCard
-                key={group.key}
-                group={group}
-                sourceRefreshStatus={sourceRefreshStatus}
-                onEdit={handleEditNickname}
-                onDelete={handleDelete}
-                onViewChannels={handleViewChannels}
-                onRefreshAccountInfo={handleRefreshAccountInfo}
-                onEditCredentials={handleEditCredentials}
-                onTestStreams={handleTestStreams}
-              />
-            );
-          })}
+        <div className="space-y-3">
+          {domainGroups.map((group) => (
+            <DomainSection
+              key={group.key}
+              group={group}
+              sourceRefreshStatus={sourceRefreshStatus}
+              onEdit={handleEditNickname}
+              onDelete={handleDelete}
+              onViewChannels={handleViewChannels}
+              onRefreshAccountInfo={handleRefreshAccountInfo}
+              onEditCredentials={handleEditCredentials}
+              onTestStreams={handleTestStreams}
+            />
+          ))}
         </div>
       )}
 
