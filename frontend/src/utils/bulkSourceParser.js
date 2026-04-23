@@ -103,6 +103,13 @@ export const parseBulkSources = (rawText, options = {}) => {
   // Shared "last-seen server URL" context. A URL anywhere in the text updates
   // it and subsequent MAC or Username/Password lines bind to it.
   let currentServer = defaultPortal || null;
+  // Some pastes put Username and Password on separate lines (with metadata
+  // between them). Hold the first-seen half until the matching half arrives.
+  let pendingHalf = null; // { kind: 'username'|'password', value, line, text } | null
+
+  const orphanReason = (kind) => (
+    kind === 'username' ? 'Username without matching Password' : 'Password without matching Username'
+  );
 
   const lines = rawText.split(/\r?\n/);
   lines.forEach((originalLine, index) => {
@@ -154,41 +161,55 @@ export const parseBulkSources = (rawText, options = {}) => {
       }
     }
 
-    // Priority 3: labeled Username/Password on the line — binds to current or inline server.
+    // Priority 3: labeled Username/Password — binds to current or inline server.
+    // Pairs can span multiple lines: `Username: X\n<metadata>\nPassword: Y`.
     if (userPass && (userPass.username || userPass.password)) {
       const inlineServer = nonXtreamUrls[0] ? normalizeServer(nonXtreamUrls[0]) : null;
       const server = inlineServer || currentServer;
       if (inlineServer) currentServer = inlineServer;
-      if (!userPass.username || !userPass.password) {
-        errors.push({
-          line: index + 1,
-          text: originalLine,
-          reason: userPass.username
-            ? 'Username without matching Password'
-            : 'Password without matching Username',
-        });
+
+      let { username, password } = userPass;
+
+      // Consume a pending half of the opposite kind to complete the pair.
+      if (!username && pendingHalf?.kind === 'username') {
+        username = pendingHalf.value;
+        pendingHalf = null;
+      } else if (!password && pendingHalf?.kind === 'password') {
+        password = pendingHalf.value;
+        pendingHalf = null;
+      }
+
+      if (username && password) {
+        // Complete pair. Any still-pending half of either kind is orphaned.
+        if (pendingHalf) {
+          errors.push({ line: pendingHalf.line, text: pendingHalf.text, reason: orphanReason(pendingHalf.kind) });
+          pendingHalf = null;
+        }
+        if (!server) {
+          errors.push({
+            line: index + 1,
+            text: originalLine,
+            reason: 'Username/Password found without a server URL — add a "Portal: http://..." line above or set a default portal',
+          });
+          return;
+        }
+        const entry = { type: 'xtream', server, username, password, raw: originalLine };
+        const key = dedupeKey(entry);
+        if (!seen.has(key)) {
+          seen.add(key);
+          entries.push(entry);
+        }
         return;
       }
-      if (!server) {
-        errors.push({
-          line: index + 1,
-          text: originalLine,
-          reason: 'Username/Password found without a server URL — add a "Portal: http://..." line above or set a default portal',
-        });
-        return;
+
+      // Still incomplete — stash this half. A new same-kind half replaces and
+      // errors the old one (it never got its match).
+      const newKind = username ? 'username' : 'password';
+      const newValue = username || password;
+      if (pendingHalf && pendingHalf.kind === newKind) {
+        errors.push({ line: pendingHalf.line, text: pendingHalf.text, reason: orphanReason(pendingHalf.kind) });
       }
-      const entry = {
-        type: 'xtream',
-        server,
-        username: userPass.username,
-        password: userPass.password,
-        raw: originalLine,
-      };
-      const key = dedupeKey(entry);
-      if (!seen.has(key)) {
-        seen.add(key);
-        entries.push(entry);
-      }
+      pendingHalf = { kind: newKind, value: newValue, line: index + 1, text: originalLine };
       return;
     }
 
@@ -221,6 +242,11 @@ export const parseBulkSources = (rawText, options = {}) => {
       return;
     }
   });
+
+  // Any half-credential still waiting at the end never got matched.
+  if (pendingHalf) {
+    errors.push({ line: pendingHalf.line, text: pendingHalf.text, reason: orphanReason(pendingHalf.kind) });
+  }
 
   return { entries, errors };
 };

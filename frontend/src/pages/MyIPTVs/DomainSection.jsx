@@ -37,14 +37,26 @@ const typeTag = (type) => ({
   m3u: { label: 'M3U', cls: 'text-slate-300 border-slate-600/60 bg-slate-500/5' },
 }[type] || { label: String(type || '').toUpperCase(), cls: 'text-slate-300 border-slate-600/60 bg-slate-500/5' });
 
-const DomainSection = ({ group, sourceRefreshStatus = {}, onDelete, onShowDiagnostics, ...rowProps }) => {
+const DomainSection = ({
+  group,
+  sourceRefreshStatus = {},
+  // testResults map is the FULL persisted map across all domains; we look up
+  // just the entries for this group's sources when rendering summaries.
+  testResults = {},
+  onSetTestResult,
+  onSetPendingTestResult,
+  onRemoveTestResults,
+  onDelete,
+  onShowDiagnostics,
+  ...rowProps
+}) => {
   const [collapsed, setCollapsed] = useState(false);
   // confirming: null when idle; { mode: 'all' | 'failed', ids: [sourceId, ...] } when user is confirming a batch delete.
   const [confirming, setConfirming] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
-  // Per-source test results: { [sourceId]: { status: 'testing'|'passed'|'partial'|'failed'|'error', passed, tested, diagnostics, error } }
-  const [testResults, setTestResults] = useState({});
+  // In-flight UI state stays local to this section — results themselves come from
+  // the lifted, persisted map.
   const [testingAll, setTestingAll] = useState(false);
   const [testProgress, setTestProgress] = useState({ done: 0, total: 0 });
 
@@ -75,34 +87,25 @@ const DomainSection = ({ group, sourceRefreshStatus = {}, onDelete, onShowDiagno
   };
 
   const testOne = async (source) => {
-    setTestResults((prev) => ({ ...prev, [source.id]: { status: 'testing' } }));
+    onSetPendingTestResult?.(source.id, { status: 'testing' });
     try {
       const res = await iptvSourcesService.testStreams(source.id);
       const diag = res?.diagnostics;
       if (!res?.success || !diag) {
-        setTestResults((prev) => ({
-          ...prev,
-          [source.id]: { status: 'error', error: res?.error || 'Test failed' },
-        }));
+        onSetTestResult?.(source.id, { status: 'error', error: res?.error || 'Test failed' });
         return;
       }
-      setTestResults((prev) => ({
-        ...prev,
-        [source.id]: {
-          status: classifyResult(diag),
-          passed: diag.passed ?? 0,
-          tested: diag.tested ?? 0,
-          diagnostics: diag,
-        },
-      }));
+      onSetTestResult?.(source.id, {
+        status: classifyResult(diag),
+        passed: diag.passed ?? 0,
+        tested: diag.tested ?? 0,
+        diagnostics: diag,
+      });
     } catch (err) {
-      setTestResults((prev) => ({
-        ...prev,
-        [source.id]: {
-          status: 'error',
-          error: err?.response?.data?.error || err?.message || 'Test failed',
-        },
-      }));
+      onSetTestResult?.(source.id, {
+        status: 'error',
+        error: err?.response?.data?.error || err?.message || 'Test failed',
+      });
     } finally {
       setTestProgress((p) => ({ ...p, done: p.done + 1 }));
     }
@@ -111,9 +114,10 @@ const DomainSection = ({ group, sourceRefreshStatus = {}, onDelete, onShowDiagno
   const handleTestAll = async () => {
     if (testingAll) return;
     setTestingAll(true);
-    setTestResults({});
+    // Clear only THIS group's old results so results from other domains
+    // (stored in the same map) aren't wiped.
+    onRemoveTestResults?.(group.sources.map((s) => s.id));
     setTestProgress({ done: 0, total: group.sources.length });
-    // Simple bounded-concurrency loop so we respect MAX_TEST_CONCURRENT.
     const queue = [...group.sources];
     const workers = Array.from({ length: Math.min(MAX_TEST_CONCURRENT, queue.length) }, async () => {
       while (queue.length > 0) {
@@ -125,12 +129,15 @@ const DomainSection = ({ group, sourceRefreshStatus = {}, onDelete, onShowDiagno
     setTestingAll(false);
   };
 
+  // Summaries and delete-failed scoping look only at this group's sources.
+  const groupResultsEntries = group.sources
+    .map((s) => [s.id, testResults[s.id]])
+    .filter(([, r]) => r);
+
   const testSummary = (() => {
-    const ids = Object.keys(testResults);
-    if (ids.length === 0) return null;
+    if (groupResultsEntries.length === 0) return null;
     let passed = 0, partial = 0, failed = 0, errored = 0, testing = 0;
-    for (const id of ids) {
-      const r = testResults[id];
+    for (const [, r] of groupResultsEntries) {
       if (r.status === 'passed') passed += 1;
       else if (r.status === 'partial') partial += 1;
       else if (r.status === 'failed') failed += 1;
@@ -145,8 +152,6 @@ const DomainSection = ({ group, sourceRefreshStatus = {}, onDelete, onShowDiagno
     const ids = confirming.ids;
     setDeleting(true);
     setProgress({ done: 0, total: ids.length });
-    // Fire in parallel — independent DELETEs. allSettled so one failure doesn't
-    // short-circuit the others; MyIPTVs.handleDelete surfaces per-failure notifications.
     await Promise.allSettled(
       ids.map((id) =>
         Promise.resolve(onDelete(id)).finally(() => {
@@ -154,21 +159,17 @@ const DomainSection = ({ group, sourceRefreshStatus = {}, onDelete, onShowDiagno
         })
       )
     );
-    // Clear stale test results for the rows we just removed so a future re-run
-    // doesn't show dangling pills if an ID is ever recycled.
-    setTestResults((prev) => {
-      const next = { ...prev };
-      for (const id of ids) delete next[id];
-      return next;
-    });
+    // MyIPTVs.handleDelete already calls removeTestResults for each id it
+    // deletes, but call it here too for belt-and-suspenders in case a delete
+    // resolves async after our state has moved on.
+    onRemoveTestResults?.(ids);
     setDeleting(false);
     setConfirming(null);
   };
 
-  const failedSourceIds = Object.entries(testResults)
+  const failedSourceIds = groupResultsEntries
     .filter(([, r]) => r?.status === 'failed')
-    .map(([id]) => Number(id))
-    .filter((id) => group.sources.some((s) => s.id === id));
+    .map(([id]) => id);
 
   return (
     <section className="group/section rounded-xl border border-slate-800/80 bg-slate-950/40 overflow-hidden shadow-[0_1px_0_rgba(255,255,255,0.02)_inset]">

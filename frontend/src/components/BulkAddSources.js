@@ -65,6 +65,48 @@ const statusMeta = {
   failed: { label: 'Failed', bar: 'bg-red-500', text: 'text-red-300' },
 };
 
+// Translate raw backend stage names into plain-English labels the user can
+// actually read. Unknown stages fall through to the status label (Loading etc.).
+const STAGE_LABELS = {
+  starting: 'Connecting to server',
+  init: 'Connecting to server',
+  checking_cache: 'Checking cache',
+  cache_check: 'Checking cache',
+  loading_channels: 'Downloading channel list',
+  loading_xtream: 'Downloading channel list',
+  loading_stalker: 'Downloading channel list',
+  parsing_channels: 'Parsing channels',
+  channels_loaded: 'Channels loaded',
+  loading_epg: 'Loading guide data',
+  loading_epg_source: 'Loading guide data',
+  processing_epg: 'Matching guide data',
+  finalizing: 'Saving to database',
+  persisting: 'Saving to database',
+  complete: 'Done',
+};
+
+const stageLabel = (state) => {
+  if (state.stage && STAGE_LABELS[state.stage]) return STAGE_LABELS[state.stage];
+  if (state.stage) {
+    // Pretty-print unknown snake_case/dashed stages: "loading_channels" -> "Loading channels"
+    const pretty = state.stage.replace(/[_-]+/g, ' ').trim();
+    return pretty.charAt(0).toUpperCase() + pretty.slice(1);
+  }
+  return statusMeta[state.status]?.label || 'Working';
+};
+
+const formatElapsed = (ms) => {
+  if (!Number.isFinite(ms) || ms < 0) return '0s';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  return rs === 0 ? `${m}m` : `${m}m ${rs}s`;
+};
+
+const STALL_SOFT_MS = 10000;  // shimmer + "Still working"
+const STALL_HARD_MS = 60000;  // amber notice promoting the message
+
 // Cap how many loads run concurrently on the backend. Each load hammers the
 // channel table with 500-row INSERT batches; running too many at once hits
 // Postgres `statement_timeout` and starves unrelated queries (/api/epg/init etc.).
@@ -112,6 +154,9 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
   const [parsed, setParsed] = useState(null);
   const [phase, setPhase] = useState('edit'); // 'edit' | 'running' | 'finished'
   const [entryStates, setEntryStates] = useState([]);
+  // 1Hz "now" tick so elapsed timers and stall detection re-render without
+  // each row owning its own interval.
+  const [now, setNow] = useState(() => Date.now());
   const eventSourcesRef = useRef([]);
   const completedNotifiedRef = useRef(false);
   const queueRef = useRef({ pending: [], active: 0 });
@@ -122,6 +167,14 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
     });
     eventSourcesRef.current = [];
   }, []);
+
+  // Pulse `now` once a second while any row is running so timers/stall cues
+  // stay live. Stops on its own once everything is terminal.
+  useEffect(() => {
+    if (phase !== 'running') return undefined;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
 
   const hasPreview = parsed && (parsed.entries.length > 0 || parsed.errors.length > 0);
   const preview = useMemo(() => parsed?.entries || [], [parsed]);
@@ -143,8 +196,22 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
   const updateEntry = (idx, patch) => {
     setEntryStates((prev) => {
       if (!prev[idx]) return prev;
+      const current = prev[idx];
+      // "Meaningful" = user-visible change; bumps lastUpdatedAt so stall detection
+      // resets. Heartbeat-only events (no stage/progress/message/count change)
+      // don't reset the clock.
+      const meaningful =
+        (patch.status !== undefined && patch.status !== current.status)
+        || (patch.stage !== undefined && patch.stage !== current.stage)
+        || (patch.message !== undefined && patch.message !== current.message)
+        || (patch.progress !== undefined && patch.progress !== current.progress)
+        || (patch.channelCount !== undefined && patch.channelCount !== current.channelCount);
       const next = prev.slice();
-      next[idx] = { ...next[idx], ...patch };
+      next[idx] = {
+        ...current,
+        ...patch,
+        ...(meaningful ? { lastUpdatedAt: Date.now() } : {}),
+      };
       return next;
     });
   };
@@ -177,6 +244,15 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
   };
 
   const startEntry = async (idx, entry) => {
+    const startedAt = Date.now();
+    // Stamp startedAt via a direct state merge so stall/elapsed math has a
+    // baseline even before the first SSE event lands.
+    setEntryStates((prev) => {
+      if (!prev[idx]) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], startedAt, lastUpdatedAt: startedAt };
+      return next;
+    });
     updateEntry(idx, { status: 'queuing', message: 'Creating session…' });
     try {
       const sessionId = await submitEntry(entry);
@@ -281,30 +357,60 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
   };
 
   const [parsing, setParsing] = useState(false);
+  const [checkingExisting, setCheckingExisting] = useState(false);
+  // Bumps whenever a new parse starts so a slow in-flight getUserSources call
+  // from the previous click can't clobber a fresh preview when it finally returns.
+  const parseTokenRef = useRef(0);
 
-  const handleParse = async () => {
+  const handleParse = () => {
     setParsing(true);
-    try {
-      const result = parseBulkSources(rawText, { defaultPortal });
-      let existing = [];
-      try {
-        existing = await iptvSourcesService.getUserSources();
-      } catch (_err) {
-        // Fall back to treating everything as new if we can't read current sources.
-      }
-      const enriched = result.entries.map((entry) => {
-        const match = matchExisting(entry, existing);
-        return {
-          ...entry,
-          alreadyExists: Boolean(match),
-          existingSource: match || null,
-          selected: !match,
-        };
+    // Phase 1: synchronous regex parse. Renders immediately — no waiting on
+    // the existing-sources HTTP call (which can queue behind backend DB work
+    // during a bulk load and make Parse feel stuck).
+    const result = parseBulkSources(rawText, { defaultPortal });
+    const token = parseTokenRef.current + 1;
+    parseTokenRef.current = token;
+    setParsed({
+      ...result,
+      entries: result.entries.map((entry) => ({
+        ...entry,
+        alreadyExists: false,
+        existingSource: null,
+        selected: true,
+      })),
+    });
+    setParsing(false);
+
+    // Phase 2: background existing-source check. When it lands, merge the
+    // alreadyExists / existingSource flags and flip selected off for dupes —
+    // unless a newer parse has started in the meantime.
+    setCheckingExisting(true);
+    iptvSourcesService.getUserSources()
+      .then((existing) => {
+        if (parseTokenRef.current !== token) return;
+        setParsed((prev) => {
+          if (!prev) return prev;
+          const nextEntries = prev.entries.map((entry) => {
+            const match = matchExisting(entry, existing);
+            return {
+              ...entry,
+              alreadyExists: Boolean(match),
+              existingSource: match || null,
+              // Only flip selected off for freshly-discovered duplicates. If
+              // the user manually toggled a row while we were waiting, respect
+              // that — only auto-override the initial default-true state.
+              selected: match ? false : entry.selected,
+            };
+          });
+          return { ...prev, entries: nextEntries };
+        });
+      })
+      .catch(() => {
+        // Non-fatal — everything just stays marked as New.
+      })
+      .finally(() => {
+        if (parseTokenRef.current === token) setCheckingExisting(false);
       });
-      setParsed({ ...result, entries: enriched });
-    } finally {
-      setParsing(false);
-    }
   };
 
   const setAllSelection = (mode) => {
@@ -591,6 +697,18 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
               <span className="text-slate-500">
                 <span className="font-semibold text-slate-300">{total}</span> total
               </span>
+              {checkingExisting && (
+                <>
+                  <span className="text-slate-700">·</span>
+                  <span className="inline-flex items-center gap-1.5 text-slate-500">
+                    <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={4} />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    Checking existing…
+                  </span>
+                </>
+              )}
             </div>
           </div>
 
@@ -650,8 +768,36 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
   const renderProgressRow = (state, idx) => {
     const meta = statusMeta[state.status] || statusMeta.pending;
     const pct = typeof state.progress === 'number' ? Math.min(100, Math.max(0, state.progress)) : 0;
+    const active = state.status === 'queuing' || state.status === 'loading';
+    const terminal = state.status === 'done' || state.status === 'failed';
+    // Live elapsed while active; frozen final duration once terminal (captured
+    // via the last meaningful update, which for done/failed is the final transition).
+    const elapsed = state.startedAt
+      ? (terminal && state.lastUpdatedAt ? state.lastUpdatedAt - state.startedAt : now - state.startedAt)
+      : 0;
+    const sinceUpdate = state.lastUpdatedAt ? now - state.lastUpdatedAt : 0;
+    const stalled = active && sinceUpdate >= STALL_SOFT_MS;
+    const stalledHard = active && sinceUpdate >= STALL_HARD_MS;
+    const stageText = state.status === 'done'
+      ? 'Done'
+      : state.status === 'failed'
+        ? 'Failed'
+        : stageLabel(state);
+
+    const barWidth = state.status === 'done' ? 100
+      : state.status === 'failed' ? 0
+      : pct;
+
     return (
-      <div key={idx} className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 space-y-2">
+      <div
+        key={idx}
+        className={`rounded-lg border px-4 py-3 space-y-2 transition-colors ${
+          state.status === 'done' ? 'border-emerald-500/20 bg-emerald-500/5'
+          : state.status === 'failed' ? 'border-red-500/30 bg-red-500/5'
+          : stalledHard ? 'border-amber-500/30 bg-amber-500/5'
+          : 'border-slate-800 bg-slate-900/40'
+        }`}
+      >
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <span className={typeBadge(state.entry.type)}>
@@ -659,29 +805,83 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
             </span>
             <span className="text-sm text-slate-200 truncate">{describeEntry(state.entry)}</span>
           </div>
-          <span className={`text-xs font-semibold ${meta.text}`}>
-            {state.status === 'done'
-              ? `Done · ${state.channelCount ? state.channelCount.toLocaleString() + ' channels' : 'OK'}`
-              : state.status === 'failed'
-                ? 'Failed'
-                : state.stage || meta.label}
-          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            {state.channelCount > 0 && state.status !== 'failed' && (
+              <span className="text-[11px] font-mono tabular-nums text-slate-500">
+                {state.channelCount.toLocaleString()} ch
+              </span>
+            )}
+            {active && typeof state.progress === 'number' && (
+              <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                {Math.round(pct)}%
+              </span>
+            )}
+            {(active || terminal) && state.startedAt && (
+              <span className="text-[11px] font-mono tabular-nums text-slate-500">
+                {formatElapsed(elapsed)}
+              </span>
+            )}
+            <span className={`text-xs font-semibold ${meta.text}`}>
+              {state.status === 'done' && state.channelCount
+                ? `Done · ${state.channelCount.toLocaleString()} channels`
+                : stageText}
+            </span>
+          </div>
         </div>
+
         <div className="relative w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
           <div
             className={`h-full transition-all duration-300 ${meta.bar}`}
-            style={{ width: `${state.status === 'done' ? 100 : state.status === 'failed' ? 0 : pct}%` }}
+            style={{ width: `${barWidth}%` }}
           />
+          {stalled && active && (
+            <div
+              className="absolute inset-0 pointer-events-none bg-gradient-to-r from-transparent via-white/10 to-transparent animate-pulse"
+              aria-hidden
+            />
+          )}
         </div>
+
         {state.status === 'failed' && state.error && (
           <div className="text-xs text-red-400 break-words">{state.error}</div>
         )}
-        {state.status !== 'failed' && state.message && (
+        {state.status !== 'failed' && state.message && !stalledHard && (
           <div className="text-xs text-slate-500 truncate">{state.message}</div>
+        )}
+        {stalledHard && (
+          <div className="flex items-center gap-2 text-xs text-amber-300">
+            <svg className="w-3.5 h-3.5 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={4} />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            <span className="truncate">
+              Still working on <span className="font-semibold">{stageText.toLowerCase()}</span>
+              {' · this can take a few minutes on larger providers'}
+            </span>
+          </div>
+        )}
+        {stalled && !stalledHard && state.message && (
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span className="inline-block w-1 h-1 rounded-full bg-slate-500 animate-pulse" />
+            <span className="truncate">{state.message} · still working</span>
+          </div>
         )}
       </div>
     );
   };
+
+  // Wall-clock span: from the earliest row start to the latest row finish.
+  // Computed once per render — entryStates re-renders on every tick while running.
+  const wallClock = (() => {
+    const withStart = entryStates.filter((s) => s.startedAt);
+    if (withStart.length === 0) return null;
+    const earliest = Math.min(...withStart.map((s) => s.startedAt));
+    if (phase === 'finished') {
+      const latest = Math.max(...withStart.map((s) => s.lastUpdatedAt || s.startedAt));
+      return latest - earliest;
+    }
+    return now - earliest;
+  })();
 
   const renderProgressPanel = () => (
     <section className="space-y-4">
@@ -689,6 +889,11 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
         <div>
           <h3 className="text-lg font-semibold text-slate-100">
             {phase === 'finished' ? 'All Done' : 'Loading Sources'}
+            {wallClock !== null && (
+              <span className="ml-2 text-sm font-mono tabular-nums text-slate-500 font-normal">
+                {formatElapsed(wallClock)}
+              </span>
+            )}
           </h3>
           {phase === 'running' && (
             <p className="text-xs text-slate-500 mt-0.5">

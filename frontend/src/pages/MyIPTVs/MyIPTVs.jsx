@@ -3,6 +3,7 @@ import iptvSourcesService from '../../services/iptvSourcesService';
 import Configuration from '../../Configuration';
 import StreamDiagnosticsModal from '../../components/StreamDiagnosticsModal';
 import DomainSection from './DomainSection';
+import { useTestResults } from './useTestResults';
 import { groupSourcesByDomain, getRefreshHostKey } from './utils';
 
 /**
@@ -30,6 +31,16 @@ const MyIPTVs = ({
   const [sourceRefreshStatus, setSourceRefreshStatus] = useState({}); // Track status per source: { sourceId: 'loading' | 'success' | 'error' }
   const [refreshSummary, setRefreshSummary] = useState(null); // { successCount, failCount, duration }
   const [diagnosticsModal, setDiagnosticsModal] = useState({ isOpen: false, diagnostics: null, sourceName: '' });
+
+  // Persisted stream-test results keyed by source id. Survives navigation +
+  // page refresh via localStorage so runs are still visible when the user
+  // comes back to this page.
+  const {
+    results: testResults,
+    setResult: setTestResult,
+    setPendingResult: setPendingTestResult,
+    removeResults: removeTestResults,
+  } = useTestResults();
 
   // Load sources on mount
   useEffect(() => {
@@ -76,6 +87,8 @@ const MyIPTVs = ({
       await iptvSourcesService.deleteSource(sourceId);
       // Remove from local state
       setSources(prev => prev.filter(s => s.id !== sourceId));
+      // Drop any persisted test result for this source so it doesn't linger.
+      removeTestResults([sourceId]);
       if (onSourcesUpdated) onSourcesUpdated();
       setNotification({
         type: 'success',
@@ -520,6 +533,10 @@ const MyIPTVs = ({
               key={group.key}
               group={group}
               sourceRefreshStatus={sourceRefreshStatus}
+              testResults={testResults}
+              onSetTestResult={setTestResult}
+              onSetPendingTestResult={setPendingTestResult}
+              onRemoveTestResults={removeTestResults}
               onEdit={handleEditNickname}
               onDelete={handleDelete}
               onViewChannels={handleViewChannels}
