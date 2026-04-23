@@ -397,9 +397,13 @@ async function processChannels(sessionId, channels, userId = null, options = {})
     }
   }
   
-  // Complete
-  sendProgressUpdate(sessionId, 'complete', 100, 'Processing complete!');
-  
+  // Progress — NOT 'complete' yet. Channel rows haven't been persisted to the DB,
+  // so iptv_sources.channel_count is still null. If we broadcast 'complete' here
+  // the frontend refreshes the source list while the count is 0. The authoritative
+  // `complete` event is the broadcastSSEUpdate({type:'complete'}) below, after
+  // saveChannels has run.
+  sendProgressUpdate(sessionId, 'persisting', 97, 'Saving channels to database…');
+
   // Mark session as complete
   try {
     sessionStorage.updateSession(sessionId, {

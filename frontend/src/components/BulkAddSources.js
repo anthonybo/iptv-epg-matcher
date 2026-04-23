@@ -205,13 +205,22 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
       try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
     };
 
+    // Backend emits events through a mix of code paths:
+    //   - detailedProgressService.js emits `percentage` (not `progress`)
+    //   - some paths write `event: <type>\n` (named); the legacy sendSSEUpdate
+    //     in sseUtils.js writes ONLY `data: ...\n\n` (unnamed)
+    // Unnamed frames only fire onmessage, so we can't rely on addEventListener
+    // for `complete`/`error` — onmessage has to be the canonical router.
+    const getProgressNumber = (data) => {
+      if (typeof data?.progress === 'number') return data.progress;
+      if (typeof data?.percentage === 'number') return data.percentage;
+      return null;
+    };
+
     const applyProgress = (data) => {
-      // Only write fields the event actually carries. Some late-stage events
-      // (e.g. {stage:'finalizing', message:'...'}) omit `progress`/`channelCount`
-      // entirely; blindly assigning undefined wipes the real values and makes
-      // the bar snap back to 0.
       const patch = {};
-      if (typeof data.progress === 'number') patch.progress = Math.max(0, data.progress);
+      const n = getProgressNumber(data);
+      if (n !== null) patch.progress = Math.max(0, n);
       if (typeof data.stage === 'string') patch.stage = data.stage;
       if (typeof data.message === 'string') patch.message = data.message;
       const nextChannelCount = data.channelCount ?? data.totalChannels;
@@ -219,43 +228,54 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
       if (Object.keys(patch).length > 0) updateEntry(idx, patch);
     };
 
-    // Backend sends `progress` events as unnamed SSE frames (see sseUtils.js).
-    // Unnamed frames fire `onmessage`, not addEventListener('progress',...).
-    es.onmessage = (e) => {
-      const data = safeParse(e.data);
-      if (data?.type === 'progress' || typeof data?.progress === 'number') {
-        applyProgress(data);
-      }
-    };
-    es.addEventListener('progress', (e) => applyProgress(safeParse(e.data)));
-    es.addEventListener('channels_available', (e) => {
-      const data = safeParse(e.data);
-      updateEntry(idx, {
-        stage: 'channels_loaded',
-        channelCount: data.channelCount || data.totalChannels,
-        progress: Math.max(data.progress || 30, 30),
-        message: `${data.channelCount || data.totalChannels || 0} channels loaded`,
-      });
-    });
-    es.addEventListener('complete', (e) => {
-      const data = safeParse(e.data);
+    const handleComplete = (data) => {
+      const n = getProgressNumber(data);
       finalizeEntry(idx, es, {
         status: 'done',
-        progress: 100,
+        progress: n !== null ? Math.max(n, 100) : 100,
         stage: 'complete',
         message: data.message || 'Complete',
         channelCount: data.channelCount || data.totalChannels,
         sessionId,
       });
-    });
-    es.addEventListener('error', (e) => {
-      const data = safeParse(e.data);
+    };
+
+    const handleErrorEvent = (data) => {
       finalizeEntry(idx, es, {
         status: 'failed',
         error: data.message || data.error || 'Load failed',
         sessionId,
       });
-    });
+    };
+
+    const handleChannelsAvailable = (data) => {
+      const channels = data.channelCount || data.totalChannels;
+      updateEntry(idx, {
+        stage: 'channels_loaded',
+        ...(typeof channels === 'number' && channels > 0 ? { channelCount: channels } : {}),
+        progress: Math.max(getProgressNumber(data) ?? 30, 30),
+        message: channels ? `${channels.toLocaleString()} channels loaded` : 'Channels loaded',
+      });
+    };
+
+    const routeByType = (data) => {
+      const type = data?.type;
+      if (type === 'complete') { handleComplete(data); return; }
+      if (type === 'error') { handleErrorEvent(data); return; }
+      if (type === 'channels_available' || type === 'channels-available') { handleChannelsAvailable(data); return; }
+      // Fall through: everything else (progress, heartbeat, message, stage-only frames)
+      // gets applied as a progress update if it carries any useful fields.
+      applyProgress(data);
+    };
+
+    // onmessage catches unnamed SSE frames (the legacy broadcast path).
+    es.onmessage = (e) => routeByType(safeParse(e.data));
+    // Named listeners catch the direct-write paths that DO set event: <type>.
+    es.addEventListener('progress', (e) => applyProgress(safeParse(e.data)));
+    es.addEventListener('channels_available', (e) => handleChannelsAvailable(safeParse(e.data)));
+    es.addEventListener('channels-available', (e) => handleChannelsAvailable(safeParse(e.data)));
+    es.addEventListener('complete', (e) => handleComplete(safeParse(e.data)));
+    es.addEventListener('error', (e) => handleErrorEvent(safeParse(e.data)));
     // Connection-level errors (e.g. transient network) don't mark the entry failed —
     // backend may still be processing and a reconnect will pick up the next event.
   };
