@@ -10,6 +10,9 @@ const xmltvParser = require('./xmltvParser');
 const epgDownloader = require('./epgDownloader');
 const epgDatabaseService = require('./epgDatabaseService');
 const configService = require('./configService');
+const { pool } = require('./postgresService');
+
+const STREAMING_ENABLED = process.env.EPG_REFRESH_STREAMING !== 'false';
 
 /**
  * Generate source ID from URL (MD5 hash)
@@ -86,13 +89,24 @@ async function parseEpgSource(sourceConfig, options = {}) {
       programCount: 0
     });
 
-    // 5. Data already cleared by TRUNCATE at the start of refresh
-    // No need to delete per-source since we're doing a full refresh
+    // 5. Per-source replace: delete only this source's existing rows so the
+    //    guide stays available for other sources while this one refreshes.
+    //    Autovacuum is explicitly paused during parseAllSources (see Option B
+    //    in plan), so the dead tuples generated here don't trigger a
+    //    concurrent VACUUM that fights the refresh for I/O.
+    if (STREAMING_ENABLED) {
+      if (onProgress) onProgress(`Clearing old data for ${sourceConfig.name}...`);
+      await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+      await pool.query('DELETE FROM epg_channels WHERE source_id = $1', [sourceId]);
+    }
 
     // 6. Parse EVERYTHING in single pass (channels + programs)
     logger.info(`[EPG Parser] Parsing ${sourceConfig.name} from ${filePath}...`);
     if (onProgress) onProgress(`Parsing ${sourceConfig.name}...`);
-    const result = await xmltvParser.parseSinglePass(filePath, sourceId, wrappedProgress, epgDatabaseService);
+    const parseFn = STREAMING_ENABLED
+      ? xmltvParser.parseSinglePassStreaming
+      : xmltvParser.parseSinglePass;
+    const result = await parseFn(filePath, sourceId, wrappedProgress, epgDatabaseService);
 
     if (result.channelCount === 0) {
       logger.warn(`[EPG Parser] No channels found in ${sourceConfig.name}`);
@@ -129,6 +143,19 @@ async function parseEpgSource(sourceConfig, options = {}) {
   } catch (error) {
     const duration = Date.now() - startTime;
     logger.error(`[EPG Parser] Failed to process ${sourceConfig.name}: ${error.message}`);
+
+    // In streaming mode we've already deleted old rows and may have streamed
+    // partial new rows before failing. Clean those up so the source ends up
+    // empty rather than half-populated.
+    if (STREAMING_ENABLED) {
+      try {
+        const sourceId = generateSourceId(sourceConfig.url);
+        await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+        await pool.query('DELETE FROM epg_channels WHERE source_id = $1', [sourceId]);
+      } catch (cleanupErr) {
+        logger.warn(`[EPG Parser] Failure-cleanup error for ${sourceConfig.name}: ${cleanupErr.message}`);
+      }
+    }
 
     return {
       success: false,
@@ -183,16 +210,20 @@ async function parseAllSources(options = {}) {
       };
     }
 
-    // Drop indexes for bulk loading performance
-    if (dropIndexes) {
-      broadcastProgress('Dropping indexes for bulk load performance...');
-      await epgDatabaseService.dropIndexes();
+    // Streaming mode replaces data one source at a time (inside parseEpgSource)
+    // so the guide stays available and a single source failure doesn't wipe
+    // everything. Legacy mode keeps the global drop/truncate behaviour.
+    if (!STREAMING_ENABLED) {
+      if (dropIndexes) {
+        broadcastProgress('Dropping indexes for bulk load performance...');
+        await epgDatabaseService.dropIndexes();
+      }
+      broadcastProgress('Clearing all existing EPG data...');
+      await epgDatabaseService.truncateAllEpgData();
+      broadcastProgress('EPG data cleared, ready for fresh import');
+    } else {
+      broadcastProgress('Streaming refresh enabled — data will be replaced per source');
     }
-
-    // TRUNCATE all EPG data at the start (much faster than DELETE)
-    broadcastProgress('Clearing all existing EPG data...');
-    await epgDatabaseService.truncateAllEpgData();
-    broadcastProgress('EPG data cleared, ready for fresh import');
 
     // Process each source sequentially (to avoid overwhelming the system)
     const results = [];
@@ -221,8 +252,9 @@ async function parseAllSources(options = {}) {
       }
     }
 
-    // Recreate indexes after bulk loading
-    if (dropIndexes) {
+    // Recreate indexes after bulk loading (legacy path only — streaming mode
+    // never drops them).
+    if (!STREAMING_ENABLED && dropIndexes) {
       broadcastProgress('Recreating indexes...');
       await epgDatabaseService.recreateIndexes();
     }

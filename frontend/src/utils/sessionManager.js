@@ -19,14 +19,11 @@ const SessionManager = {
     getSessionId: () => {
       try {
         // Check multiple possible keys for compatibility
-        const sessionId = localStorage.getItem('iptv_epg_session_id') || 
-                         localStorage.getItem('sessionId') || 
+        const sessionId = localStorage.getItem('iptv_epg_session_id') ||
+                         localStorage.getItem('sessionId') ||
                          localStorage.getItem('session_id');
-        
-        console.log(`[SessionManager] Retrieved session ID from storage: ${sessionId || 'not found'}`);
-        
+
         if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
-          console.log('[SessionManager] No valid session ID found, creating new one');
           return SessionManager.init();
         }
         

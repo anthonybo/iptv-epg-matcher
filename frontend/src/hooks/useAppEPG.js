@@ -91,12 +91,10 @@ export function useAppEPG() {
     if (!sessionId) return;
 
     try {
-      console.log('[useEPG] Updating EPG sources using session ID:', sessionId);
       const response = await apiClient.get(`/epg/${sessionId}/sources?_t=${Date.now()}`);
       const data = response.data;
 
       if (data && data.sources) {
-        console.log('[useEPG] Updating EPG sources:', data.sources);
         setEpgSources(data.sources);
 
         if (data.sources.length > 0) {

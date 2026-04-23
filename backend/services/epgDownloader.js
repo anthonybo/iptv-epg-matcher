@@ -181,22 +181,50 @@ async function decompressFile(gzPath, outPath, onProgress = null) {
   logger.info(`[EPG Downloader] Decompressing ${gzPath} to ${outPath}...`);
   if (onProgress) onProgress(`Decompressing EPG file...`);
 
+  // Reject zero-byte .gz cache files up front — they come from downloads that
+  // returned 200 but an empty body (seen on some flaky EPG providers). gunzip
+  // on an empty stream throws "unexpected end of file" asynchronously, which
+  // escaped this function's Promise and crashed the process.
+  try {
+    const st = fs.statSync(gzPath);
+    if (st.size === 0) {
+      try { fs.unlinkSync(gzPath); } catch (_) { /* ignore */ }
+      throw new Error(`Gzip file is empty (0 bytes): ${gzPath}`);
+    }
+  } catch (err) {
+    throw err;
+  }
+
   return new Promise((resolve, reject) => {
     const gunzip = require('zlib').createGunzip();
     const input = fs.createReadStream(gzPath);
     const output = fs.createWriteStream(outPath);
 
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      logger.error(`[EPG Downloader] Decompression error: ${err.message}`);
+      try { input.destroy(); } catch (_) {}
+      try { gunzip.destroy(); } catch (_) {}
+      try { output.destroy(); } catch (_) {}
+      // Remove the corrupt .gz so a future refresh redownloads it.
+      try { fs.unlinkSync(gzPath); } catch (_) {}
+      reject(err);
+    };
+
+    input.on('error', fail);
+    gunzip.on('error', fail);
+    output.on('error', fail);
+
     input.pipe(gunzip).pipe(output);
 
     output.on('finish', () => {
+      if (settled) return;
+      settled = true;
       logger.info(`[EPG Downloader] Decompression complete: ${outPath}`);
       if (onProgress) onProgress(`Decompression complete`);
       resolve(true);
-    });
-
-    output.on('error', (err) => {
-      logger.error(`[EPG Downloader] Decompression error: ${err.message}`);
-      reject(err);
     });
   });
 }

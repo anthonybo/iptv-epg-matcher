@@ -469,8 +469,250 @@ async function parseXMLTV(filePath, sourceId, onProgress = null, dbService = nul
   }
 }
 
+/**
+ * Parse XMLTV file in STREAMING single pass — flushes channels and programs to
+ * DB as they are parsed, using SAX pause/resume for backpressure.
+ *
+ * Why this exists: the legacy parseSinglePass accumulates every channel and
+ * program into in-memory arrays before any DB write, which OOM'd on large EPG
+ * sources (e.g. 422K programs ≈ 200MB per source). This variant bounds peak
+ * memory to roughly PROGRAM_BATCH_SIZE * 2 regardless of file size, exploiting
+ * the XMLTV spec guarantee that all <channel> elements precede all <programme>
+ * elements — so channels can be flushed on the first <programme> without
+ * breaking the epg_programs.channel_id FK.
+ *
+ * @param {string} filePath - Path to XMLTV file (downloader has already gunzipped)
+ * @param {string} sourceId - EPG source ID
+ * @param {Function} onProgress - Optional progress callback
+ * @param {Object} dbService - Database service (must expose saveChannels/savePrograms)
+ * @returns {Promise<Object>} { channelCount, programCount }
+ */
+async function parseSinglePassStreaming(filePath, sourceId, onProgress = null, dbService = null) {
+  if (!dbService) {
+    throw new Error('[XMLTV Parser] parseSinglePassStreaming requires a dbService');
+  }
+
+  const PROGRAM_BATCH_SIZE = 10000;
+  const MAX_ACTIVE_WRITES = 2;
+
+  return new Promise((resolve, reject) => {
+    const pendingChannels = [];
+    const channelIdSet = new Set();
+    let programBatch = [];
+
+    let currentChannel = null;
+    let currentProgram = null;
+    let currentElement = '';
+
+    let channelsFlushed = false;
+    let flushingChannels = null; // promise while the one-time channel flush is in flight
+    let activeWrites = 0;
+    let pausedForBackpressure = false;
+    let endedSignal = false;
+
+    let totalChannels = 0;
+    let totalPrograms = 0;
+    let skippedPrograms = 0;
+    let orphanPrograms = 0;
+    let lastProgressTime = Date.now();
+    let settled = false;
+
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve({ channelCount: totalChannels, programCount: totalPrograms });
+    };
+
+    const parser = sax.createStream(true, {
+      trim: true,
+      normalize: true,
+      lowercase: true
+    });
+
+    const readStream = fs.createReadStream(filePath);
+
+    const pauseUpstream = () => {
+      if (!pausedForBackpressure) {
+        pausedForBackpressure = true;
+        readStream.pause();
+      }
+    };
+    const resumeUpstream = () => {
+      if (pausedForBackpressure && activeWrites < MAX_ACTIVE_WRITES && !flushingChannels) {
+        pausedForBackpressure = false;
+        readStream.resume();
+      }
+    };
+
+    const reportProgress = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastProgressTime < PROGRESS_INTERVAL_MS) return;
+      lastProgressTime = now;
+      const msg = `Parsed ${totalChannels.toLocaleString()} channels, ${totalPrograms.toLocaleString()} programs (streaming)`;
+      logger.info(`[XMLTV Parser] ${msg}`);
+      if (onProgress) onProgress(msg);
+    };
+
+    const flushChannelsOnce = () => {
+      if (channelsFlushed || flushingChannels) return flushingChannels || Promise.resolve();
+      pauseUpstream();
+      const batch = pendingChannels.splice(0);
+      flushingChannels = (async () => {
+        try {
+          if (batch.length > 0) {
+            await dbService.saveChannels(batch);
+            totalChannels += batch.length;
+            for (const c of batch) channelIdSet.add(c.id);
+            const msg = `Inserted ${totalChannels.toLocaleString()} channels`;
+            logger.info(`[XMLTV Parser] ${msg}`);
+            if (onProgress) onProgress(msg);
+          }
+          channelsFlushed = true;
+        } finally {
+          flushingChannels = null;
+          resumeUpstream();
+          maybeFinalize();
+        }
+      })();
+      flushingChannels.catch((err) => finish(err));
+      return flushingChannels;
+    };
+
+    const flushProgramsBatch = () => {
+      if (programBatch.length === 0) return;
+      const batch = programBatch;
+      programBatch = [];
+      activeWrites++;
+      if (activeWrites >= MAX_ACTIVE_WRITES) pauseUpstream();
+      dbService.savePrograms(batch)
+        .then(() => {
+          totalPrograms += batch.length;
+          reportProgress();
+        })
+        .catch((err) => finish(err))
+        .finally(() => {
+          activeWrites--;
+          resumeUpstream();
+          maybeFinalize();
+        });
+    };
+
+    const maybeFinalize = () => {
+      if (!endedSignal) return;
+      if (flushingChannels) return;
+      if (activeWrites > 0) return;
+      if (programBatch.length > 0) {
+        flushProgramsBatch();
+        return;
+      }
+      if (!channelsFlushed && pendingChannels.length > 0) {
+        // File with only channels, no programmes — flush channels now.
+        flushChannelsOnce();
+        return;
+      }
+      reportProgress(true);
+      logger.info(`[XMLTV Parser] Streaming parse complete: ${totalChannels} channels, ${totalPrograms} programs (skipped ${skippedPrograms}, orphans ${orphanPrograms})`);
+      finish(null);
+    };
+
+    parser.on('opentag', (node) => {
+      currentElement = node.name;
+
+      if (node.name === 'channel') {
+        currentChannel = {
+          id: node.attributes.id || '',
+          sourceId,
+          name: '',
+          icon: '',
+          languageCode: null,
+          categoriesCSV: null
+        };
+      } else if (currentChannel && node.name === 'icon' && node.attributes.src) {
+        currentChannel.icon = node.attributes.src;
+      } else if (node.name === 'programme') {
+        if (!channelsFlushed) {
+          // First programme seen — channels section is over. Flush channels now.
+          flushChannelsOnce();
+        }
+        currentProgram = {
+          id: '',
+          channelId: node.attributes.channel || '',
+          sourceId,
+          title: '',
+          description: null,
+          start: parseXMLTVTimestamp(node.attributes.start),
+          stop: parseXMLTVTimestamp(node.attributes.stop),
+          categories: []
+        };
+      }
+    });
+
+    parser.on('text', (text) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      if (currentChannel && currentElement === 'display-name') {
+        if (!currentChannel.name) currentChannel.name = trimmed;
+      } else if (currentProgram) {
+        switch (currentElement) {
+          case 'title':
+            currentProgram.title = trimmed;
+            break;
+          case 'desc':
+            currentProgram.description = trimmed;
+            break;
+          case 'category':
+            currentProgram.categories.push(trimmed);
+            break;
+        }
+      }
+    });
+
+    parser.on('closetag', (tagName) => {
+      if (tagName === 'channel' && currentChannel) {
+        if (currentChannel.id && currentChannel.name) {
+          pendingChannels.push(currentChannel);
+        }
+        currentChannel = null;
+      } else if (tagName === 'programme' && currentProgram) {
+        if (!currentProgram.title || !currentProgram.title.trim()) {
+          skippedPrograms++;
+        } else if (!currentProgram.start || !currentProgram.stop) {
+          skippedPrograms++;
+        } else if (!channelIdSet.has(currentProgram.channelId)) {
+          orphanPrograms++;
+        } else {
+          currentProgram.id = `${currentProgram.channelId}_${currentProgram.start.getTime()}_${currentProgram.stop.getTime()}`;
+          programBatch.push(currentProgram);
+          if (programBatch.length >= PROGRAM_BATCH_SIZE) {
+            flushProgramsBatch();
+          }
+        }
+        currentProgram = null;
+      }
+      currentElement = '';
+    });
+
+    parser.on('error', (error) => {
+      logger.warn(`[XMLTV Parser] SAX error (continuing): ${error.message}`);
+      parser.error = null;
+      parser.resume();
+    });
+
+    parser.on('end', () => {
+      endedSignal = true;
+      maybeFinalize();
+    });
+
+    readStream.on('error', (err) => finish(err));
+
+    readStream.pipe(parser);
+  });
+}
+
 module.exports = {
   parseSinglePass,
+  parseSinglePassStreaming,
   parseXMLTV,
   parseXMLTVTimestamp
 };
