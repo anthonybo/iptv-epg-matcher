@@ -107,15 +107,25 @@ const DataCell = ({ label, value, tone = 'default', mono }) => {
   );
 };
 
+const testPillMeta = {
+  testing: { tone: 'bg-blue-500/15 border-blue-500/40 text-blue-300', dot: 'bg-blue-400 animate-pulse' },
+  passed: { tone: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300', dot: 'bg-emerald-400' },
+  partial: { tone: 'bg-amber-500/15 border-amber-500/40 text-amber-300', dot: 'bg-amber-400' },
+  failed: { tone: 'bg-red-500/15 border-red-500/40 text-red-300', dot: 'bg-red-400' },
+  error: { tone: 'bg-red-500/15 border-red-500/40 text-red-300', dot: 'bg-red-400' },
+};
+
 const AccountRow = ({
   source,
   refreshStatus,
+  testResult,
   onEdit,
   onDelete,
   onViewChannels,
   onRefreshAccountInfo,
   onEditCredentials,
   onTestStreams,
+  onShowDiagnostics,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [isEditingNickname, setIsEditingNickname] = useState(false);
@@ -371,6 +381,42 @@ const AccountRow = ({
               <span className="text-[10px] text-slate-600 font-mono tabular-nums">{lastRefreshDuration}</span>
             )}
           </div>
+          {testResult && (
+            <div className="w-24">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600 block">Streams</span>
+              {testResult.status === 'testing' ? (
+                <span className="inline-flex items-center gap-1.5 text-xs text-blue-300">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                  Testing…
+                </span>
+              ) : testResult.status === 'error' ? (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); }}
+                  title={testResult.error || 'Test failed'}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${testPillMeta.error.tone}`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${testPillMeta.error.dot}`} />
+                  Error
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onShowDiagnostics && testResult.diagnostics) {
+                      onShowDiagnostics(source, testResult.diagnostics);
+                    }
+                  }}
+                  title={`${testResult.passed}/${testResult.tested} streams passed — click for details`}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums transition-colors hover:brightness-110 ${testPillMeta[testResult.status]?.tone || testPillMeta.failed.tone}`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${testPillMeta[testResult.status]?.dot || testPillMeta.failed.dot}`} />
+                  {testResult.passed}/{testResult.tested}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Action strip */}

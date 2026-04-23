@@ -1,10 +1,57 @@
 const MAC_RE = /\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b/g;
 const URL_RE = /https?:\/\/[^\s,<>"']+/gi;
 const GET_PHP_RE = /\/get\.php\?[^\s]*username=/i;
+// Labeled credentials: "Username: X | Password: Y", "user=foo pass=bar", etc.
+// URLs are stripped from the line before these match so embedded-auth URLs
+// (http://user:pass@host) don't trigger false hits.
+const USERNAME_LABEL_RE = /\buser(?:name)?\s*[:=]\s*([^\s|,]+)/i;
+const PASSWORD_LABEL_RE = /\bpass(?:word)?\s*[:=]\s*([^\s|,]+)/i;
 
 const stripTrailingPunctuation = (value) => value.replace(/[.,;:)\]]+$/g, '');
 
 const normalizeMac = (mac) => mac.toUpperCase();
+
+const extractUserPass = (line) => {
+  const cleaned = line.replace(URL_RE, ' ');
+  const uMatch = cleaned.match(USERNAME_LABEL_RE);
+  const pMatch = cleaned.match(PASSWORD_LABEL_RE);
+  if (!uMatch && !pMatch) return null;
+  return {
+    username: uMatch ? stripTrailingPunctuation(uMatch[1]) : null,
+    password: pMatch ? stripTrailingPunctuation(pMatch[1]) : null,
+  };
+};
+
+const normalizeServer = (rawUrl) => {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return rawUrl;
+  }
+};
+
+// `host.tld` or `host.tld:port` — no scheme. Must have at least one dot in the
+// host and a TLD of 2+ letters so we don't falsely match MACs or random text.
+const BARE_HOST_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)+(?::\d{1,5})?$/;
+// user:pass — anything non-whitespace/non-colon as user, anything non-whitespace as pass.
+const COLON_CREDS_RE = /^([^\s:]+):(\S+)$/;
+
+// Compact columnar format: `host[:port]   user:pass   <trailing metadata>`.
+// Columns are separated by runs of 2+ whitespace or tabs.
+const extractCompactXtream = (line) => {
+  const cols = line.split(/\s{2,}|\t+/);
+  if (cols.length < 2) return null;
+  const host = cols[0].trim();
+  if (!BARE_HOST_RE.test(host)) return null;
+  const credsMatch = cols[1].trim().match(COLON_CREDS_RE);
+  if (!credsMatch) return null;
+  return {
+    server: `http://${host}`,
+    username: credsMatch[1],
+    password: credsMatch[2],
+  };
+};
 
 const parseXtreamUrl = (rawUrl) => {
   try {
@@ -53,7 +100,9 @@ export const parseBulkSources = (rawText, options = {}) => {
     return { entries, errors };
   }
 
-  let currentPortal = defaultPortal || null;
+  // Shared "last-seen server URL" context. A URL anywhere in the text updates
+  // it and subsequent MAC or Username/Password lines bind to it.
+  let currentServer = defaultPortal || null;
 
   const lines = rawText.split(/\r?\n/);
   lines.forEach((originalLine, index) => {
@@ -63,7 +112,9 @@ export const parseBulkSources = (rawText, options = {}) => {
     const urlsInLine = extractUrls(line);
     const xtreamUrls = urlsInLine.filter((u) => GET_PHP_RE.test(u));
     const macsInLine = extractMacs(line);
+    const userPass = extractUserPass(line);
 
+    // Priority 1: a full Xtream M3U URL on the line — self-contained.
     if (xtreamUrls.length > 0) {
       xtreamUrls.forEach((url) => {
         const parsed = parseXtreamUrl(url);
@@ -81,8 +132,70 @@ export const parseBulkSources = (rawText, options = {}) => {
 
     const nonXtreamUrls = urlsInLine.filter((u) => !GET_PHP_RE.test(u));
 
+    // Priority 2: compact columnar format — `host:port  user:pass  <metadata>`.
+    // Runs before the label and MAC checks because the line has no scheme and
+    // none of the other patterns would match.
+    if (urlsInLine.length === 0 && macsInLine.length === 0) {
+      const compact = extractCompactXtream(line);
+      if (compact) {
+        const entry = {
+          type: 'xtream',
+          server: compact.server,
+          username: compact.username,
+          password: compact.password,
+          raw: originalLine,
+        };
+        const key = dedupeKey(entry);
+        if (!seen.has(key)) {
+          seen.add(key);
+          entries.push(entry);
+        }
+        return;
+      }
+    }
+
+    // Priority 3: labeled Username/Password on the line — binds to current or inline server.
+    if (userPass && (userPass.username || userPass.password)) {
+      const inlineServer = nonXtreamUrls[0] ? normalizeServer(nonXtreamUrls[0]) : null;
+      const server = inlineServer || currentServer;
+      if (inlineServer) currentServer = inlineServer;
+      if (!userPass.username || !userPass.password) {
+        errors.push({
+          line: index + 1,
+          text: originalLine,
+          reason: userPass.username
+            ? 'Username without matching Password'
+            : 'Password without matching Username',
+        });
+        return;
+      }
+      if (!server) {
+        errors.push({
+          line: index + 1,
+          text: originalLine,
+          reason: 'Username/Password found without a server URL — add a "Portal: http://..." line above or set a default portal',
+        });
+        return;
+      }
+      const entry = {
+        type: 'xtream',
+        server,
+        username: userPass.username,
+        password: userPass.password,
+        raw: originalLine,
+      };
+      const key = dedupeKey(entry);
+      if (!seen.has(key)) {
+        seen.add(key);
+        entries.push(entry);
+      }
+      return;
+    }
+
+    // Priority 3: a MAC on the line — Stalker entry bound to current or inline portal.
     if (macsInLine.length > 0) {
-      const portal = nonXtreamUrls[0] || currentPortal;
+      const inlineServer = nonXtreamUrls[0] || null;
+      const portal = inlineServer || currentServer;
       if (!portal) {
         errors.push({
           line: index + 1,
@@ -91,7 +204,7 @@ export const parseBulkSources = (rawText, options = {}) => {
         });
         return;
       }
-      if (nonXtreamUrls[0]) currentPortal = nonXtreamUrls[0];
+      if (inlineServer) currentServer = inlineServer;
       macsInLine.forEach((mac) => {
         const entry = { type: 'stalker', server: portal, mac, raw: originalLine };
         const key = dedupeKey(entry);
@@ -102,8 +215,9 @@ export const parseBulkSources = (rawText, options = {}) => {
       return;
     }
 
+    // Priority 4: a URL alone — remember it as the server context for the next line.
     if (nonXtreamUrls.length > 0) {
-      currentPortal = nonXtreamUrls[0];
+      currentServer = nonXtreamUrls[0];
       return;
     }
   });

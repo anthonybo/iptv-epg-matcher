@@ -526,6 +526,13 @@ const MyIPTVs = ({
               onRefreshAccountInfo={handleRefreshAccountInfo}
               onEditCredentials={handleEditCredentials}
               onTestStreams={handleTestStreams}
+              onShowDiagnostics={(source, diagnostics) => {
+                setDiagnosticsModal({
+                  isOpen: true,
+                  diagnostics,
+                  sourceName: source.nickname || source.name || 'Source',
+                });
+              }}
             />
           ))}
         </div>

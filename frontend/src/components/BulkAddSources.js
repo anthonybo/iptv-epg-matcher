@@ -377,10 +377,25 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
     <section className="space-y-4">
       <h3 className="text-lg font-semibold text-slate-100">Bulk Add Sources</h3>
       <p className="text-sm text-slate-400">
-        Paste Xtream M3U URLs, MAG/Stalker portals with MACs, or bulk MAC lists. Each line is auto-detected.
+        Paste any mix of Xtream accounts, MAG/Stalker portals, or bulk MAC lists. Each line is auto-detected.
       </p>
       <ul className="list-disc pl-5 text-xs text-slate-400 space-y-1">
         <li><code className="text-slate-300">http://host:port/get.php?username=X&amp;password=Y&amp;type=m3u_plus</code></li>
+        <li>
+          A server URL followed by labeled creds, one per line:
+          <code className="block text-slate-300 mt-1">
+            Portal: http://host:8080<br />
+            Username: alice | Password: hunter2<br />
+            Username: bob | Password: sw0rdf1sh
+          </code>
+        </li>
+        <li>
+          Column-style list — server, user:pass, then any trailing metadata:
+          <code className="block text-slate-300 mt-1">
+            canal-pro.xyz:8080    alice:hunter2    0/3    Active<br />
+            canal-pro.xyz:8080    bob:sw0rdf1sh    1/3    Active
+          </code>
+        </li>
         <li>Stalker block with <code className="text-slate-300">Real/Portal/Mac ➤</code> lines</li>
         <li><code className="text-slate-300">[MAC] ✔ 00:1A:79:XX:XX:XX</code> (uses default portal below)</li>
       </ul>
