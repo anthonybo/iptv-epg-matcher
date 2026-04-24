@@ -118,9 +118,11 @@ router.post('/search-channel', async (req, res) => {
     let awayTeam = null;
 
     // Alias bundles from team_aliases — single lookup per request.
-    // If the league isn't known or no rows match, fall back to just
-    // the live_events team string as a single-element alias list.
-    // `homeAliases` / `awayAliases` feed the new multi-stage matcher.
+    // These are the TIERED shape ({full, mascot, abbr, short, manual,
+    // city}) so the matcher can score mascot-level hits higher than
+    // city-level hits (which otherwise false-positive against shows
+    // like "EL CHAPULIN COLORADO" matching Colorado Rapids via the
+    // "Colorado" city alias).
     let homeAliases = null;
     let awayAliases = null;
 
@@ -139,19 +141,25 @@ router.post('/search-channel', async (req, res) => {
             teamAliasesService.getAliasesForTeam(leagueName, homeTeam),
             teamAliasesService.getAliasesForTeam(leagueName, awayTeam)
           ]);
-          homeAliases = hb ? hb.aliases : [homeTeam];
-          awayAliases = ab ? ab.aliases : [awayTeam];
+          // Pass the TIERED bundle through; fall back to a single-
+          // element `full` tier when the team isn't in our registry.
+          homeAliases = hb
+            ? hb.tiered
+            : { full: [homeTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
+          awayAliases = ab
+            ? ab.tiered
+            : { full: [awayTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
           logger.info(
-            `[Find Alternative] Aliases — home: [${homeAliases.join(', ')}], away: [${awayAliases.join(', ')}]`
+            `[Find Alternative] Aliases — home: ${hb ? hb.aliases.join(', ') : homeTeam} | away: ${ab ? ab.aliases.join(', ') : awayTeam}`
           );
         } catch (err) {
           logger.warn(`[Find Alternative] Alias lookup failed: ${err.message}`);
-          homeAliases = [homeTeam];
-          awayAliases = [awayTeam];
+          homeAliases = { full: [homeTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
+          awayAliases = { full: [awayTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
         }
       } else {
-        homeAliases = [homeTeam];
-        awayAliases = [awayTeam];
+        homeAliases = { full: [homeTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
+        awayAliases = { full: [awayTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
       }
     } else {
       searchTerms = [searchQuery];

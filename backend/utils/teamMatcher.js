@@ -121,69 +121,87 @@ function normalizeLeague(leagueName) {
   return null;
 }
 
+// Score for each alias tier when a hit is found. Only the highest
+// tier wins — we don't sum across tiers, so a channel named "Colorado
+// Rapids" scores 150 (full) not 150+100+50 (full + mascot + city).
+const TIER_SCORE = {
+  full:   150,
+  mascot: 100,
+  abbr:   100,
+  manual: 100,
+  short:  80,
+  city:   50
+};
+
+// Order we try tiers when scoring a team against a scrubbed text.
+// Higher-confidence tiers first so the first hit wins.
+const TIER_ORDER = ['full', 'mascot', 'abbr', 'manual', 'short', 'city'];
+
 /**
- * Stage-cascade score for one team's alias list against a scrubbed
- * target text. Returns { score, stage, matched } where stage is the
- * highest-confidence hit found ('exact' | 'word' | 'fuzzy' | null).
+ * Stage-cascade score for one team's tiered alias bundle against a
+ * scrubbed target text. Takes an object with per-tier alias lists
+ * and returns { score, stage, tier, matched }.
  *
- * Aliases below length 4 are only used at the 'exact' stage; we don't
- * run 2/3-char tokens like "LA" or "NY" through the substring/fuzzy
- * passes because they match literally everything.
+ * Accepts either the new tiered shape or a legacy flat array (treated
+ * as 'manual' tier) for back-compat with callers that haven't migrated.
  */
-function scoreAliases(scrubbed, aliases) {
-  if (!scrubbed || !Array.isArray(aliases) || aliases.length === 0) {
-    return { score: 0, stage: null, matched: null };
-  }
+function scoreAliases(scrubbed, aliasesOrBundle) {
+  if (!scrubbed) return { score: 0, stage: null, tier: null, matched: null };
 
-  const longAliases = aliases.filter(a => a && String(a).length >= 4);
-  const shortAliases = aliases.filter(a => a && String(a).length > 0 && String(a).length < 4);
+  // Normalise input: legacy array → synthetic manual bundle.
+  const tiered = Array.isArray(aliasesOrBundle)
+    ? { full: [], mascot: [], abbr: [], manual: aliasesOrBundle.map(String), short: [], city: [] }
+    : (aliasesOrBundle || null);
+  if (!tiered) return { score: 0, stage: null, tier: null, matched: null };
 
-  // Stage a — exact whole-phrase match (for any length, long or short).
-  // Long alias with space = full-team match (e.g. "Colorado Rapids").
-  // Single-word alias: treat match as "word" so it doesn't outscore a
-  // real full-team hit.
-  for (const alias of longAliases) {
-    const aliasLower = String(alias).toLowerCase();
-    if (aliasLower.includes(' ') && scrubbed.includes(aliasLower)) {
-      return { score: 150, stage: 'exact', matched: alias };
+  // Try tiers in confidence order.
+  for (const tier of TIER_ORDER) {
+    const list = tiered[tier] || [];
+    if (list.length === 0) continue;
+    const tierScore = TIER_SCORE[tier] || 50;
+
+    for (const alias of list) {
+      if (!alias) continue;
+      const a = String(alias).toLowerCase();
+
+      if (a.length < 2) continue;
+
+      // Multi-word aliases: substring match counts as whole phrase.
+      // Single-word aliases must be word-bounded so "LA" doesn't match
+      // "class", "york" doesn't match "yorkshire", etc.
+      const hit = a.includes(' ')
+        ? scrubbed.includes(a)
+        : wordContains(scrubbed, a);
+
+      if (hit) return { score: tierScore, stage: 'literal', tier, matched: alias };
     }
   }
-  for (const alias of shortAliases) {
-    if (wordContains(scrubbed, alias)) {
-      return { score: 150, stage: 'exact', matched: alias };
-    }
-  }
 
-  // Stage b — whole-word containment for long-enough aliases.
-  for (const alias of longAliases) {
-    if (wordContains(scrubbed, alias)) {
-      return { score: 100, stage: 'word', matched: alias };
-    }
-  }
-
-  // Stage c — fuzzy fallback (typo tolerance, minor punctuation drift).
-  // FuzzySet with a 0.75 threshold on long aliases only. Cheap because
-  // the candidate list is the channel's own words (usually <12).
-  const words = scrubbed.split(/[\s|:@\-\/]+/).filter(w => w.length >= 3);
-  if (words.length === 0) return { score: 0, stage: null, matched: null };
-  const fuzzy = FuzzySet(words);
-  let best = 0;
-  let bestAlias = null;
-  for (const alias of longAliases) {
-    const aliasLower = String(alias).toLowerCase();
-    const hit = fuzzy.get(aliasLower, null, 0.8);
-    if (hit && hit.length > 0) {
-      const quality = hit[0][0]; // 0..1
-      const s = Math.round(quality * 70);
-      if (s > best) {
-        best = s;
-        bestAlias = alias;
+  // Fuzzy fallback — only when NO literal hit at any tier. Run against
+  // the canonical full and mascot terms (the ones we most want typo
+  // tolerance for); city/abbr fuzzy is more noise than signal.
+  const fuzzyCandidates = [
+    ...(tiered.full || []),
+    ...(tiered.mascot || [])
+  ].filter(a => a && String(a).length >= 4);
+  if (fuzzyCandidates.length > 0) {
+    const words = scrubbed.split(/[\s|:@\-\/]+/).filter(w => w.length >= 3);
+    if (words.length > 0) {
+      const fuzzy = FuzzySet(words);
+      let best = 0;
+      let bestAlias = null;
+      for (const alias of fuzzyCandidates) {
+        const hit = fuzzy.get(String(alias).toLowerCase(), null, 0.8);
+        if (hit && hit.length > 0) {
+          const s = Math.round(hit[0][0] * 70);
+          if (s > best) { best = s; bestAlias = alias; }
+        }
       }
+      if (best > 0) return { score: best, stage: 'fuzzy', tier: 'fuzzy', matched: bestAlias };
     }
   }
-  return best > 0
-    ? { score: best, stage: 'fuzzy', matched: bestAlias }
-    : { score: 0, stage: null, matched: null };
+
+  return { score: 0, stage: null, tier: null, matched: null };
 }
 
 /**
@@ -229,23 +247,41 @@ function scoreLeagueContext(scrubbed, sportType, leagueName) {
  * two team alias bundles + context. Pure function — safe to call
  * twice and combine the results.
  *
- * Returns { score, homeStage, awayStage, leagueBonus, bothTeamsBonus }
+ * Accepts either the new tiered bundle shape (`{full, mascot, abbr,
+ * short, manual, city}`) or a legacy flat array (treated as manual
+ * tier) for back-compat with older callers.
  */
 function scoreText(text, homeAliases, awayAliases, context = {}) {
   const scrubbed = scrub(text);
   if (!scrubbed) {
-    return { score: 0, homeStage: null, awayStage: null, leagueBonus: 0, bothTeamsBonus: 0 };
+    return {
+      score: 0,
+      homeStage: null, awayStage: null,
+      homeTier: null, awayTier: null,
+      homeMatch: null, awayMatch: null,
+      leagueBonus: 0, bothTeamsBonus: 0
+    };
   }
 
   const home = scoreAliases(scrubbed, homeAliases);
   const away = scoreAliases(scrubbed, awayAliases);
-  const bothTeamsBonus = (home.score > 0 && away.score > 0) ? 200 : 0;
+
+  // Both-teams bonus — but only when BOTH hits are at a meaningful
+  // tier. Two city-only hits ("Colorado" + "Los Angeles" in a travel
+  // show named "Colorado to Los Angeles") would otherwise score 50+50+200=300
+  // and falsely beat real team channels.
+  const homeMeaningful = home.tier && home.tier !== 'city';
+  const awayMeaningful = away.tier && away.tier !== 'city';
+  const bothTeamsBonus = (homeMeaningful && awayMeaningful) ? 200 : 0;
+
   const leagueBonus = scoreLeagueContext(scrubbed, context.sportType, context.leagueName);
 
   return {
     score: home.score + away.score + bothTeamsBonus + leagueBonus,
     homeStage: home.stage,
     awayStage: away.stage,
+    homeTier: home.tier,
+    awayTier: away.tier,
     homeMatch: home.matched,
     awayMatch: away.matched,
     leagueBonus,
@@ -284,6 +320,8 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
       programBonus,
       homeStage: nameResult.homeStage,
       awayStage: nameResult.awayStage,
+      homeTier: nameResult.homeTier,
+      awayTier: nameResult.awayTier,
       homeMatch: nameResult.homeMatch,
       awayMatch: nameResult.awayMatch,
       leagueBonus: nameResult.leagueBonus,

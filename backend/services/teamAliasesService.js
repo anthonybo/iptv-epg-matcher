@@ -289,24 +289,95 @@ async function getAliasesForTeam(leagueName, teamName) {
 }
 
 function rowToBundle(row) {
+  // Classify ESPN fields into tiers that the matcher scores differently:
+  //   full   — the full team name, must match as a whole phrase     → 150
+  //   mascot — nickname (distinctive team identifier, e.g. Rapids)  → 100
+  //   abbr   — short code like COL, NYCFC                           → 100
+  //   short  — shortDisplayName when it differs from displayName/
+  //            location (e.g. LAFC's shortDisplayName == LAFC)      → 100
+  //   manual — user-curated (default tier: mascot-level)            → 100
+  //   city   — location / city-only aliases (generic, false-positive → 50
+  //            prone: "Colorado" matches "El Chapulin Colorado")
+  //
+  // Each tier is a Set of lowercased strings so the matcher can test
+  // cheaply without re-casing.
   const manual = Array.isArray(row.manual_aliases) ? row.manual_aliases : [];
-  const aliases = new Set();
-  for (const s of [
-    row.canonical_name,
-    row.display_name,
-    row.short_display_name,
-    row.abbreviation,
-    row.nickname,
-    ...manual
-  ]) {
-    if (s && String(s).trim()) aliases.add(String(s).trim());
+
+  const full = new Set();
+  const mascot = new Set();
+  const abbr = new Set();
+  const shortNames = new Set();
+  const manualSet = new Set();
+  const city = new Set();
+
+  const add = (bucket, value) => {
+    if (!value) return;
+    const s = String(value).trim().toLowerCase();
+    if (s) bucket.add(s);
+  };
+
+  // `full` gets everything that IS the team's canonical name.
+  add(full, row.canonical_name);
+  add(full, row.display_name);
+
+  // Mascot / abbreviation tiers — distinctive but not the full name.
+  add(mascot, row.nickname);
+  add(abbr, row.abbreviation);
+
+  // shortDisplayName is slippery: for "LAFC" it equals displayName
+  // (already in full); for "Colorado Rapids" it equals location
+  // ("Colorado", city-tier). Classify by what it equals.
+  const short = row.short_display_name ? String(row.short_display_name).trim() : '';
+  if (short) {
+    const shortLower = short.toLowerCase();
+    const loc = row.location ? String(row.location).trim().toLowerCase() : '';
+    if (full.has(shortLower)) {
+      /* already full — skip */
+    } else if (loc && shortLower === loc) {
+      city.add(shortLower);
+    } else {
+      shortNames.add(shortLower);
+    }
   }
+
+  // Location is city-tier unless it happens to equal the mascot.
+  if (row.location) {
+    const loc = String(row.location).trim().toLowerCase();
+    if (loc && !mascot.has(loc) && !full.has(loc)) city.add(loc);
+  }
+
+  // Manual aliases default to mascot-level trust (they're curated).
+  for (const m of manual) add(manualSet, m);
+
+  // Don't double-count across tiers — if a mascot is also in manual,
+  // drop it from manual so it only hits once at the mascot score.
+  for (const m of mascot) manualSet.delete(m);
+  for (const f of full) {
+    manualSet.delete(f); mascot.delete(f); abbr.delete(f); shortNames.delete(f); city.delete(f);
+  }
+
+  // Legacy flat list for logging / fallback callers.
+  const flat = Array.from(new Set([
+    ...full, ...mascot, ...abbr, ...shortNames, ...manualSet, ...city
+  ]));
+
   return {
     espnTeamId: row.espn_team_id,
     league: row.league,
     sport: row.sport,
     canonicalName: row.canonical_name,
-    aliases: Array.from(aliases) // primary field the matcher consumes
+    // Tiered aliases — primary shape the matcher consumes.
+    tiered: {
+      full: Array.from(full),
+      mascot: Array.from(mascot),
+      abbr: Array.from(abbr),
+      short: Array.from(shortNames),
+      manual: Array.from(manualSet),
+      city: Array.from(city)
+    },
+    // Back-compat: callers that just want a flat list of every alias
+    // (logging, the old flat-list scorer signature).
+    aliases: flat
   };
 }
 

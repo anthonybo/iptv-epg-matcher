@@ -355,8 +355,14 @@ router.post('/auto-fill-streams', async (req, res) => {
             logger.warn(`Auto-fill: Alias lookup failed for ${event.event_name}: ${err.message}`);
           }
         }
-        const homeAliases = homeBundle ? homeBundle.aliases : [homeTeam];
-        const awayAliases = awayBundle ? awayBundle.aliases : [awayTeam];
+        // Use the TIERED alias shape so single-word city-only hits don't
+        // outscore real team-channel matches.
+        const homeAliases = homeBundle
+          ? homeBundle.tiered
+          : { full: [homeTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
+        const awayAliases = awayBundle
+          ? awayBundle.tiered
+          : { full: [awayTeam], mascot: [], abbr: [], short: [], manual: [], city: [] };
 
         const epgByTvgId = new Map();
         const tvgIds = channels.map(c => c.epg_channel_id || c.tvg_id).filter(Boolean);
