@@ -1093,9 +1093,49 @@ logger.info('Live scores background updates started (30s interval)');
 // Team-alias registry: create the table if missing. Seeding from
 // ESPN is a separate script (backend/scripts/seedTeamAliases.js).
 const teamAliasesService = require('./services/teamAliasesService');
-teamAliasesService.initialize().catch(err => {
-    logger.error(`[TeamAliases] Startup init failed: ${err.message}`);
-});
+teamAliasesService.initialize()
+    .then(async () => {
+        // Seed (or refresh) the alias table once at boot when it looks
+        // empty. This is cheap — 15 ESPN requests, ~500 rows upserted —
+        // and means fresh installs don't need to manually run the
+        // seedTeamAliases script before the matcher is useful.
+        try {
+            const existing = await teamAliasesService.count();
+            if (existing < 100) {
+                logger.info(`[TeamAliases] Only ${existing} rows — seeding from ESPN on boot...`);
+                const result = await teamAliasesService.seedFromEspn();
+                logger.info(
+                    `[TeamAliases] Boot seed done: ${result.inserted} upserted, ${result.failed} failed`
+                );
+            }
+        } catch (seedErr) {
+            logger.warn(`[TeamAliases] Boot seed skipped: ${seedErr.message}`);
+        }
+
+        // Weekly refresh — picks up new teams (e.g. San Diego FC 2025)
+        // and any ESPN metadata changes without manual intervention.
+        // Runs Sunday 03:00 local time — off-hours for anyone using
+        // this for live sports on weekend evenings.
+        try {
+            cron.schedule('0 3 * * 0', async () => {
+                try {
+                    logger.info('[TeamAliases] Weekly refresh starting...');
+                    const result = await teamAliasesService.seedFromEspn();
+                    logger.info(
+                        `[TeamAliases] Weekly refresh complete: ${result.inserted} upserted, ${result.failed} failed`
+                    );
+                } catch (err) {
+                    logger.warn(`[TeamAliases] Weekly refresh failed: ${err.message}`);
+                }
+            });
+            logger.info('[TeamAliases] Weekly refresh scheduled (Sunday 03:00)');
+        } catch (cronErr) {
+            logger.warn(`[TeamAliases] Cron schedule failed: ${cronErr.message}`);
+        }
+    })
+    .catch(err => {
+        logger.error(`[TeamAliases] Startup init failed: ${err.message}`);
+    });
 
 // Serve static frontend files if build directory exists
 const frontendBuildPath = path.join(__dirname, '../frontend/build');

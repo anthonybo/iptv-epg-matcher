@@ -78,8 +78,11 @@ router.post('/auto-fill-streams', async (req, res) => {
     // soccer) games available to auto-fill when stoppage time has
     // pushed them past their estimated event_end. The half-hour floor
     // on event_end guards against stale is_live flags.
+    // status_type gate keeps STATUS_FINAL games out even when ESPN's
+    // is_live flag is briefly stale post-game.
     const conditions = [
-      '((event_start <= $1 AND event_end >= $2) OR (is_live = TRUE AND event_end >= $3))'
+      '((event_start <= $1 AND event_end >= $2) OR (is_live = TRUE AND event_end >= $3))',
+      "(status_type IS NULL OR status_type NOT LIKE '%FINAL%')"
     ];
     const now = new Date().toISOString();
     const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();

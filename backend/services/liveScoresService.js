@@ -285,6 +285,14 @@ function restartWithNewInterval() {
  */
 async function getLiveScores() {
   try {
+    // Guard against stale is_live flags. ESPN sometimes drops a game
+    // off its scoreboard (once it moves to FINAL) before our poller
+    // gets to update is_live, which leaves rows with is_live=TRUE AND
+    // status_type='STATUS_SECOND_HALF' hours after the game actually
+    // ended. This was the "ticker shows MLS games that finished
+    // yesterday" bug — the ticker was reading WHERE is_live=TRUE with
+    // no freshness check. We require event_end within 30 min of now
+    // AND status_type not already marked FINAL.
     const result = await postgresService.query(`
       SELECT
         event_id,
@@ -302,6 +310,8 @@ async function getLiveScores() {
         scores_updated_at
       FROM live_events
       WHERE is_live = TRUE
+        AND event_end >= NOW() - INTERVAL '30 minutes'
+        AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
       ORDER BY sport_type, league_name, event_start
     `);
 
@@ -399,11 +409,38 @@ function startBackgroundUpdates(intervalMs = 30000) {
 
   // Run immediately on start
   updateAllScores();
+  cleanupStaleLiveFlags();
 
   // Then run on interval
   updateInterval = setInterval(() => {
     updateAllScores();
+    cleanupStaleLiveFlags();
   }, intervalMs);
+}
+
+/**
+ * Clean up rows where `is_live = TRUE` but the game actually ended
+ * a while ago. ESPN can drop a game off its scoreboard (once final)
+ * before our poller runs against it, which leaves the `is_live` flag
+ * stuck on for hours or days. Without this sweep, the ticker and
+ * summary queries would still surface finished games. Runs on the
+ * same interval as the score updater.
+ */
+async function cleanupStaleLiveFlags() {
+  try {
+    const { rowCount } = await postgresService.query(`
+      UPDATE live_events
+         SET is_live = FALSE,
+             updated_at = CURRENT_TIMESTAMP
+       WHERE is_live = TRUE
+         AND event_end < NOW() - INTERVAL '30 minutes'
+    `);
+    if (rowCount > 0) {
+      logger.info(`[LiveScores] Cleaned ${rowCount} stale is_live flags (event_end >30min ago)`);
+    }
+  } catch (err) {
+    logger.warn(`[LiveScores] Stale-flag cleanup failed: ${err.message}`);
+  }
 }
 
 /**

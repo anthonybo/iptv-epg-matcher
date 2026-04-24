@@ -273,10 +273,14 @@ async function getCurrentlyLiveEvents() {
     // window via event_end >= NOW − 30 min as a safety net.
     const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
+    // status_type gate prevents stale `is_live = TRUE` after ESPN has
+    // already moved the event into STATUS_FINAL from lingering in the
+    // ticker / live-events page for the 30 min after actual final.
     const result = await postgresService.query(`
       SELECT * FROM live_events
-      WHERE (event_start <= $1 AND event_end >= $2)
-         OR (is_live = TRUE AND event_end >= $3)
+      WHERE ((event_start <= $1 AND event_end >= $2)
+          OR (is_live = TRUE AND event_end >= $3))
+        AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
       ORDER BY event_start
     `, [now, now, halfHourAgo]);
 

@@ -320,6 +320,13 @@ router.post('/search-channel', async (req, res) => {
     let totalChannelsTested = 0;
     let totalChannelsMatched = 0;
     let lowQualitySkipped = 0;
+    // Track EPG coverage so we can tell the user something actionable
+    // when the search fails: if at least 3 candidates had EPG data and
+    // NONE of them had the search teams in their current program, the
+    // game probably isn't airing anywhere right now — distinct from
+    // "we tried and the streams were dead".
+    let totalEpgAvailable = 0;
+    let totalEpgConfirmed = 0;
 
     for (let batchNum = 0; batchNum < MAX_BATCHES; batchNum++) {
       if (clientGone) break;
@@ -444,6 +451,8 @@ router.post('/search-channel', async (req, res) => {
               awayAliases,
               scoringContext
             );
+            if (result.details.hasEpgProgram) totalEpgAvailable++;
+            if (result.details.epgConfirmed) totalEpgConfirmed++;
             return {
               ...channel,
               relevanceScore: result.score,
@@ -624,11 +633,26 @@ router.post('/search-channel', async (req, res) => {
       // explicit so the user can tell "nothing is live under this name"
       // apart from "everything that matched looked like a false positive".
       errorMessage = `${totalChannelsMatched} channels had "${searchQuery}" in their name, but none looked like a real match for this event`;
+    } else if (totalEpgAvailable >= 3 && totalEpgConfirmed === 0) {
+      // We tried channels but none of the ones with EPG data were
+      // actually airing this game — that's a strong signal the game
+      // isn't on TV right now (may have ended, not started, or isn't
+      // broadcast in this region). Distinct from "all streams dead".
+      errorMessage =
+        `This game doesn't appear to be airing right now — ` +
+        `checked ${totalEpgAvailable} channels with program data and none are showing "${searchQuery}". ` +
+        `Try "Find Different Game" instead.`;
     } else {
       errorMessage = `Tested ${totalChannelsTested} of ${totalChannelsMatched} channels matching "${searchQuery}" but none were working`;
+      if (totalEpgAvailable > 0) {
+        errorMessage += ` (${totalEpgConfirmed}/${totalEpgAvailable} channels had program data confirming the match)`;
+      }
     }
 
-    logger.info(`[Find Alternative] Search exhausted: ${errorMessage}`);
+    logger.info(
+      `[Find Alternative] Search exhausted: ${errorMessage} ` +
+      `(epgAvailable=${totalEpgAvailable}, epgConfirmed=${totalEpgConfirmed})`
+    );
 
     writeLine({
       type: 'done',

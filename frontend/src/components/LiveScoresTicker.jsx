@@ -70,6 +70,11 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000, onEvent
   const contentWidthRef = useRef(0);
   const needsRenderRef = useRef(false); // Flag to indicate DOM render needed after ref available
   const onEventClickRef = useRef(onEventClick);
+  // When the scores list fits in the visible track, we render once
+  // (not twice) and stop scrolling. Otherwise a single live event
+  // appears duplicated in the viewport — the "two Avalanche @ Kings"
+  // bug. shouldScrollRef flips based on measured content vs viewport.
+  const shouldScrollRef = useRef(false);
 
   // Keep callback ref updated
   onEventClickRef.current = onEventClick;
@@ -114,16 +119,33 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000, onEvent
       return false;
     }
 
-    // Generate HTML for scores (duplicated for seamless loop)
+    // Generate HTML for scores. We render ONCE first to measure — the
+    // marquee "duplicate for seamless loop" trick is only worthwhile
+    // when the scores overflow the viewport. With 1-2 items it causes
+    // visible duplication (user saw the single NHL game twice), so we
+    // skip both the duplication and the scroll animation in that case.
     const isClickable = !!onEventClickRef.current;
     const scoresHtml = scores.map(s => renderScoreItem(s, isClickable)).join('');
-    contentRef.current.innerHTML = scoresHtml + scoresHtml;
+    contentRef.current.innerHTML = scoresHtml;
 
-    // Measure content width after render
+    // Measure content width vs viewport after layout.
     requestAnimationFrame(() => {
-      if (contentRef.current) {
-        // Half the width since we duplicated the content
+      if (!contentRef.current) return;
+      const singleWidth = contentRef.current.scrollWidth;
+      const viewport = contentRef.current.parentElement?.clientWidth || 0;
+
+      if (singleWidth > viewport && viewport > 0) {
+        // Overflows — duplicate for seamless loop and let animation run.
+        contentRef.current.innerHTML = scoresHtml + scoresHtml;
         contentWidthRef.current = contentRef.current.scrollWidth / 2;
+        shouldScrollRef.current = true;
+      } else {
+        // Fits — render once, stop scrolling, snap back to origin so
+        // a prior animation's transform doesn't hide the items.
+        contentWidthRef.current = singleWidth;
+        shouldScrollRef.current = false;
+        scrollPositionRef.current = 0;
+        contentRef.current.style.transform = 'translateX(0)';
       }
     });
 
@@ -142,8 +164,15 @@ function LiveScoresTicker({ position = 'bottom', updateInterval = 60000, onEvent
     const deltaTime = (currentTime - lastTimeRef.current) / 1000; // Convert to seconds
     lastTimeRef.current = currentTime;
 
-    // Only scroll if not paused and visible
-    if (!isPausedRef.current && isVisibleRef.current && contentRef.current) {
+    // Only scroll if not paused, visible, AND the content actually
+    // overflows the viewport. shouldScrollRef is set after layout
+    // measurement — see renderScoresToDOM.
+    if (
+      !isPausedRef.current &&
+      isVisibleRef.current &&
+      contentRef.current &&
+      shouldScrollRef.current
+    ) {
       scrollPositionRef.current += SCROLL_SPEED * deltaTime;
 
       // Reset position when we've scrolled through half the content (seamless loop)

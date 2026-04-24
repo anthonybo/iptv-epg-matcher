@@ -11,6 +11,8 @@ const logger = require('../../config/logger');
 const postgresService = require('../../services/postgresService');
 const { execFileAsync, httpAgent, httpsAgent } = require('../../utils/streamAgents');
 const { extractSearchTerms } = require('../../utils/channelScoring');
+const teamMatcher = require('../../utils/teamMatcher');
+const teamAliasesService = require('../../services/teamAliasesService');
 
 /**
  * POST /api/live-events/random-working-stream
@@ -41,7 +43,8 @@ router.post('/random-working-stream', async (req, res) => {
     // advertised window OR ESPN's is_live flag — keeps MLS/soccer
     // games in scope when stoppage time has pushed past event_end.
     const conditions = [
-      '((event_start <= $1 AND event_end >= $2) OR (is_live = TRUE AND event_end >= $3))'
+      '((event_start <= $1 AND event_end >= $2) OR (is_live = TRUE AND event_end >= $3))',
+      "(status_type IS NULL OR status_type NOT LIKE '%FINAL%')"
     ];
     const now = new Date().toISOString();
     const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
@@ -161,6 +164,61 @@ router.post('/random-working-stream', async (req, res) => {
       if (channels.length === 0) {
         logger.info(`No channels found for event ${event.event_id}`);
         continue;
+      }
+
+      // Alias-aware ranking so the best candidates get ffprobed first
+      // (matchup channels > team channels > EPG-confirmed generics >
+      // everything else). Falls back to the original random order when
+      // the league isn't in team_aliases.
+      let homeBundle = null;
+      let awayBundle = null;
+      if (event.league_name) {
+        try {
+          [homeBundle, awayBundle] = await Promise.all([
+            teamAliasesService.getAliasesForTeam(event.league_name, event.home_team),
+            teamAliasesService.getAliasesForTeam(event.league_name, event.away_team)
+          ]);
+        } catch (err) {
+          logger.warn(`[RandomWorkingStream] Alias lookup failed: ${err.message}`);
+        }
+      }
+
+      if (homeBundle && awayBundle) {
+        // EPG lookup for "what's airing right now" on each candidate.
+        const epgByTvgId = new Map();
+        const tvgIds = channels.map(c => c.epg_channel_id).filter(Boolean);
+        if (tvgIds.length > 0) {
+          try {
+            const { rows } = await postgresService.query(
+              `SELECT DISTINCT ON (channel_id) channel_id, title
+                 FROM epg_programs
+                WHERE channel_id = ANY($1)
+                  AND start_time <= NOW()
+                  AND stop_time > NOW()
+                ORDER BY channel_id, start_time DESC`,
+              [tvgIds]
+            );
+            for (const r of rows) epgByTvgId.set(r.channel_id, r.title);
+          } catch (err) {
+            logger.warn(`[RandomWorkingStream] EPG lookup failed: ${err.message}`);
+          }
+        }
+
+        const ctx = { sportType: event.sport_type, leagueName: event.league_name };
+        channels = channels.map(c => {
+          const program = epgByTvgId.get(c.epg_channel_id) || null;
+          const r = teamMatcher.matchChannel(
+            { name: c.name, currentProgramTitle: program },
+            homeBundle.tiered,
+            awayBundle.tiered,
+            ctx
+          );
+          return { ...c, _matchScore: r.score, _matchDetails: r.details };
+        });
+        channels.sort((a, b) => b._matchScore - a._matchScore);
+        channels = channels.filter(c => c._matchScore >= 50);
+        const top = channels.slice(0, 5).map(c => `${c.name.substring(0, 40)}:${c._matchScore}`);
+        if (top.length) logger.info(`[RandomWorkingStream] Top candidates for "${event.event_name}": ${top.join(' | ')}`);
       }
 
       logger.info(`Found ${channels.length} channels for event ${event.event_name}, testing streams...`);

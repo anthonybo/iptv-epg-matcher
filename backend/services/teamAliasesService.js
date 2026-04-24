@@ -381,12 +381,28 @@ function rowToBundle(row) {
   };
 }
 
+/**
+ * Count of rows currently in the team_aliases table. Used by the server
+ * boot path to decide whether a first-run seed is needed. Returns 0
+ * rather than throwing when the table query fails so startup can
+ * continue even if Postgres is unavailable.
+ */
+async function count() {
+  try {
+    const { rows } = await postgresService.query('SELECT COUNT(*) AS n FROM team_aliases');
+    return parseInt(rows[0].n, 10) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 module.exports = {
   initialize,
   seedFromEspn,
   fetchEspnTeams,
   upsertTeam,
   getAliasesForTeam,
+  count,
   SPORT_LEAGUES,
   MANUAL_ALIASES
 };

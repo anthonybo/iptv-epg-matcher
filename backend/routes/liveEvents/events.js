@@ -165,6 +165,7 @@ router.get('/live-sports-summary', async (req, res) => {
       FROM live_events
       WHERE ((event_start <= $1 AND event_end >= $2)
           OR (is_live = TRUE AND event_end >= $3))
+        AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
       ${exclusionClause}
       GROUP BY sport_type, league_name
       HAVING COUNT(*) > 0

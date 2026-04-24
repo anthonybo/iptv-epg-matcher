@@ -304,13 +304,31 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
 
   let programResult = null;
   let programBonus = 0;
+  let epgConfirmed = false;
+  let epgMismatch = false;
+
   if (channel.currentProgramTitle) {
     programResult = scoreText(channel.currentProgramTitle, homeAliases, awayAliases, context);
     // EPG is much stronger evidence than channel name because it
-    // reflects what's airing RIGHT NOW. A dual-team hit in the program
-    // title gets a big bonus on top of the name score.
-    if (programResult.bothTeamsBonus > 0) programBonus += 300;
-    else if (programResult.score >= 100) programBonus += 100;
+    // reflects what's airing RIGHT NOW.
+    //   Dual-team hit in EPG program        → +300 (gold-tier confirm)
+    //   Single-team hit at mascot+ tier     → +100 (still confirming)
+    //   EPG exists but NEITHER team hits    → −100 (EPG says different
+    //     content, even if channel name suggests it) — this is what
+    //     catches "MLS TEAM | LAFC" when LAFC is hosting Seattle tonight
+    //     and our user is searching for the Rapids game. We DON'T
+    //     penalise channels without EPG data at all (many IPTV
+    //     channels lack tvg_id, so name-only has to stand on its own).
+    if (programResult.bothTeamsBonus > 0) {
+      programBonus += 300;
+      epgConfirmed = true;
+    } else if (programResult.score >= 100) {
+      programBonus += 100;
+      epgConfirmed = true;
+    } else {
+      programBonus -= 100;
+      epgMismatch = true;
+    }
   }
 
   return {
@@ -318,6 +336,9 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
     details: {
       nameScore: nameResult.score,
       programBonus,
+      epgConfirmed,
+      epgMismatch,
+      hasEpgProgram: Boolean(channel.currentProgramTitle),
       homeStage: nameResult.homeStage,
       awayStage: nameResult.awayStage,
       homeTier: nameResult.homeTier,
