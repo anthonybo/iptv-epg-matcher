@@ -10,6 +10,58 @@ function getToken() {
   );
 }
 
+// /api/live-events/search-channel streams NDJSON — one JSON object per
+// line, with a final `{type:'done',...}` record carrying the match.
+// Read the stream line-by-line and return the terminal record.
+async function consumeSearchNdjson(response) {
+  if (!response.body || !response.body.getReader) {
+    // Environments without streaming — fall back to a single parse of
+    // whatever the body is. The terminal record is a complete JSON
+    // object so this still works for buffered responses.
+    const text = await response.text();
+    const lastLine = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop();
+    if (!lastLine) return null;
+    try {
+      return JSON.parse(lastLine);
+    } catch {
+      return null;
+    }
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let terminal = null;
+
+  const consumeLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      const msg = JSON.parse(trimmed);
+      if (msg.type === 'done' || msg.type === 'error') terminal = msg;
+    } catch {
+      // Ignore a malformed line — progress records are best-effort.
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) !== -1) {
+      consumeLine(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
+  }
+  if (buffer.trim()) consumeLine(buffer);
+  return terminal;
+}
+
 /**
  * Owns the header search-box slice (the "search by channel name" input
  * next to the Sport dropdown). Separate from useStreamFinder because the
@@ -49,7 +101,8 @@ export function useStreamSearch({ streams, autoFillSettings }) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/x-ndjson'
         },
         body: JSON.stringify({
           query: searchQuery.trim(),
@@ -58,20 +111,20 @@ export function useStreamSearch({ streams, autoFillSettings }) {
           minQuality: autoFillSettings.minQuality
         })
       });
-      const data = await response.json();
+      const terminal = await consumeSearchNdjson(response);
 
-      if (data.success && data.channel) {
-        const success = await addToMultiview(data.channel);
+      if (terminal?.success && terminal.channel) {
+        const success = await addToMultiview(terminal.channel);
         if (success) {
           window.dispatchEvent(new Event('multiviewUpdate'));
-          showToast(`Added "${data.channel.name}" to Multi-View`, 'success');
+          showToast(`Added "${terminal.channel.name}" to Multi-View`, 'success');
           setSearchQuery('');
           setShowSearchInput(false);
         } else {
           showToast('Failed to add channel to Multi-View', 'error');
         }
       } else {
-        showToast(data.message || 'No working channel found', 'error');
+        showToast(terminal?.message || terminal?.error || 'No working channel found', 'error');
       }
     } catch (error) {
       console.error('[Search] Error:', error);
