@@ -38,8 +38,21 @@ const COOLDOWN_AFTER_THROTTLE_MS = 5000; // 5 second cooldown if throttled
 // ============================================================================
 // CIRCUIT BREAKER - Stop trying unstable sources
 // ============================================================================
-// Track source failures to implement circuit breaker pattern
-const sourceFailures = new Map(); // sourceUrl -> { failures, lastFailure, circuitOpen }
+// Track source failures to implement circuit breaker pattern.
+// Key is `${host}:${username}` so each provider *account* has an independent
+// circuit — one flaky account on a shared host (e.g. two separate
+// username/password pairs on lordstreams.live) does not take out the other
+// accounts that still have concurrency headroom.
+const sourceFailures = new Map(); // `${host}:${username}` -> { failures, lastFailure, circuitOpen }
+
+function getCircuitKey(sourceUrl, username) {
+    try {
+        const host = new URL(sourceUrl).host;
+        return `${host}:${username || ''}`;
+    } catch {
+        return null;
+    }
+}
 const CIRCUIT_BREAKER_CONFIG = {
     failureThreshold: 3,       // Open circuit after 3 failures
     resetTimeout: 30000,       // Try again after 30 seconds
@@ -121,16 +134,13 @@ function checkStreamThrottle(channelId, userId) {
  * Check circuit breaker for a source URL
  * Returns { open: boolean, reason?: string }
  */
-function checkCircuitBreaker(sourceUrl) {
-    // Normalize URL to host level for circuit breaker
-    let host;
-    try {
-        host = new URL(sourceUrl).host;
-    } catch {
+function checkCircuitBreaker(sourceUrl, username) {
+    const key = getCircuitKey(sourceUrl, username);
+    if (!key) {
         return { open: false }; // Can't parse URL, let it through
     }
 
-    const circuit = sourceFailures.get(host);
+    const circuit = sourceFailures.get(key);
     if (!circuit) {
         return { open: false };
     }
@@ -143,7 +153,7 @@ function checkCircuitBreaker(sourceUrl) {
         const remainingMs = CIRCUIT_BREAKER_CONFIG.resetTimeout - timeSinceLastFailure;
         return {
             open: true,
-            reason: `Circuit open for ${host} (${Math.ceil(remainingMs/1000)}s until retry)`,
+            reason: `Circuit open for ${key} (${Math.ceil(remainingMs/1000)}s until retry)`,
             remainingMs
         };
     }
@@ -153,7 +163,7 @@ function checkCircuitBreaker(sourceUrl) {
         circuit.circuitOpen = false;
         circuit.halfOpen = true;
         circuit.halfOpenRequests = 0;
-        logger.info(`[CIRCUIT] Half-open for ${host}, allowing test request`);
+        logger.info(`[CIRCUIT] Half-open for ${key}, allowing test request`);
     }
 
     return { open: false, halfOpen: circuit.halfOpen };
@@ -162,15 +172,11 @@ function checkCircuitBreaker(sourceUrl) {
 /**
  * Record a source failure for circuit breaker
  */
-function recordSourceFailure(sourceUrl, error) {
-    let host;
-    try {
-        host = new URL(sourceUrl).host;
-    } catch {
-        return;
-    }
+function recordSourceFailure(sourceUrl, username, error) {
+    const key = getCircuitKey(sourceUrl, username);
+    if (!key) return;
 
-    const circuit = sourceFailures.get(host) || {
+    const circuit = sourceFailures.get(key) || {
         failures: 0,
         lastFailure: 0,
         circuitOpen: false,
@@ -184,35 +190,31 @@ function recordSourceFailure(sourceUrl, error) {
     if (circuit.halfOpen) {
         circuit.circuitOpen = true;
         circuit.halfOpen = false;
-        logger.warn(`[CIRCUIT] Re-opening circuit for ${host} after half-open failure`);
+        logger.warn(`[CIRCUIT] Re-opening circuit for ${key} after half-open failure`);
     }
     // If failures exceed threshold, open circuit
     else if (circuit.failures >= CIRCUIT_BREAKER_CONFIG.failureThreshold) {
         circuit.circuitOpen = true;
-        logger.warn(`[CIRCUIT] Opening circuit for ${host} after ${circuit.failures} failures`);
+        logger.warn(`[CIRCUIT] Opening circuit for ${key} after ${circuit.failures} failures`);
     }
 
-    sourceFailures.set(host, circuit);
+    sourceFailures.set(key, circuit);
 }
 
 /**
  * Record a source success for circuit breaker
  */
-function recordSourceSuccess(sourceUrl) {
-    let host;
-    try {
-        host = new URL(sourceUrl).host;
-    } catch {
-        return;
-    }
+function recordSourceSuccess(sourceUrl, username) {
+    const key = getCircuitKey(sourceUrl, username);
+    if (!key) return;
 
-    const circuit = sourceFailures.get(host);
+    const circuit = sourceFailures.get(key);
     if (circuit) {
         // Reset circuit on success
         circuit.failures = 0;
         circuit.circuitOpen = false;
         circuit.halfOpen = false;
-        logger.info(`[CIRCUIT] Reset circuit for ${host} after success`);
+        logger.info(`[CIRCUIT] Reset circuit for ${key} after success`);
     }
 }
 
@@ -267,10 +269,10 @@ setInterval(() => {
 // Clean up stale circuit breaker entries every 5 minutes
 setInterval(() => {
     const now = Date.now();
-    for (const [host, circuit] of sourceFailures.entries()) {
+    for (const [key, circuit] of sourceFailures.entries()) {
         // Remove entries that haven't had failures in 10 minutes
         if (now - circuit.lastFailure > 10 * 60 * 1000) {
-            sourceFailures.delete(host);
+            sourceFailures.delete(key);
         }
     }
 }, 5 * 60 * 1000);
@@ -674,8 +676,10 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         // Option 2: Proxy the stream with potential format conversion
         // Stream video using pipe (more efficient for large data)
         try {
-            // Check circuit breaker before attempting to connect
-            const circuitCheck = checkCircuitBreaker(streamUrl);
+            // Check circuit breaker before attempting to connect.
+            // Keyed per host+username so other accounts on the same host
+            // aren't blocked by this one's recent failures.
+            const circuitCheck = checkCircuitBreaker(streamUrl, channel.source_username);
             if (circuitCheck.open) {
                 logger.warn(`[CIRCUIT] Rejecting stream for ${channelId}: ${circuitCheck.reason}`);
                 return res.status(503).json({
@@ -711,7 +715,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
 
             if (!streamResponse.ok) {
                 logger.error(`Failed to fetch stream: ${streamResponse.status} ${streamResponse.statusText}`);
-                recordSourceFailure(streamUrl, new Error(`HTTP ${streamResponse.status}`));
+                recordSourceFailure(streamUrl, channel.source_username, new Error(`HTTP ${streamResponse.status}`));
                 untrackActiveStream(channelId, userId);
                 return res.status(502).json({
                     error: 'Failed to fetch stream from source',
@@ -721,7 +725,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             }
 
             // Stream connected successfully - record success for circuit breaker
-            recordSourceSuccess(streamUrl);
+            recordSourceSuccess(streamUrl, channel.source_username);
             
             // Create a pass-through stream for better error handling
             const passThrough = new PassThrough();
@@ -828,7 +832,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
 
             // Record failure for circuit breaker (if we have the URL)
             if (streamUrl) {
-                recordSourceFailure(streamUrl, streamError);
+                recordSourceFailure(streamUrl, channel?.source_username, streamError);
             }
 
             // Handle common stream errors
@@ -1078,8 +1082,8 @@ async function createResilientStreamConnection(streamUrl, streamKey, channel, re
             state.retryCount = 0; // Reset retry count on successful connection
             state.retryDelay = RESILIENT_CONFIG.initialRetryDelay; // Reset delay
 
-            // Record success for circuit breaker
-            recordSourceSuccess(streamUrl);
+            // Record success for circuit breaker (keyed per host+username).
+            recordSourceSuccess(streamUrl, channel?.source_username);
 
             logger.info(`[RESILIENT ${streamKey}] Connected successfully`);
             return true;
@@ -1089,8 +1093,9 @@ async function createResilientStreamConnection(streamUrl, streamKey, channel, re
                 return false;
             }
 
-            // Record failure for circuit breaker
-            recordSourceFailure(streamUrl, error);
+            // Record failure for circuit breaker (keyed per host+username
+            // so this account's circuit opens independently of others).
+            recordSourceFailure(streamUrl, channel?.source_username, error);
 
             logger.warn(`[RESILIENT ${streamKey}] Connection failed: ${error.message}`);
             state.retryCount++;
@@ -1349,6 +1354,10 @@ router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) 
             groupTitle: channelRow.group_title,
             source_type: channelRow.source_type,
             source_mac: channelRow.source_mac,
+            // Needed by the circuit breaker so accounts on the same host
+            // (e.g. two different usernames on lordstreams.live) get
+            // independent circuits.
+            source_username: channelRow.source_username,
         };
 
         // Handle Stalker portal URLs - request fresh link
@@ -1414,8 +1423,10 @@ router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) 
 
         logger.info(`[RESILIENT] Streaming channel: ${channel.name} from: ${streamUrl.substring(0, 80)}...`);
 
-        // Check circuit breaker before attempting to stream
-        const circuitCheck = checkCircuitBreaker(streamUrl);
+        // Check circuit breaker before attempting to stream.
+        // Per host+username so other accounts on the same provider host
+        // stay reachable when this one is in cooldown.
+        const circuitCheck = checkCircuitBreaker(streamUrl, channel.source_username);
         if (circuitCheck.open) {
             logger.warn(`[RESILIENT CIRCUIT] Rejecting stream for ${channelId}: ${circuitCheck.reason}`);
             return res.status(503).json({
@@ -1496,9 +1507,13 @@ router.get('/diagnostics', authMiddleware, (req, res) => {
 
     // Collect circuit breaker status
     const circuitStatus = [];
-    for (const [host, circuit] of sourceFailures.entries()) {
+    for (const [key, circuit] of sourceFailures.entries()) {
+        // Key is `host:username` — surface both halves for the monitoring UI.
+        const [host, ...usernameParts] = key.split(':');
         circuitStatus.push({
             host,
+            username: usernameParts.join(':') || null,
+            key,
             failures: circuit.failures,
             lastFailure: circuit.lastFailure,
             lastFailureAgeMs: now - circuit.lastFailure,

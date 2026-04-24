@@ -361,11 +361,34 @@ router.post('/auto-fill-streams', async (req, res) => {
 
         let foundForThisEvent = false;
 
-        // Filter out already used sources and channels
-        const eligibleChannels = channels.filter(channel =>
-          !usedSourceIds.has(parseInt(channel.source_id)) &&
-          !usedChannelIds.has(channel.id)
-        );
+        // Filter out already used sources/channels AND collapse duplicates
+        // where the same channel name is carried by multiple of the user's
+        // accounts on the same upstream host — those are the same stream
+        // with different credentials, so probing all of them in one
+        // parallel batch just hammers the host with 6+ identical
+        // ffprobes, trips rate limits, and burns ~10s per identical fail.
+        // Keep the first occurrence (already highest-scored after the
+        // sort above).
+        const hostOf = (url) => {
+          if (!url) return '';
+          try { return new URL(url).host.toLowerCase(); }
+          catch { return ''; }
+        };
+        const seenKeys = new Set();
+        const eligibleChannels = [];
+        let collapsedDupes = 0;
+        for (const channel of channels) {
+          if (usedSourceIds.has(parseInt(channel.source_id))) continue;
+          if (usedChannelIds.has(channel.id)) continue;
+          const host = hostOf(channel.source_url || channel.url);
+          const key = `${(channel.name || '').toLowerCase().trim()}::${host}`;
+          if (seenKeys.has(key)) { collapsedDupes++; continue; }
+          seenKeys.add(key);
+          eligibleChannels.push(channel);
+        }
+        if (collapsedDupes > 0) {
+          logger.info(`Auto-fill: Collapsed ${collapsedDupes} duplicate (name,host) channels for "${event.event_name}"`);
+        }
 
         if (eligibleChannels.length === 0) {
           exhaustedEvents.add(event.event_id);

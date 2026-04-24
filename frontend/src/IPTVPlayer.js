@@ -191,6 +191,9 @@ const IPTVPlayer = ({
       log('info', `Skipping duplicate onStreamDead call (reason: ${reason})`);
       return;
     }
+    // Clear any stale "Reconnecting (soft N/N)..." banner so the UI doesn't
+    // show two conflicting recovery states at once.
+    setRecoveryStatus(null);
     if (onStreamDead) {
       hasCalledOnStreamDeadRef.current = true;
       log('info', `Notifying parent: stream dead (reason: ${reason})`);
@@ -381,6 +384,9 @@ const IPTVPlayer = ({
     if (!window.mpegts) {
       const mpegtsScript = document.createElement('script');
       mpegtsScript.src = 'https://cdn.jsdelivr.net/npm/mpegts.js@latest';
+      // Needed so window.onerror receives real error details from this CDN
+      // script instead of the opaque "Script error." placeholder.
+      mpegtsScript.crossOrigin = 'anonymous';
       mpegtsScript.async = true;
       mpegtsScript.onload = () => {
         log('info', 'mpegts.js loaded');
@@ -1449,6 +1455,9 @@ const IPTVPlayer = ({
     if (!window.mpegts) {
       const script = document.createElement('script');
       script.src = 'https://cdn.jsdelivr.net/npm/mpegts.js@latest';
+      // Needed so window.onerror receives real error details from this CDN
+      // script instead of the opaque "Script error." placeholder.
+      script.crossOrigin = 'anonymous';
       script.async = true;
       script.onload = () => {
         log('info', 'mpegts.js loaded');

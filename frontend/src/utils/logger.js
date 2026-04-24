@@ -65,6 +65,34 @@ class FrontendLogger {
   }
 
   /**
+   * Identify mpegts.js post-teardown races so we can drop them.
+   *
+   * After destroy() nulls the library's internal controllers, pending async
+   * callbacks (SourceBuffer updateend, stats reporters, etc.) still fire
+   * against those refs. They always surface as
+   *   "Cannot read properties of null (reading '<something>')"
+   * thrown from inside mpegts.js itself. Known variants we've seen:
+   *   - reading 'notifyBufferedPositionChanged' (_onMSEUpdateEnd)
+   *   - reading 'currentURL' (_reportStatisticsInfo)
+   * Rather than enumerate every future variant, catch any null-deref whose
+   * stack or filename originates in mpegts.js. User code calling into a
+   * destroyed player would throw from the caller's stack frames, not from
+   * inside the library, so this won't hide bugs outside the library itself.
+   */
+  isMpegtsTeardownRace(message, stack, filename) {
+    const text = `${message || ''} ${stack || ''}`;
+    const insideMpegts = (filename && /mpegts\.js/i.test(filename)) || /mpegts\.js/i.test(stack || '');
+    if (insideMpegts && /Cannot read propert(?:y|ies) of null/i.test(message || '')) {
+      return true;
+    }
+    // Also keep the earlier method-name heuristics for minified stacks where
+    // the filename was stripped but the handler name survived.
+    if (/notifyBufferedPositionChanged/i.test(text)) return true;
+    if (/_onMSEUpdateEnd|_onSourceBufferUpdateEnd|_reportStatisticsInfo/i.test(text)) return true;
+    return false;
+  }
+
+  /**
    * Setup global error handlers and intercept console methods
    */
   setupGlobalErrorHandlers() {
@@ -153,6 +181,20 @@ class FrontendLogger {
     // Catch global errors - with throttling to prevent spam from repeated errors
     window.addEventListener('error', (event) => {
       const errorKey = event.message || 'Script error';
+      const stack = event.error?.stack || '';
+
+      // Drop the mpegts.js post-teardown race entirely. When a player is
+      // destroyed, Chrome can still fire one final SourceBuffer 'updateend'
+      // whose handler touches a nulled internal ref — cosmetic, happens
+      // after the player is gone. Not worth logging or shipping to the
+      // backend on every channel change.
+      //
+      // preventDefault() marks the error as handled so Chrome also skips
+      // the red "Uncaught TypeError" line in DevTools.
+      if (this.isMpegtsTeardownRace(event.message, stack, event.filename)) {
+        event.preventDefault();
+        return;
+      }
 
       // Throttle repeated errors (especially "Script error" from mpegts.js)
       if (this.shouldThrottleError(errorKey)) {

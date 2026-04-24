@@ -331,7 +331,10 @@ async function getScoreByEventId(eventId) {
         away_score,
         game_status,
         game_clock,
+        status_type,
         is_live,
+        event_start,
+        event_end,
         scores_updated_at
       FROM live_events
       WHERE event_id = $1

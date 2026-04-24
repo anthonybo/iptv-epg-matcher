@@ -1,15 +1,104 @@
-import React, { memo, useState } from 'react';
+import React, { memo, useState, useEffect, useRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import IPTVPlayer from '../../IPTVPlayer';
 import VideoQualityBadge from '../VideoQualityBadge';
 
+// Format a date as local time "7:10 PM" plus a short relative context
+// ("starts in 2h 15m" / "started 1h ago" / "tomorrow 8:30 AM").
+const formatLocalStart = (iso, now = Date.now()) => {
+  if (!iso) return null;
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return null;
+
+  const diffMin = Math.round((ts - now) / 60000);
+  const absMin = Math.abs(diffMin);
+
+  const timeStr = new Date(ts).toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+
+  // Include the day label when it's not "today" in the user's locale.
+  const today = new Date(now);
+  const when = new Date(ts);
+  const sameDay = today.toDateString() === when.toDateString();
+  const dayLabel = sameDay
+    ? null
+    : when.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+
+  const fmtDur = (mins) => {
+    if (mins < 60) return `${mins}m`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h}h ${m}m` : `${h}h`;
+  };
+
+  let relative;
+  if (absMin < 1) relative = 'now';
+  else if (diffMin > 0) relative = `starts in ${fmtDur(absMin)}`;
+  else relative = `started ${fmtDur(absMin)} ago`;
+
+  return { timeStr, dayLabel, relative, diffMin };
+};
+
+// Collapse the messy ESPN status_type into a simple UI state.
+const deriveEventState = (event) => {
+  if (!event) return 'unknown';
+  if (event.is_live) return 'live';
+  const s = (event.status_type || '').toUpperCase();
+  if (s.includes('IN_PROGRESS') || s.includes('HALFTIME')) return 'live';
+  if (s.includes('FINAL') || s.includes('END_')) return 'final';
+  if (s.includes('POSTPONED') || s.includes('CANCELED') || s.includes('SUSPEND')) return 'postponed';
+  if (s.includes('DELAYED')) return 'delayed';
+  return 'upcoming';
+};
+
 // Info tooltip component for stream details
 const StreamInfoTooltip = ({ stream, quality }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
+  const [event, setEvent] = useState(null);
+  const [eventLoading, setEventLoading] = useState(false);
+  const [nowTick, setNowTick] = useState(Date.now());
+  const pollTimerRef = useRef(null);
 
   const isVisible = isHovered || isPinned;
+  const eventId = stream.espnEventId;
+
+  // When the tooltip opens, fetch the live event's current state (score,
+  // clock, status_type, start/end). Refresh every 30s while open to match
+  // the backend's score-update cadence. Tick a 30s clock too so the
+  // "starts in …" countdown stays current without extra network.
+  useEffect(() => {
+    if (!isVisible || !eventId) return undefined;
+
+    let cancelled = false;
+    const fetchEvent = async () => {
+      try {
+        setEventLoading(true);
+        const res = await fetch(`/api/live-scores/${encodeURIComponent(eventId)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data.success && data.score) setEvent(data.score);
+      } catch (_e) {
+        // Non-fatal — tooltip still shows stream metadata.
+      } finally {
+        if (!cancelled) setEventLoading(false);
+      }
+    };
+
+    fetchEvent();
+    pollTimerRef.current = setInterval(() => {
+      fetchEvent();
+      setNowTick(Date.now());
+    }, 30000);
+
+    return () => {
+      cancelled = true;
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
+  }, [isVisible, eventId]);
 
   // Format source type for display
   const formatSourceType = (type) => {
@@ -22,6 +111,36 @@ const StreamInfoTooltip = ({ stream, quality }) => {
     if (!str) return 'N/A';
     return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
   };
+
+  // Pull just the hostname out of the portal URL so two streams on the
+  // same provider are easy to compare at a glance (lordstreams.live vs
+  // fistikgibisin.com) without the full URL taking up a whole line.
+  const sourceHost = (() => {
+    if (!stream.sourceUrl) return null;
+    try { return new URL(stream.sourceUrl).host; }
+    catch { return null; }
+  })();
+
+  const state = deriveEventState(event);
+  const startInfo = formatLocalStart(event?.event_start, nowTick);
+  const hasScore = event && (event.home_score != null || event.away_score != null);
+
+  const badge = (() => {
+    switch (state) {
+      case 'live':
+        return { label: 'LIVE', cls: 'bg-red-500/25 text-red-200 border border-red-400/40' };
+      case 'upcoming':
+        return { label: 'UPCOMING', cls: 'bg-amber-500/20 text-amber-200 border border-amber-400/40' };
+      case 'final':
+        return { label: 'FINAL', cls: 'bg-slate-500/25 text-slate-200 border border-slate-400/40' };
+      case 'delayed':
+        return { label: 'DELAYED', cls: 'bg-orange-500/25 text-orange-200 border border-orange-400/40' };
+      case 'postponed':
+        return { label: 'POSTPONED', cls: 'bg-slate-500/25 text-slate-400 border border-slate-400/30' };
+      default:
+        return null;
+    }
+  })();
 
   return (
     <div className="relative">
@@ -46,20 +165,86 @@ const StreamInfoTooltip = ({ stream, quality }) => {
 
       {isVisible && (
         <div
-          className={`absolute right-0 top-full mt-1 z-50 w-64 rounded-lg border bg-slate-900/95 shadow-xl shadow-black/50 p-3 text-xs ${
+          className={`absolute right-0 top-full mt-1 z-50 w-72 rounded-lg border bg-slate-900/95 shadow-xl shadow-black/50 p-3 text-xs ${
             isPinned ? 'border-blue-500/50' : 'border-slate-700'
           }`}
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
         >
-          {/* Header */}
-          <div className="font-semibold text-slate-200 mb-2 pb-2 border-b border-slate-700 truncate">
-            {stream.name}
-          </div>
+          {/* Event header — always comes first when we know the event */}
+          {(event || stream.espnEventName) && (
+            <div className="mb-2 pb-2 border-b border-slate-700">
+              <div className="flex items-start gap-2">
+                {badge && (
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${badge.cls}`}>
+                    {badge.label}
+                    {state === 'upcoming' && startInfo && startInfo.diffMin > 0 && (
+                      <span className="ml-1 font-normal normal-case tracking-normal opacity-80">
+                        · in {startInfo.relative.replace('starts in ', '')}
+                      </span>
+                    )}
+                  </span>
+                )}
+                {eventLoading && !event && (
+                  <span className="text-[10px] text-slate-500">loading…</span>
+                )}
+              </div>
 
-          {/* Details Grid */}
+              <div className="mt-1.5 font-semibold text-slate-100 leading-tight">
+                {event?.event_name || stream.espnEventName || stream.name}
+              </div>
+
+              {(event?.league_name || event?.sport_type) && (
+                <div className="mt-0.5 text-[10px] text-slate-500 uppercase tracking-wide">
+                  {[event.league_name, event.sport_type].filter(Boolean).join(' · ')}
+                </div>
+              )}
+
+              {/* Score — prefer team-line layout when we have it */}
+              {hasScore && event.home_team && event.away_team && (
+                <div className="mt-2 space-y-0.5">
+                  <div className="flex justify-between items-baseline">
+                    <span className="text-slate-300 truncate mr-2">{event.away_team}</span>
+                    <span className={`font-mono font-semibold ${state === 'live' ? 'text-white' : 'text-slate-300'}`}>
+                      {event.away_score ?? '—'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-baseline">
+                    <span className="text-slate-300 truncate mr-2">{event.home_team}</span>
+                    <span className={`font-mono font-semibold ${state === 'live' ? 'text-white' : 'text-slate-300'}`}>
+                      {event.home_score ?? '—'}
+                    </span>
+                  </div>
+                  {(event.game_status || event.game_clock) && (
+                    <div className="mt-1 text-[10px] text-slate-400">
+                      {[event.game_status, event.game_clock].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Start time line — always shown when we know the start */}
+              {startInfo && (
+                <div className="mt-2 text-[11px] text-slate-300">
+                  {state === 'upcoming' ? 'Starts' : 'Started'}{' '}
+                  <span className="text-slate-100 font-medium">
+                    {startInfo.dayLabel ? `${startInfo.dayLabel}, ` : ''}{startInfo.timeStr}
+                  </span>
+                  <span className="text-slate-500"> · {startInfo.relative}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Stream / source details (collapsed, secondary) */}
           <div className="space-y-1.5">
-            {/* Source Info */}
+            <div className="flex justify-between gap-2">
+              <span className="text-slate-500">Channel:</span>
+              <span className="text-slate-300 truncate text-right flex-1">
+                {stream.name}
+              </span>
+            </div>
+
             <div className="flex justify-between gap-2">
               <span className="text-slate-500">Source:</span>
               <span className="text-slate-300 truncate text-right flex-1">
@@ -81,7 +266,6 @@ const StreamInfoTooltip = ({ stream, quality }) => {
               </span>
             </div>
 
-            {/* Quality */}
             {quality && (
               <div className="flex justify-between gap-2">
                 <span className="text-slate-500">Quality:</span>
@@ -91,7 +275,6 @@ const StreamInfoTooltip = ({ stream, quality }) => {
               </div>
             )}
 
-            {/* Channel ID */}
             <div className="flex justify-between gap-2">
               <span className="text-slate-500">Channel ID:</span>
               <span className="text-slate-400 font-mono text-[10px] truncate text-right flex-1">
@@ -99,17 +282,24 @@ const StreamInfoTooltip = ({ stream, quality }) => {
               </span>
             </div>
 
-            {/* Source URL (if available) */}
-            {stream.sourceUrl && (
+            {sourceHost && (
               <div className="flex justify-between gap-2">
-                <span className="text-slate-500">Portal:</span>
-                <span className="text-slate-400 font-mono text-[10px] truncate text-right flex-1">
-                  {truncate(stream.sourceUrl, 25)}
+                <span className="text-slate-500">Host:</span>
+                <span className="text-slate-300 font-mono text-[10px] truncate text-right flex-1">
+                  {sourceHost}
                 </span>
               </div>
             )}
 
-            {/* MAC Address for Stalker */}
+            {stream.sourceUsername && (
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-500">Account:</span>
+                <span className="text-cyan-300 font-mono text-[10px] truncate text-right flex-1">
+                  {truncate(stream.sourceUsername, 28)}
+                </span>
+              </div>
+            )}
+
             {stream.sourceMac && (
               <div className="flex justify-between gap-2">
                 <span className="text-slate-500">MAC:</span>
@@ -119,21 +309,6 @@ const StreamInfoTooltip = ({ stream, quality }) => {
               </div>
             )}
 
-            {/* ESPN Event (for sports) */}
-            {stream.espnEventName && (
-              <>
-                <div className="mt-2 pt-2 border-t border-slate-700">
-                  <div className="flex justify-between gap-2">
-                    <span className="text-slate-500">Event:</span>
-                    <span className="text-amber-300 truncate text-right flex-1">
-                      {truncate(stream.espnEventName, 25)}
-                    </span>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Search Query (if from find alternative) */}
             {stream.searchQuery && !stream.espnEventName && (
               <div className="flex justify-between gap-2">
                 <span className="text-slate-500">Search:</span>
@@ -169,6 +344,7 @@ const StreamCellInner = memo(({
   onToggleMute,
   onRefresh,
   onFindAlternative,
+  onFindDifferentGame,
   onStreamDead,
   onBlacklist,
   onRemove,
@@ -267,6 +443,18 @@ const StreamCellInner = memo(({
                   </svg>
                 )}
               </button>
+              {/* Find Different Game Button */}
+              {onFindDifferentGame && (
+                <button
+                  onClick={onFindDifferentGame}
+                  className="p-0.5 rounded hover:bg-purple-500/20 text-slate-400 hover:text-purple-400 transition-colors"
+                  title="Replace with a different live game"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
+                  </svg>
+                </button>
+              )}
               {/* Blacklist Button */}
               <button
                 onClick={onBlacklist}
@@ -333,6 +521,7 @@ export const SortableStreamCell = ({
   onToggleMute,
   onRefresh,
   onFindAlternative,
+  onFindDifferentGame,
   onStreamDead,
   onBlacklist,
   onRemove,
@@ -372,6 +561,7 @@ export const SortableStreamCell = ({
         onToggleMute={onToggleMute}
         onRefresh={onRefresh}
         onFindAlternative={onFindAlternative}
+        onFindDifferentGame={onFindDifferentGame}
         onStreamDead={onStreamDead}
         onBlacklist={onBlacklist}
         onRemove={onRemove}

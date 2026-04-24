@@ -71,19 +71,27 @@ const MultiViewPage = ({ sessionId }) => {
   const [isSearching, setIsSearching] = useState(false);
 
   // Find alternative stream state
-  const [findingAlternativeFor, setFindingAlternativeFor] = useState(null);
+  // Keys of streams currently searching for an alternative. Stored as a Set
+  // so every slot can search in parallel — previously this was a single
+  // string, which meant if two streams died at once, the second one was
+  // silently dropped.
+  const [findingAlternativeFor, setFindingAlternativeFor] = useState(() => new Set());
 
   // Track exhausted searches - when a search exhausts, reset offset to 0 on next attempt
   const exhaustedSearchesRef = useRef(new Set());
 
-  // Auto-find alternative rate limiting to prevent network exhaustion
+  // Auto-find alternative rate limiting to prevent network exhaustion.
+  // Tuned to survive a provider outage across a 4-slot grid: the old
+  // 3/min + 2-minute pause silenced the whole grid for 2 minutes whenever
+  // more than three streams died close together.
   const autoFindRateLimitRef = useRef({
     lastAutoFind: 0,
     autoFindCount: 0,
     windowStart: 0,
-    cooldownMs: 10000,      // 10 seconds between auto-finds
-    maxAutoFinds: 3,        // Max 3 auto-finds per minute
+    cooldownMs: 3000,       // 3 seconds between auto-finds (global)
+    maxAutoFinds: 10,       // Up to 10 auto-finds per minute
     windowMs: 60000,        // 1 minute window
+    pauseMs: 30000,         // If the window cap is hit, pause auto-finds for 30s
     isPaused: false         // Emergency pause
   });
 
@@ -961,12 +969,12 @@ const MultiViewPage = ({ sessionId }) => {
       if (rateLimit.autoFindCount >= rateLimit.maxAutoFinds) {
         console.log(`[Find Alternative] Rate limited - max ${rateLimit.maxAutoFinds} auto-finds per minute reached`);
         rateLimit.isPaused = true;
-        // Auto-unpause after 2 minutes
+        // Auto-unpause after pauseMs (default 30s)
         setTimeout(() => {
           rateLimit.isPaused = false;
           rateLimit.autoFindCount = 0;
           console.log('[Find Alternative] Auto-find unpaused');
-        }, 120000);
+        }, rateLimit.pauseMs);
         return;
       }
 
@@ -976,13 +984,18 @@ const MultiViewPage = ({ sessionId }) => {
       console.log(`[Find Alternative] Auto-find triggered (${rateLimit.autoFindCount}/${rateLimit.maxAutoFinds} this window)`);
     }
 
-    // Already finding alternative for another stream - skip
-    if (findingAlternativeFor && findingAlternativeFor !== streamKey) {
-      console.log(`[Find Alternative] Already finding alternative for another stream, skipping ${stream.name}`);
+    // Skip only if THIS stream is already being searched for (other slots
+    // searching in parallel is fine and actually desirable).
+    if (findingAlternativeFor.has(streamKey)) {
+      console.log(`[Find Alternative] Already finding alternative for ${stream.name}, skipping duplicate request`);
       return;
     }
 
-    setFindingAlternativeFor(streamKey);
+    setFindingAlternativeFor(prev => {
+      const next = new Set(prev);
+      next.add(streamKey);
+      return next;
+    });
 
     try {
       // Exclude sources already in use in multiview (one source = one stream)
@@ -1005,7 +1018,11 @@ const MultiViewPage = ({ sessionId }) => {
 
       if (!token) {
         showToast('Authentication required', 'error');
-        setFindingAlternativeFor(null);
+        setFindingAlternativeFor(prev => {
+          const next = new Set(prev);
+          next.delete(streamKey);
+          return next;
+        });
         return;
       }
 
@@ -1066,7 +1083,28 @@ const MultiViewPage = ({ sessionId }) => {
         })
       });
 
-      const data = await response.json();
+      // Parse defensively — a nodemon restart or dev-proxy timeout can return
+      // an empty body with a 5xx, which turns `response.json()` into a
+      // confusing `SyntaxError: Unexpected end of JSON input`.
+      const rawText = await response.text();
+      let data;
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch (parseErr) {
+        console.warn('[Find Alternative] Non-JSON response:', response.status, rawText.slice(0, 200));
+        showToast(
+          response.status >= 500
+            ? 'Server error while searching — backend may be restarting'
+            : `Search failed (${response.status || 'network error'})`,
+          'error'
+        );
+        return;
+      }
+
+      if (!response.ok) {
+        showToast(data?.error || data?.message || `Search failed (${response.status})`, 'error');
+        return;
+      }
 
       if (data.success && data.channel) {
         // Clear exhausted flag since we found a working channel
@@ -1105,7 +1143,103 @@ const MultiViewPage = ({ sessionId }) => {
       console.error('[Find Alternative] Error:', error);
       showToast('Failed to find alternative', 'error');
     } finally {
-      setFindingAlternativeFor(null);
+      setFindingAlternativeFor(prev => {
+        const next = new Set(prev);
+        next.delete(streamKey);
+        return next;
+      });
+    }
+  };
+
+  // Replace a dead stream with a channel for a *different* live event
+  // (not just another channel for the same game). Hits the same backend
+  // endpoint that auto-fill uses under the hood — random-working-stream —
+  // but excludes the current event plus everything already in the grid
+  // so we never duplicate slots.
+  const handleFindDifferentGame = async (stream) => {
+    const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
+
+    if (findingAlternativeFor.has(streamKey)) {
+      console.log(`[Find Different Game] Already searching for ${stream.name}, skipping`);
+      return;
+    }
+
+    setFindingAlternativeFor(prev => {
+      const next = new Set(prev);
+      next.add(streamKey);
+      return next;
+    });
+
+    try {
+      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
+      if (!token) {
+        showToast('Authentication required', 'error');
+        return;
+      }
+
+      // Exclude every event + source currently on the grid so the
+      // replacement is genuinely new content.
+      const excludeEventIds = streams.map(s => s.espnEventId).filter(Boolean);
+      const excludeSourceIds = streams.map(s => s.sourceId).filter(Boolean);
+
+      const response = await fetch('/api/live-events/random-working-stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ excludeEventIds, excludeSourceIds })
+      });
+
+      const rawText = await response.text();
+      let data;
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        showToast(
+          response.status >= 500
+            ? 'Server error while searching — backend may be restarting'
+            : `Search failed (${response.status || 'network error'})`,
+          'error'
+        );
+        return;
+      }
+
+      if (!response.ok || !data.success || !data.channel) {
+        showToast(data?.message || data?.error || 'No other live games available', 'error');
+        return;
+      }
+
+      // Swap the dead stream for the new one.
+      const removeSuccess = await removeFromMultiview(stream.id, stream.sourceId);
+      if (removeSuccess) {
+        setStreams(prevStreams => prevStreams.filter(
+          s => !(s.id === stream.id && s.sourceId === stream.sourceId)
+        ));
+        const oldKey = `${stream.sourceId}_${stream.id}`;
+        setStreamQualities(prev => {
+          const { [oldKey]: _removed, ...rest } = prev;
+          return rest;
+        });
+      }
+
+      const added = await addToMultiview(data.channel);
+      if (added) {
+        window.dispatchEvent(new Event('multiviewUpdate'));
+        const eventLabel = data.event?.name ? ` — ${data.event.name}` : '';
+        showToast(`Replaced with "${data.channel.name}"${eventLabel}`, 'success');
+      } else {
+        showToast('Failed to add replacement channel', 'error');
+      }
+    } catch (error) {
+      console.error('[Find Different Game] Error:', error);
+      showToast('Failed to find a different game', 'error');
+    } finally {
+      setFindingAlternativeFor(prev => {
+        const next = new Set(prev);
+        next.delete(streamKey);
+        return next;
+      });
     }
   };
 
@@ -1222,6 +1356,7 @@ const MultiViewPage = ({ sessionId }) => {
           onToggleMute={toggleMute}
           onRefresh={handleRefreshStream}
           onFindAlternative={handleFindAlternative}
+          onFindDifferentGame={handleFindDifferentGame}
           onBlacklist={handleBlacklistChannel}
           onRemove={handleRemoveStream}
           onQualityDetected={handleQualityDetected}

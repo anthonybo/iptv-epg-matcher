@@ -266,16 +266,31 @@ router.post('/search-channel', async (req, res) => {
 
         channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-        // For event searches with both teams, require higher relevance to avoid
-        // false positives like "Louisville" matching "Louis" or "Yorkshire" matching "York"
-        // Score 200 = at least one full team name matched, or both teams partially matched
-        // Score 100 = only one partial match (too loose for event searches)
-        const minScore = (homeTeam && awayTeam) ? 200 : 100;
+        // Score tiers after the rewrite (see channelScoring.js):
+        //   ≥300: both teams named (full or mascot) in channel name — clearly the game
+        //   ≥150: a full team name in channel name — dedicated team channel
+        //   ≥100: just a mascot — still likely to be the team's channel
+        //    50 : city-only (e.g. "Atlanta Falcons" for a Hawks search) — drop
+        // minScore=100 keeps real team channels even when the channel name
+        // doesn't mention BOTH teams, which is the common case for IPTV
+        // names like "KNICKS TV" or "ATLANTA HAWKS HD".
+        const minScore = (homeTeam && awayTeam) ? 100 : 50;
         const beforeFilter = channels.length;
         channels = channels.filter(c => c.relevanceScore >= minScore);
 
         if (beforeFilter > channels.length) {
-          logger.info(`[Batch ${batchNum + 1}] Filtered ${beforeFilter - channels.length} low-relevance channels (minScore: ${minScore})`);
+          // Log what we dropped at the top of the filtered bucket so we can
+          // see whether the threshold is swallowing real matches.
+          const droppedSample = channelsResult.rows
+            .map(c => ({ name: c.name, score: calculateRelevanceScore(c.name, homeTeam, awayTeam) }))
+            .filter(c => c.score < minScore && c.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 3)
+            .map(c => `${c.name.substring(0, 40)}:${c.score}`);
+          logger.info(
+            `[Batch ${batchNum + 1}] Filtered ${beforeFilter - channels.length} low-relevance channels (minScore: ${minScore})` +
+            (droppedSample.length ? ` | top dropped: ${droppedSample.join(' | ')}` : '')
+          );
         }
 
         if (channels.length === 0) {
@@ -288,6 +303,28 @@ router.post('/search-channel', async (req, res) => {
           const topChannels = channels.slice(0, 5).map(c => `${c.name.substring(0, 40)}: ${c.relevanceScore}`);
           logger.info(`Top scoring channels: ${topChannels.join(' | ')}`);
         }
+      }
+
+      // Collapse duplicates: the same channel name carried by multiple of
+      // the user's accounts on the same upstream host is the same stream
+      // with different credentials. Probing all copies in parallel hits
+      // one host with N identical ffprobes and burns time on identical
+      // failures. Keep the first occurrence per (name, host).
+      const hostOf = (url) => {
+        if (!url) return '';
+        try { return new URL(url).host.toLowerCase(); }
+        catch { return ''; }
+      };
+      const seenKeys = new Set();
+      const beforeDedupe = channels.length;
+      channels = channels.filter((c) => {
+        const key = `${(c.name || '').toLowerCase().trim()}::${hostOf(c.source_url || c.url)}`;
+        if (seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        return true;
+      });
+      if (beforeDedupe > channels.length) {
+        logger.info(`[Batch ${batchNum + 1}] Collapsed ${beforeDedupe - channels.length} duplicate (name,host) channels; ${channels.length} unique remain`);
       }
 
       // Test channels in parallel batches
@@ -366,6 +403,11 @@ router.post('/search-channel', async (req, res) => {
     let errorMessage;
     if (lowQualitySkipped > 0 && minHeight > 0) {
       errorMessage = `Tested ${totalChannelsTested} channels matching "${searchQuery}" - ${lowQualitySkipped} were working but below ${minHeight}p quality`;
+    } else if (totalChannelsTested === 0 && totalChannelsMatched > 0) {
+      // We had candidates but none passed the relevance filter. Make that
+      // explicit so the user can tell "nothing is live under this name"
+      // apart from "everything that matched looked like a false positive".
+      errorMessage = `${totalChannelsMatched} channels had "${searchQuery}" in their name, but none looked like a real match for this event`;
     } else {
       errorMessage = `Tested ${totalChannelsTested} of ${totalChannelsMatched} channels matching "${searchQuery}" but none were working`;
     }

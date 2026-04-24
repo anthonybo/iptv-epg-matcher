@@ -32,6 +32,7 @@ const MultiViewGrid = ({
   onToggleMute,
   onRefresh,
   onFindAlternative,
+  onFindDifferentGame,
   onBlacklist,
   onRemove,
   onQualityDetected
@@ -144,10 +145,11 @@ const MultiViewGrid = ({
                   isTheatreMode={isTheatreMode}
                   isMuted={mutedStreams.has(streamKey)}
                   quality={streamQualities[streamKey]}
-                  isFindingAlternative={findingAlternativeFor === streamKey}
+                  isFindingAlternative={findingAlternativeFor && findingAlternativeFor.has && findingAlternativeFor.has(streamKey)}
                   onToggleMute={() => onToggleMute(streamKey)}
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
                   onFindAlternative={() => onFindAlternative(stream, false)}
+                  onFindDifferentGame={() => onFindDifferentGame(stream)}
                   onStreamDead={() => onFindAlternative(stream, true)}
                   onBlacklist={() => onBlacklist(stream.name)}
                   onRemove={() => onRemove(stream.id, stream.sourceId)}
