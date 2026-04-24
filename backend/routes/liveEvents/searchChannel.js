@@ -11,6 +11,8 @@ const logger = require('../../config/logger');
 const postgresService = require('../../services/postgresService');
 const { execFileAsync, httpAgent, httpsAgent } = require('../../utils/streamAgents');
 const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/channelScoring');
+const teamMatcher = require('../../utils/teamMatcher');
+const teamAliasesService = require('../../services/teamAliasesService');
 
 /**
  * POST /api/live-events/search-channel
@@ -115,6 +117,13 @@ router.post('/search-channel', async (req, res) => {
     let homeTeam = null;
     let awayTeam = null;
 
+    // Alias bundles from team_aliases — single lookup per request.
+    // If the league isn't known or no rows match, fall back to just
+    // the live_events team string as a single-element alias list.
+    // `homeAliases` / `awayAliases` feed the new multi-stage matcher.
+    let homeAliases = null;
+    let awayAliases = null;
+
     if (eventMatch) {
       awayTeam = eventMatch[1].trim();
       homeTeam = eventMatch[2].trim();
@@ -122,6 +131,28 @@ router.post('/search-channel', async (req, res) => {
       const awayTerms = extractSearchTerms(awayTeam);
       searchTerms = [...new Set([...homeTerms, ...awayTerms])];
       logger.info(`Search channel: Detected event format - home: "${homeTeam}", away: "${awayTeam}", terms: ${searchTerms.join(', ')}`);
+
+      // Resolve aliases for both teams if we know the league.
+      if (leagueName) {
+        try {
+          const [hb, ab] = await Promise.all([
+            teamAliasesService.getAliasesForTeam(leagueName, homeTeam),
+            teamAliasesService.getAliasesForTeam(leagueName, awayTeam)
+          ]);
+          homeAliases = hb ? hb.aliases : [homeTeam];
+          awayAliases = ab ? ab.aliases : [awayTeam];
+          logger.info(
+            `[Find Alternative] Aliases — home: [${homeAliases.join(', ')}], away: [${awayAliases.join(', ')}]`
+          );
+        } catch (err) {
+          logger.warn(`[Find Alternative] Alias lookup failed: ${err.message}`);
+          homeAliases = [homeTeam];
+          awayAliases = [awayTeam];
+        }
+      } else {
+        homeAliases = [homeTeam];
+        awayAliases = [awayTeam];
+      }
     } else {
       searchTerms = [searchQuery];
       logger.info(`Search channel: Simple search for "${searchQuery}"`);
@@ -365,30 +396,86 @@ router.post('/search-channel', async (req, res) => {
 
       // Apply relevance scoring for event searches
       if (homeTeam || awayTeam) {
+        // Fetch EPG "what's airing right now" for any candidate with a
+        // tvg_id. Done per-batch so each query is bounded by BATCH_SIZE
+        // channels. The result is a Map keyed by tvg_id → program title.
+        const epgByTvgId = new Map();
+        const tvgIds = channels
+          .map(c => c.epg_channel_id || c.tvg_id)
+          .filter(Boolean);
+        if (tvgIds.length > 0) {
+          try {
+            const { rows: epgRows } = await postgresService.query(
+              `SELECT DISTINCT ON (channel_id)
+                      channel_id, title
+                 FROM epg_programs
+                WHERE channel_id = ANY($1)
+                  AND start_time <= NOW()
+                  AND stop_time > NOW()
+                ORDER BY channel_id, start_time DESC`,
+              [tvgIds]
+            );
+            for (const r of epgRows) epgByTvgId.set(r.channel_id, r.title);
+          } catch (err) {
+            logger.warn(`[Find Alternative] EPG lookup failed: ${err.message}`);
+          }
+        }
+
+        // Score each candidate through the new matcher. Alias-aware,
+        // league-context aware, EPG-program aware. Falls back to the
+        // old calculateRelevanceScore when no alias bundle was resolved
+        // (league unknown / team not in team_aliases) so non-sports
+        // and pre-seed leagues still work.
+        const useAliasMatcher = Boolean(homeAliases && awayAliases);
         channels = channels.map(channel => {
+          if (useAliasMatcher) {
+            const programTitle = epgByTvgId.get(channel.epg_channel_id || channel.tvg_id) || null;
+            const result = teamMatcher.matchChannel(
+              { name: channel.name, currentProgramTitle: programTitle },
+              homeAliases,
+              awayAliases,
+              scoringContext
+            );
+            return {
+              ...channel,
+              relevanceScore: result.score,
+              _matchDetails: result.details,
+              _epgProgram: programTitle
+            };
+          }
           const score = calculateRelevanceScore(channel.name, homeTeam, awayTeam, scoringContext);
           return { ...channel, relevanceScore: score };
         });
 
         channels.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-        // Score tiers after the rewrite (see channelScoring.js):
-        //   ≥300: both teams named (full or mascot) in channel name — clearly the game
+        // Score tiers after the rewrite:
+        //   ≥400: both teams named in channel name OR EPG confirms matchup
+        //   ≥300: generic channel + EPG dual-team hit (gold-tier evidence)
         //   ≥150: a full team name in channel name — dedicated team channel
-        //   ≥100: just a mascot — still likely to be the team's channel
-        //    50 : city-only (e.g. "Atlanta Falcons" for a Hawks search) — drop
-        // minScore=100 keeps real team channels even when the channel name
-        // doesn't mention BOTH teams, which is the common case for IPTV
-        // names like "KNICKS TV" or "ATLANTA HAWKS HD".
+        //   ≥100: just a mascot or partial team — still likely that team
+        //    50 : city-only or ambiguous — drop
+        //   <=0 : cross-sport keyword penalty applied — drop
         const minScore = (homeTeam && awayTeam) ? 100 : 50;
         const beforeFilter = channels.length;
         channels = channels.filter(c => c.relevanceScore >= minScore);
 
         if (beforeFilter > channels.length) {
-          // Log what we dropped at the top of the filtered bucket so we can
-          // see whether the threshold is swallowing real matches.
+          // Log what we dropped at the top of the filtered bucket so we
+          // can see whether the threshold is swallowing real matches.
           const droppedSample = channelsResult.rows
-            .map(c => ({ name: c.name, score: calculateRelevanceScore(c.name, homeTeam, awayTeam, scoringContext) }))
+            .map(c => {
+              const epg = epgByTvgId.get(c.epg_channel_id || c.tvg_id) || null;
+              const s = useAliasMatcher
+                ? teamMatcher.matchChannel(
+                    { name: c.name, currentProgramTitle: epg },
+                    homeAliases,
+                    awayAliases,
+                    scoringContext
+                  ).score
+                : calculateRelevanceScore(c.name, homeTeam, awayTeam, scoringContext);
+              return { name: c.name, score: s };
+            })
             .filter(c => c.score < minScore && c.score > 0)
             .sort((a, b) => b.score - a.score)
             .slice(0, 3)

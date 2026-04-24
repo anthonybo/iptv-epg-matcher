@@ -1,0 +1,305 @@
+/**
+ * Sports-event → channel matcher, v2.
+ *
+ * Inspired by PiratesIRC/Dispatcharr-EPG-Janitor's fuzzy_matcher.py —
+ * the only OSS reference implementation that actually handles this
+ * problem well. The shape is:
+ *
+ *   1. Scrub channel text (strip [HD]/[4K]/(Backup)/country prefixes etc.)
+ *   2. Build candidate aliases per team from the team_aliases registry
+ *   3. Score the scrubbed text against each alias through a stage cascade:
+ *        a. exact whole-phrase match        → 150 (per team)
+ *        b. whole-word containment          → 100 (per team)
+ *        c. token-set/token-sort fuzzy hit  → up to 70 (per team)
+ *      First hit per-team wins; we don't double-count.
+ *   4. Layer bonuses:
+ *        both teams scored              → +200
+ *        same-league keyword in text    → +50
+ *        different-sport keyword in text → −120
+ *   5. Optional EPG program-title pass: score the channel's current
+ *      program title through the same stage cascade. If both teams hit
+ *      in the program title, add +300 — that's gold-tier evidence the
+ *      channel is airing the game right now, even if the channel name
+ *      is generic ("MLS 05", "ESPN 2").
+ *
+ * The old `calculateRelevanceScore` in channelScoring.js is still used
+ * by callers that haven't been migrated and as a fallback when no
+ * team_aliases row exists. That path is intentionally not removed in
+ * this pass — migration is a per-route decision.
+ */
+
+const FuzzySet = require('fuzzyset');
+
+// Strip everything we've seen IPTV providers paste into channel names
+// that isn't part of the actual channel identity. Runs on a lowercased
+// copy, returns a normalised lowercased string.
+const SCRUB_PATTERNS = [
+  /\[(hd|fhd|uhd|4k|sd|720p|1080p|4k[a-z]*|backup|alt[a-z]*)\]/g,
+  /\((hd|fhd|uhd|4k|sd|720p|1080p|backup|alt[a-z]*|east|west|central|pacific)\)/g,
+  /\b(hd|fhd|uhd|4k|sd|720p|1080p)\b/g,
+  /\b(east coast|west coast|pacific|central)\b/g,
+  /^(us|usa|ca|uk|gb|es|mx|de|fr|it)\s*[:|-]\s*/,  // country prefix
+  /\|\s*(us|usa|ca|uk|gb)\s*\|/g,
+  /\s*\|\s*/g,                                        // pipes → spaces
+  /[\u{1D400}-\u{1D7FF}]/gu,                          // mathematical alphanumeric unicode
+  /\b(ᴿᴬᵂ|ᴴᴰ|ᶠᴴᴰ)\b/gu,
+  /\s+/g                                              // collapse whitespace last
+];
+
+function scrub(text) {
+  if (!text) return '';
+  let s = String(text).toLowerCase();
+  for (const pat of SCRUB_PATTERNS) {
+    s = s.replace(pat, ' ');
+  }
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+// Word-boundary containment. Escapes regex meta so aliases with dots
+// ("D.C. United", "St. Louis") work. `\b` handles punctuation/whitespace
+// edges, not mid-word hits.
+function wordContains(haystack, needle) {
+  if (!needle) return false;
+  const escaped = String(needle).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  try {
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(haystack);
+  } catch {
+    return haystack.toLowerCase().includes(String(needle).toLowerCase());
+  }
+}
+
+// Keyword sets for league context. Same idea as channelScoring.js but
+// kept local so the two matchers can evolve independently.
+const LEAGUE_KEYWORDS = {
+  mls: ['mls'],
+  nhl: ['nhl'],
+  ahl: ['ahl'],
+  nba: ['nba'],
+  wnba: ['wnba'],
+  nfl: ['nfl'],
+  mlb: ['mlb'],
+  ncaa: ['ncaa', 'college'],
+  cfb: ['cfb'],
+  cbb: ['cbb'],
+  epl: ['epl', 'premier league'],
+  laliga: ['la liga', 'laliga'],
+  seriea: ['serie a'],
+  bundesliga: ['bundesliga'],
+  ucl: ['champions league', 'ucl'],
+  uel: ['europa league', 'uel'],
+  qmjhl: ['qmjhl']
+};
+
+const LEAGUE_SPORT = {
+  mls: 'soccer', epl: 'soccer', laliga: 'soccer', seriea: 'soccer',
+  bundesliga: 'soccer', ucl: 'soccer', uel: 'soccer',
+  nhl: 'hockey', ahl: 'hockey', qmjhl: 'hockey',
+  nba: 'basketball', wnba: 'basketball', cbb: 'basketball',
+  nfl: 'football', cfb: 'football',
+  mlb: 'baseball'
+};
+
+function normalizeLeague(leagueName) {
+  if (!leagueName) return null;
+  const lower = String(leagueName).toLowerCase();
+  if (/\bmls\b|major league soccer/.test(lower)) return 'mls';
+  if (/\bahl\b/.test(lower)) return 'ahl';
+  if (/\bnhl\b/.test(lower)) return 'nhl';
+  if (/\bwnba\b/.test(lower)) return 'wnba';
+  if (/\bnba\b/.test(lower)) return 'nba';
+  if (/\bnfl\b/.test(lower)) return 'nfl';
+  if (/\bmlb\b/.test(lower)) return 'mlb';
+  if (/\bepl\b|premier league/.test(lower)) return 'epl';
+  if (/la liga|laliga/.test(lower)) return 'laliga';
+  if (/serie a/.test(lower)) return 'seriea';
+  if (/bundesliga/.test(lower)) return 'bundesliga';
+  if (/champions league|\bucl\b/.test(lower)) return 'ucl';
+  if (/europa league|\buel\b/.test(lower)) return 'uel';
+  if (/ncaa.*football|\bcfb\b|college football/.test(lower)) return 'cfb';
+  if (/ncaa.*basketball|\bcbb\b|college basketball/.test(lower)) return 'cbb';
+  if (/\bncaa\b/.test(lower)) return 'ncaa';
+  return null;
+}
+
+/**
+ * Stage-cascade score for one team's alias list against a scrubbed
+ * target text. Returns { score, stage, matched } where stage is the
+ * highest-confidence hit found ('exact' | 'word' | 'fuzzy' | null).
+ *
+ * Aliases below length 4 are only used at the 'exact' stage; we don't
+ * run 2/3-char tokens like "LA" or "NY" through the substring/fuzzy
+ * passes because they match literally everything.
+ */
+function scoreAliases(scrubbed, aliases) {
+  if (!scrubbed || !Array.isArray(aliases) || aliases.length === 0) {
+    return { score: 0, stage: null, matched: null };
+  }
+
+  const longAliases = aliases.filter(a => a && String(a).length >= 4);
+  const shortAliases = aliases.filter(a => a && String(a).length > 0 && String(a).length < 4);
+
+  // Stage a — exact whole-phrase match (for any length, long or short).
+  // Long alias with space = full-team match (e.g. "Colorado Rapids").
+  // Single-word alias: treat match as "word" so it doesn't outscore a
+  // real full-team hit.
+  for (const alias of longAliases) {
+    const aliasLower = String(alias).toLowerCase();
+    if (aliasLower.includes(' ') && scrubbed.includes(aliasLower)) {
+      return { score: 150, stage: 'exact', matched: alias };
+    }
+  }
+  for (const alias of shortAliases) {
+    if (wordContains(scrubbed, alias)) {
+      return { score: 150, stage: 'exact', matched: alias };
+    }
+  }
+
+  // Stage b — whole-word containment for long-enough aliases.
+  for (const alias of longAliases) {
+    if (wordContains(scrubbed, alias)) {
+      return { score: 100, stage: 'word', matched: alias };
+    }
+  }
+
+  // Stage c — fuzzy fallback (typo tolerance, minor punctuation drift).
+  // FuzzySet with a 0.75 threshold on long aliases only. Cheap because
+  // the candidate list is the channel's own words (usually <12).
+  const words = scrubbed.split(/[\s|:@\-\/]+/).filter(w => w.length >= 3);
+  if (words.length === 0) return { score: 0, stage: null, matched: null };
+  const fuzzy = FuzzySet(words);
+  let best = 0;
+  let bestAlias = null;
+  for (const alias of longAliases) {
+    const aliasLower = String(alias).toLowerCase();
+    const hit = fuzzy.get(aliasLower, null, 0.8);
+    if (hit && hit.length > 0) {
+      const quality = hit[0][0]; // 0..1
+      const s = Math.round(quality * 70);
+      if (s > best) {
+        best = s;
+        bestAlias = alias;
+      }
+    }
+  }
+  return best > 0
+    ? { score: best, stage: 'fuzzy', matched: bestAlias }
+    : { score: 0, stage: null, matched: null };
+}
+
+/**
+ * Same-league bonus / different-sport penalty. Same rationale as the
+ * equivalent in channelScoring.js — pushed here so the new matcher
+ * is self-contained.
+ */
+function scoreLeagueContext(scrubbed, sportType, leagueName) {
+  const targetLeague = normalizeLeague(leagueName);
+  const targetSport = (sportType || '').toLowerCase() ||
+    (targetLeague ? LEAGUE_SPORT[targetLeague] : null);
+
+  if (!targetLeague && !targetSport) return 0;
+
+  let score = 0;
+
+  if (targetLeague) {
+    for (const kw of LEAGUE_KEYWORDS[targetLeague] || []) {
+      if (wordContains(scrubbed, kw)) {
+        score += 50;
+        break;
+      }
+    }
+  }
+
+  for (const [league, keywords] of Object.entries(LEAGUE_KEYWORDS)) {
+    if (league === targetLeague) continue;
+    const otherSport = LEAGUE_SPORT[league];
+    if (!otherSport || otherSport === targetSport) continue;
+    for (const kw of keywords) {
+      if (wordContains(scrubbed, kw)) {
+        score -= 120;
+        return score;
+      }
+    }
+  }
+
+  return score;
+}
+
+/**
+ * Score a block of text (channel name OR EPG program title) against
+ * two team alias bundles + context. Pure function — safe to call
+ * twice and combine the results.
+ *
+ * Returns { score, homeStage, awayStage, leagueBonus, bothTeamsBonus }
+ */
+function scoreText(text, homeAliases, awayAliases, context = {}) {
+  const scrubbed = scrub(text);
+  if (!scrubbed) {
+    return { score: 0, homeStage: null, awayStage: null, leagueBonus: 0, bothTeamsBonus: 0 };
+  }
+
+  const home = scoreAliases(scrubbed, homeAliases);
+  const away = scoreAliases(scrubbed, awayAliases);
+  const bothTeamsBonus = (home.score > 0 && away.score > 0) ? 200 : 0;
+  const leagueBonus = scoreLeagueContext(scrubbed, context.sportType, context.leagueName);
+
+  return {
+    score: home.score + away.score + bothTeamsBonus + leagueBonus,
+    homeStage: home.stage,
+    awayStage: away.stage,
+    homeMatch: home.matched,
+    awayMatch: away.matched,
+    leagueBonus,
+    bothTeamsBonus
+  };
+}
+
+/**
+ * Primary matcher entry. Combines channel-name scoring with an
+ * optional EPG-program-title scoring pass.
+ *
+ * @param {object}   channel            — {name, currentProgramTitle?}
+ * @param {string[]} homeAliases        — aliases from team_aliases
+ * @param {string[]} awayAliases        — aliases from team_aliases
+ * @param {object}   context            — {sportType, leagueName}
+ * @returns {object} { score, details }
+ */
+function matchChannel(channel, homeAliases, awayAliases, context = {}) {
+  const nameResult = scoreText(channel.name, homeAliases, awayAliases, context);
+
+  let programResult = null;
+  let programBonus = 0;
+  if (channel.currentProgramTitle) {
+    programResult = scoreText(channel.currentProgramTitle, homeAliases, awayAliases, context);
+    // EPG is much stronger evidence than channel name because it
+    // reflects what's airing RIGHT NOW. A dual-team hit in the program
+    // title gets a big bonus on top of the name score.
+    if (programResult.bothTeamsBonus > 0) programBonus += 300;
+    else if (programResult.score >= 100) programBonus += 100;
+  }
+
+  return {
+    score: nameResult.score + programBonus,
+    details: {
+      nameScore: nameResult.score,
+      programBonus,
+      homeStage: nameResult.homeStage,
+      awayStage: nameResult.awayStage,
+      homeMatch: nameResult.homeMatch,
+      awayMatch: nameResult.awayMatch,
+      leagueBonus: nameResult.leagueBonus,
+      programDetails: programResult
+    }
+  };
+}
+
+module.exports = {
+  scrub,
+  wordContains,
+  scoreAliases,
+  scoreLeagueContext,
+  scoreText,
+  matchChannel,
+  normalizeLeague,
+  LEAGUE_KEYWORDS,
+  LEAGUE_SPORT
+};

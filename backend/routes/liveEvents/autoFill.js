@@ -12,6 +12,8 @@ const logger = require('../../config/logger');
 const postgresService = require('../../services/postgresService');
 const { execFileAsync, httpAgent, httpsAgent } = require('../../utils/streamAgents');
 const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/channelScoring');
+const teamMatcher = require('../../utils/teamMatcher');
+const teamAliasesService = require('../../services/teamAliasesService');
 
 /**
  * POST /api/live-events/auto-fill-streams
@@ -336,26 +338,69 @@ router.post('/auto-fill-streams', async (req, res) => {
           continue;
         }
 
-        // Score channels using fuzzy matching (prioritize channels with BOTH teams)
-        channels = channels.map(channel => {
-          // Pass the event's sport/league so the scorer can penalise
-          // cross-sport false positives (e.g. an AHL channel whose
-          // mascot happens to share a word with an MLS team name).
-          let score = calculateRelevanceScore(channel.name, homeTeam, awayTeam, {
-            sportType: event.sport_type,
-            leagueName: event.league_name
-          });
+        // Resolve alias bundles + current EPG programs for this batch.
+        // Alias lookups are two single-row queries keyed by (league,
+        // team-string); cached per event so we don't hit the DB every
+        // channel. EPG is one query covering every candidate's tvg_id.
+        const ctx = { sportType: event.sport_type, leagueName: event.league_name };
+        let homeBundle = null;
+        let awayBundle = null;
+        if (event.league_name) {
+          try {
+            [homeBundle, awayBundle] = await Promise.all([
+              teamAliasesService.getAliasesForTeam(event.league_name, homeTeam),
+              teamAliasesService.getAliasesForTeam(event.league_name, awayTeam)
+            ]);
+          } catch (err) {
+            logger.warn(`Auto-fill: Alias lookup failed for ${event.event_name}: ${err.message}`);
+          }
+        }
+        const homeAliases = homeBundle ? homeBundle.aliases : [homeTeam];
+        const awayAliases = awayBundle ? awayBundle.aliases : [awayTeam];
 
-          // League name bonus
+        const epgByTvgId = new Map();
+        const tvgIds = channels.map(c => c.epg_channel_id || c.tvg_id).filter(Boolean);
+        if (tvgIds.length > 0) {
+          try {
+            const { rows } = await postgresService.query(
+              `SELECT DISTINCT ON (channel_id) channel_id, title
+                 FROM epg_programs
+                WHERE channel_id = ANY($1)
+                  AND start_time <= NOW()
+                  AND stop_time > NOW()
+                ORDER BY channel_id, start_time DESC`,
+              [tvgIds]
+            );
+            for (const r of rows) epgByTvgId.set(r.channel_id, r.title);
+          } catch (err) {
+            logger.warn(`Auto-fill: EPG lookup failed: ${err.message}`);
+          }
+        }
+
+        const useAliasMatcher = Boolean(homeBundle && awayBundle);
+        channels = channels.map(channel => {
+          let score;
+          if (useAliasMatcher) {
+            const programTitle = epgByTvgId.get(channel.epg_channel_id || channel.tvg_id) || null;
+            const result = teamMatcher.matchChannel(
+              { name: channel.name, currentProgramTitle: programTitle },
+              homeAliases,
+              awayAliases,
+              ctx
+            );
+            score = result.score;
+          } else {
+            score = calculateRelevanceScore(channel.name, homeTeam, awayTeam, ctx);
+          }
+          // Legacy secondary bonuses — keep as-is so channels like
+          // "NCAA | Alabama vs Auburn" still pick up +25 for the league
+          // word even when it's already in our league-keyword set.
           if (event.league_name && channel.name.toLowerCase().includes(event.league_name.toLowerCase())) {
             score += 25;
           }
-
-          // Sport type bonus
           if (event.sport_type && channel.name.toLowerCase().includes(event.sport_type.toLowerCase())) {
             score += 10;
           }
-
           return { ...channel, relevanceScore: score };
         });
 

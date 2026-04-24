@@ -1090,6 +1090,13 @@ const liveScoresService = require('./services/liveScoresService');
 liveScoresService.startBackgroundUpdates(30000); // 30 seconds
 logger.info('Live scores background updates started (30s interval)');
 
+// Team-alias registry: create the table if missing. Seeding from
+// ESPN is a separate script (backend/scripts/seedTeamAliases.js).
+const teamAliasesService = require('./services/teamAliasesService');
+teamAliasesService.initialize().catch(err => {
+    logger.error(`[TeamAliases] Startup init failed: ${err.message}`);
+});
+
 // Serve static frontend files if build directory exists
 const frontendBuildPath = path.join(__dirname, '../frontend/build');
 if (fs.existsSync(frontendBuildPath)) {
