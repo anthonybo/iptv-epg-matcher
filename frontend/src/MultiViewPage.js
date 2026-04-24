@@ -1,19 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ConfirmModal from './components/ConfirmModal';
 import { useAppContext } from './contexts/AppContext';
-import { showToast } from './components/Toast';
-import {
-  getMultiviewStreams,
-  removeFromMultiview,
-  clearMultiview,
-  calculateLayout,
-  addToMultiview,
-  updateMutedState
-} from './utils/multiviewManager';
+import { calculateLayout } from './utils/multiviewManager';
 
 // Import extracted components
 import {
-  LAYOUT_MODES,
   MultiViewHeader,
   MultiViewGrid,
   SettingsModal,
@@ -21,32 +12,26 @@ import {
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
+// Behavior hooks that own self-contained slices of this page. Keeps the
+// component focused on rendering + wiring.
+import { useBlacklist } from './hooks/multiview/useBlacklist';
+import { useAutoFill } from './hooks/multiview/useAutoFill';
+import { useFindAlternative } from './hooks/multiview/useFindAlternative';
+import { useMultiViewStreams } from './hooks/multiview/useMultiViewStreams';
+import { useStreamFinder } from './hooks/multiview/useStreamFinder';
+import { useStreamSearch } from './hooks/multiview/useStreamSearch';
+
 /**
  * MultiViewPage - Display multiple streams in an auto-layout grid
  * Streams persist in localStorage and can be added from any player
  */
 const MultiViewPage = ({ sessionId }) => {
   const { isTheatreMode, setIsTheatreMode } = useAppContext();
-  const [streams, setStreams] = useState([]);
   const [layout, setLayout] = useState({ columns: 1, rows: 1 });
-  const [streamQualities, setStreamQualities] = useState({});
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [mutedStreams, setMutedStreams] = useState(new Set());
 
-  // Random stream state
-  const [showSportDropdown, setShowSportDropdown] = useState(false);
-  const [liveSports, setLiveSports] = useState([]);
-  const [loadingSports, setLoadingSports] = useState(false);
-  const [searchingStream, setSearchingStream] = useState(false);
-  const [searchAbortController, setSearchAbortController] = useState(null);
-
-  // Blacklist state
-  const [blacklistedChannels, setBlacklistedChannels] = useState([]);
-  const [showBlacklistModal, setShowBlacklistModal] = useState(false);
-  const [loadingBlacklist, setLoadingBlacklist] = useState(true);
-  const [loadingStreams, setLoadingStreams] = useState(true);
-
-  // Settings state
+  // ---------------------------------------------------------------------------
+  // Settings + layout + misc local state (things that aren't owned by a hook).
+  // ---------------------------------------------------------------------------
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [autoFillSettings, setAutoFillSettings] = useState(() => {
     const saved = localStorage.getItem('multiview_autofill_settings');
@@ -63,42 +48,7 @@ const MultiViewPage = ({ sessionId }) => {
     }
     return defaults;
   });
-  const [autoFillProgress, setAutoFillProgress] = useState(null);
 
-  // Search state
-  const [showSearchInput, setShowSearchInput] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
-
-  // Find alternative stream state
-  // Keys of streams currently searching for an alternative. Stored as a Set
-  // so every slot can search in parallel — previously this was a single
-  // string, which meant if two streams died at once, the second one was
-  // silently dropped.
-  const [findingAlternativeFor, setFindingAlternativeFor] = useState(() => new Set());
-
-  // Track exhausted searches - when a search exhausts, reset offset to 0 on next attempt
-  const exhaustedSearchesRef = useRef(new Set());
-
-  // Auto-find alternative rate limiting to prevent network exhaustion.
-  // Tuned to survive a provider outage across a 4-slot grid: the old
-  // 3/min + 2-minute pause silenced the whole grid for 2 minutes whenever
-  // more than three streams died close together.
-  const autoFindRateLimitRef = useRef({
-    lastAutoFind: 0,
-    autoFindCount: 0,
-    windowStart: 0,
-    cooldownMs: 3000,       // 3 seconds between auto-finds (global)
-    maxAutoFinds: 10,       // Up to 10 auto-finds per minute
-    windowMs: 60000,        // 1 minute window
-    pauseMs: 30000,         // If the window cap is hit, pause auto-finds for 30s
-    isPaused: false         // Emergency pause
-  });
-
-  // Local news state
-  const [searchingNews, setSearchingNews] = useState(false);
-
-  // Layout mode state
   const [layoutMode, setLayoutMode] = useState(() => {
     const saved = localStorage.getItem('multiview_layout_mode');
     return saved || 'grid';
@@ -108,123 +58,89 @@ const MultiViewPage = ({ sessionId }) => {
   const layoutButtonRef = useRef(null);
   const [streamOrder, setStreamOrder] = useState({});
 
-  // Load blacklist from API on mount
-  useEffect(() => {
-    loadBlacklist();
-  }, []);
+  // ---------------------------------------------------------------------------
+  // Hook wiring. Each hook owns one cohesive slice of behaviour so this
+  // component can stay focused on composition + rendering.
+  // ---------------------------------------------------------------------------
 
-  const loadBlacklist = async () => {
-    try {
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-      if (!token) {
-        setLoadingBlacklist(false);
-        return;
-      }
+  // Blacklist: loading on mount + add/remove wrappers.
+  const {
+    blacklistedChannels,
+    loadingBlacklist,
+    showBlacklistModal,
+    setShowBlacklistModal,
+    addToBlacklist,
+    removeFromBlacklist
+  } = useBlacklist();
 
-      const response = await fetch('/api/live-events/blacklist', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+  // Streams state + per-slot mute/quality + stream operations
+  // (refresh, remove, clear all, quality-detected callback).
+  const {
+    streams,
+    setStreams,
+    mutedStreams,
+    streamQualities,
+    setStreamQualities,
+    loadingStreams,
+    showClearConfirm,
+    setShowClearConfirm,
+    toggleMute,
+    refreshStream,
+    removeStream,
+    clearAll,
+    onQualityDetected
+  } = useMultiViewStreams();
 
-      const data = await response.json();
-      if (data.success) {
-        setBlacklistedChannels(data.blacklist.map(item => item.channel_name));
-      }
-    } catch (error) {
-      console.error('Failed to load blacklist:', error);
-    } finally {
-      setLoadingBlacklist(false);
-    }
-  };
+  // Header "find me a stream" actions: sport dropdown, random/news/any
+  // buttons, sport selection, ticker click.
+  const {
+    searchingStream,
+    setSearchingStream,
+    showSportDropdown,
+    setShowSportDropdown,
+    liveSports,
+    loadingSports,
+    searchingNews,
+    openSportDropdown,
+    cancelSearch,
+    findRandomSportsChannel,
+    findLocalNews,
+    findRandomAnyChannel,
+    selectSport,
+    handleTickerEventClick
+  } = useStreamFinder({ streams, autoFillSettings, setShowSettingsModal });
 
-  // Load streams from API on mount
-  useEffect(() => {
-    let ignore = false;
+  // Header search input (type-to-add-channel).
+  const {
+    showSearchInput,
+    setShowSearchInput,
+    searchQuery,
+    setSearchQuery,
+    isSearching,
+    handleSearchChannel
+  } = useStreamSearch({ streams, autoFillSettings });
 
-    const loadStreams = async () => {
-      try {
-        setLoadingStreams(true);
-        const loaded = await getMultiviewStreams();
-        if (!ignore) {
-          const mutedSet = new Set();
-          loaded.forEach(stream => {
-            const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
-            if (stream.muted !== false) {
-              mutedSet.add(streamKey);
-            }
-          });
+  // Auto-fill: NDJSON streaming handler + progress state.
+  const { autoFillProgress, handleAutoFill } = useAutoFill({
+    streams,
+    autoFillSettings,
+    setSearchingStream,
+    setShowSportDropdown
+  });
 
-          setMutedStreams(mutedSet);
-          await new Promise(resolve => setTimeout(resolve, 10));
+  // Find alternative / find different game: per-slot search concurrency
+  // Set, exhausted-queries cache, auto-find rate limiter.
+  const {
+    findingAlternativeFor,
+    handleFindAlternative,
+    handleFindDifferentGame
+  } = useFindAlternative({
+    streams,
+    setStreams,
+    setStreamQualities,
+    autoFillSettings
+  });
 
-          if (!ignore) {
-            setStreams(loaded);
-          }
-        }
-      } catch (error) {
-        if (!ignore) {
-          console.error('Failed to load multiview streams:', error);
-          showToast('Failed to load streams', 'error');
-        }
-      } finally {
-        if (!ignore) {
-          setLoadingStreams(false);
-        }
-      }
-    };
-
-    loadStreams();
-
-    const handleMultiviewUpdate = async () => {
-      try {
-        const loaded = await getMultiviewStreams();
-        if (!ignore) {
-          setStreams(prevStreams => {
-            if (loaded.length < prevStreams.length) {
-              const mutedSet = new Set();
-              loaded.forEach(stream => {
-                const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
-                if (stream.muted !== false) {
-                  mutedSet.add(streamKey);
-                }
-              });
-              setMutedStreams(mutedSet);
-              return loaded;
-            }
-
-            const prevKeys = new Set(prevStreams.map(s => `${s.sourceId}_${s.id}`));
-            const newStreams = loaded.filter(s => !prevKeys.has(`${s.sourceId}_${s.id}`));
-
-            if (newStreams.length > 0) {
-              setMutedStreams(prev => {
-                const updated = new Set(prev);
-                newStreams.forEach(s => {
-                  const streamKey = `${s.sourceId}_${s.id}_${s._refreshKey || ''}`;
-                  if (s.muted !== false) {
-                    updated.add(streamKey);
-                  }
-                });
-                return updated;
-              });
-              return [...prevStreams, ...newStreams];
-            }
-
-            return prevStreams;
-          });
-        }
-      } catch (error) {
-        if (!ignore) {
-          console.error('Failed to reload multiview streams:', error);
-          showToast('Failed to reload streams', 'error');
-        }
-      }
-    };
-
-    window.addEventListener('multiviewUpdate', handleMultiviewUpdate);
-    return () => {
-      ignore = true;
-      window.removeEventListener('multiviewUpdate', handleMultiviewUpdate);
-    };
-  }, []);
 
   // Update layout when streams change
   useEffect(() => {
@@ -258,990 +174,6 @@ const MultiViewPage = ({ sessionId }) => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSportDropdown, showLayoutMenu]);
-
-  // Stream management handlers
-  const toggleMute = async (streamKey) => {
-    const parts = streamKey.split('_');
-    let sourceId, channelId;
-    if (parts.length >= 2) {
-      sourceId = parts[0];
-      const lastPart = parts[parts.length - 1];
-      const isTimestamp = /^\d{13}$/.test(lastPart);
-      if (isTimestamp && parts.length > 2) {
-        channelId = parts.slice(1, -1).join('_');
-      } else {
-        channelId = parts.slice(1).join('_');
-      }
-    } else {
-      return;
-    }
-
-    const wasMuted = mutedStreams.has(streamKey);
-    const newMutedState = !wasMuted;
-
-    setMutedStreams(prev => {
-      const newSet = new Set(prev);
-      if (wasMuted) {
-        newSet.delete(streamKey);
-      } else {
-        newSet.add(streamKey);
-      }
-      return newSet;
-    });
-
-    const success = await updateMutedState(channelId, sourceId, newMutedState);
-    if (!success) {
-      setMutedStreams(prev => {
-        const newSet = new Set(prev);
-        if (wasMuted) {
-          newSet.add(streamKey);
-        } else {
-          newSet.delete(streamKey);
-        }
-        return newSet;
-      });
-      showToast('Failed to update mute state', 'error');
-    }
-  };
-
-  const handleRefreshStream = (id, sourceId) => {
-    const newRefreshKey = Date.now();
-
-    setStreams(prevStreams => {
-      // Find the old stream to get its current refreshKey
-      const oldStream = prevStreams.find(s => s.id === id && s.sourceId === sourceId);
-      if (oldStream) {
-        const oldKey = `${sourceId}_${id}_${oldStream._refreshKey || ''}`;
-        const newKey = `${sourceId}_${id}_${newRefreshKey}`;
-
-        // Transfer muted state from old key to new key
-        setMutedStreams(prev => {
-          const wasMuted = prev.has(oldKey);
-          if (wasMuted) {
-            const updated = new Set(prev);
-            updated.delete(oldKey);
-            updated.add(newKey);
-            return updated;
-          }
-          return prev;
-        });
-      }
-
-      return prevStreams.map(stream => {
-        if (stream.id === id && stream.sourceId === sourceId) {
-          return { ...stream, _refreshKey: newRefreshKey };
-        }
-        return stream;
-      });
-    });
-    showToast('Stream refreshed', 'success');
-  };
-
-  const handleRemoveStream = async (id, sourceId) => {
-    try {
-      const success = await removeFromMultiview(id, sourceId);
-      if (success) {
-        setStreams(prevStreams => prevStreams.filter(
-          stream => !(stream.id === id && stream.sourceId === sourceId)
-        ));
-        const streamKey = `${sourceId}_${id}`;
-        setStreamQualities(prev => {
-          const { [streamKey]: removed, ...rest } = prev;
-          return rest;
-        });
-      } else {
-        showToast('Failed to remove stream', 'error');
-      }
-    } catch (error) {
-      console.error('Error removing stream:', error);
-      showToast('Failed to remove stream', 'error');
-    }
-  };
-
-  const handleClearAll = async () => {
-    try {
-      const success = await clearMultiview();
-      if (success) {
-        window.dispatchEvent(new Event('multiviewUpdate'));
-        setStreamQualities({});
-        showToast('All streams cleared', 'success');
-      } else {
-        showToast('Failed to clear streams', 'error');
-      }
-    } catch (error) {
-      console.error('Error clearing streams:', error);
-      showToast('Failed to clear streams', 'error');
-    }
-  };
-
-  const handleQualityDetected = useCallback((streamId, quality) => {
-    setStreamQualities(prev => ({ ...prev, [streamId]: quality }));
-  }, []);
-
-  // Random stream handlers
-  const handleRandomStreamClick = async () => {
-    if (showSportDropdown) {
-      setShowSportDropdown(false);
-      return;
-    }
-
-    setShowSportDropdown(true);
-    setLoadingSports(true);
-
-    try {
-      const currentEventIds = streams.map(s => s.espnEventId).filter(id => id);
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        setLiveSports([]);
-        setLoadingSports(false);
-        return;
-      }
-
-      const queryParams = currentEventIds.length > 0
-        ? `?excludeEventIds=${currentEventIds.join('&excludeEventIds=')}`
-        : '';
-
-      const response = await fetch(`/api/live-events/live-sports-summary${queryParams}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setLiveSports(data.sports || []);
-      } else {
-        setLiveSports([]);
-      }
-    } catch (error) {
-      console.error('Error fetching live sports:', error);
-      setLiveSports([]);
-    } finally {
-      setLoadingSports(false);
-    }
-  };
-
-  const handleCancelSearch = () => {
-    if (searchAbortController) {
-      searchAbortController.abort();
-      setSearchAbortController(null);
-    }
-    setSearchingStream(false);
-  };
-
-  const handleBlacklistChannel = async (channelName) => {
-    if (blacklistedChannels.includes(channelName)) return;
-
-    try {
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-      const response = await fetch('/api/live-events/blacklist', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ channelName })
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setBlacklistedChannels(prev => [...prev, channelName]);
-      }
-    } catch (error) {
-      console.error('Failed to blacklist channel:', error);
-    }
-  };
-
-  const handleRemoveFromBlacklist = async (channelName) => {
-    try {
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-      const response = await fetch(`/api/live-events/blacklist/${encodeURIComponent(channelName)}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setBlacklistedChannels(prev => prev.filter(name => name !== channelName));
-      }
-    } catch (error) {
-      console.error('Failed to remove from blacklist:', error);
-    }
-  };
-
-  const handleRandomSportsChannel = async () => {
-    setSearchingStream(true);
-    setShowSportDropdown(false);
-
-    try {
-      const currentSourceIds = streams.map(s => s.sourceId).filter(id => id);
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setSearchingStream(false);
-        return;
-      }
-
-      const response = await fetch('/api/live-events/random-sports-channel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ excludeSourceIds: currentSourceIds })
-      });
-
-      const data = await response.json();
-
-      if (data.success && data.channel) {
-        const success = await addToMultiview(data.channel);
-        if (success) {
-          showToast(`Added ${data.channel.name}`, 'success');
-          window.dispatchEvent(new Event('multiviewUpdate'));
-        } else {
-          showToast('Failed to add channel to multiview', 'error');
-        }
-      } else {
-        showToast(data.error || 'No sports channels found', 'error');
-      }
-    } catch (error) {
-      console.error('[Random Sports Channel] Error:', error);
-      showToast('Failed to find random sports channel', 'error');
-    } finally {
-      setSearchingStream(false);
-    }
-  };
-
-  // Handler for finding local news
-  const handleFindLocalNews = async () => {
-    setSearchingNews(true);
-
-    try {
-      const currentSourceIds = autoFillSettings.avoidDuplicateSources
-        ? streams.map(s => s.sourceId).filter(id => id)
-        : [];
-      const currentChannelIds = streams.map(s => s.id).filter(id => id);
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setSearchingNews(false);
-        return;
-      }
-
-      const response = await fetch('/api/live-events/local-news', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          excludeSourceIds: currentSourceIds,
-          excludeChannelIds: currentChannelIds,
-          minQuality: autoFillSettings.minQuality
-        })
-      });
-
-      const data = await response.json();
-
-      if (data.success && data.channel) {
-        const success = await addToMultiview(data.channel);
-        if (success) {
-          showToast(`Added ${data.channel.name} (${data.location.city}, ${data.location.stateAbbrev})`, 'success');
-          window.dispatchEvent(new Event('multiviewUpdate'));
-        } else {
-          showToast('Failed to add news channel to multiview', 'error');
-        }
-      } else if (data.error === 'No location set') {
-        showToast('Please set your location in Settings first', 'error');
-        setShowSettingsModal(true);
-      } else {
-        showToast(data.message || data.error || 'No local news found', 'error');
-      }
-    } catch (error) {
-      console.error('[Local News] Error:', error);
-      showToast('Failed to find local news', 'error');
-    } finally {
-      setSearchingNews(false);
-    }
-  };
-
-  const handleRandomAnyChannel = async () => {
-    setSearchingStream(true);
-    setShowSportDropdown(false);
-
-    try {
-      const currentSourceIds = autoFillSettings.avoidDuplicateSources
-        ? streams.map(s => s.sourceId).filter(id => id)
-        : [];
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setSearchingStream(false);
-        return;
-      }
-
-      const response = await fetch('/api/live-events/random-any-channel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          excludeSourceIds: currentSourceIds,
-          minQuality: autoFillSettings.minQuality
-        })
-      });
-
-      const data = await response.json();
-
-      if (data.success && data.channel) {
-        const success = await addToMultiview(data.channel);
-        if (success) {
-          showToast(`Added ${data.channel.name}`, 'success');
-          window.dispatchEvent(new Event('multiviewUpdate'));
-        } else {
-          showToast('Failed to add channel to multiview', 'error');
-        }
-      } else {
-        showToast(data.error || 'No channels found', 'error');
-      }
-    } catch (error) {
-      console.error('[Random Any Channel] Error:', error);
-      showToast('Failed to find random channel', 'error');
-    } finally {
-      setSearchingStream(false);
-    }
-  };
-
-  const handleSportSelect = async (sportType, leagueName) => {
-    setSearchingStream(true);
-    setShowSportDropdown(false);
-
-    const abortController = new AbortController();
-    setSearchAbortController(abortController);
-
-    try {
-      const currentEventIds = streams.map(s => s.espnEventId).filter(id => id);
-      const currentSourceIds = streams.map(s => s.sourceId).filter(id => id);
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        setSearchingStream(false);
-        setSearchAbortController(null);
-        return;
-      }
-
-      const response = await fetch('/api/live-events/random-working-stream', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          sportType,
-          leagueName,
-          excludeEventIds: currentEventIds,
-          excludeSourceIds: currentSourceIds
-        }),
-        signal: abortController.signal
-      });
-
-      const data = await response.json();
-
-      if (data.success && data.channel) {
-        const success = await addToMultiview(data.channel);
-        if (success) {
-          window.dispatchEvent(new Event('multiviewUpdate'));
-          showToast(`Added "${data.channel.name}" to Multi-View`, 'success');
-        } else {
-          showToast('Failed to add stream to Multi-View', 'error');
-        }
-      } else {
-        showToast(data.message || 'No working streams found', 'error');
-      }
-    } catch (error) {
-      if (error.name !== 'AbortError') {
-        console.error('Error finding random stream:', error);
-        showToast('Error finding random stream', 'error');
-      }
-    } finally {
-      setSearchingStream(false);
-      setSearchAbortController(null);
-    }
-  };
-
-  const handleAutoFill = async (sportType = null, leagueName = null) => {
-    const currentStreamCount = streams.length;
-    const slotsToFill = Math.max(0, autoFillSettings.maxSlots - currentStreamCount);
-
-    if (slotsToFill === 0) {
-      showToast(`Already at max slots (${autoFillSettings.maxSlots})`, 'info');
-      return;
-    }
-
-    setSearchingStream(true);
-    setAutoFillProgress({ found: 0, target: slotsToFill, status: 'Searching...' });
-    setShowSportDropdown(false);
-
-    try {
-      const currentEventIds = autoFillSettings.avoidDuplicateEvents
-        ? streams.map(s => s.espnEventId).filter(id => id)
-        : [];
-      const currentSourceIds = autoFillSettings.avoidDuplicateSources
-        ? streams.map(s => s.sourceId).filter(id => id)
-        : [];
-      const currentChannelIds = streams.map(s => s.id).filter(id => id);
-
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setSearchingStream(false);
-        setAutoFillProgress(null);
-        return;
-      }
-
-      const response = await fetch('/api/live-events/auto-fill-streams', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/x-ndjson'
-        },
-        body: JSON.stringify({
-          sportType,
-          leagueName,
-          maxStreams: slotsToFill,
-          excludeSourceIds: currentSourceIds,
-          excludeEventIds: currentEventIds,
-          excludeChannelIds: currentChannelIds,
-          minQuality: autoFillSettings.minQuality
-        })
-      });
-
-      if (!response.ok || !response.body) {
-        // Fall back to reading the body as JSON for error responses (e.g. 401).
-        let message = 'Failed to auto-fill streams';
-        try {
-          const errData = await response.json();
-          if (errData?.error || errData?.message) message = errData.error || errData.message;
-        } catch {}
-        showToast(message, 'error');
-        return;
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let addedCount = 0;
-      let doneMessage = null;
-
-      const handleLine = async (line) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        let msg;
-        try {
-          msg = JSON.parse(trimmed);
-        } catch (e) {
-          console.warn('[Auto-fill] Bad NDJSON line:', trimmed);
-          return;
-        }
-
-        if (msg.type === 'channel' && msg.channel) {
-          const success = await addToMultiview(msg.channel);
-          if (success) {
-            addedCount++;
-            setAutoFillProgress({
-              found: addedCount,
-              target: slotsToFill,
-              status: `Added ${addedCount}/${slotsToFill}...`
-            });
-            // Let other parts of the UI (e.g. the slot grid) re-render as each
-            // stream lands, rather than waiting for the whole batch.
-            window.dispatchEvent(new Event('multiviewUpdate'));
-          }
-        } else if (msg.type === 'done') {
-          doneMessage = msg.message || null;
-        } else if (msg.type === 'error') {
-          throw new Error(msg.error || 'Auto-fill stream failed');
-        }
-      };
-
-      // Read the NDJSON stream: each complete newline-terminated JSON object
-      // represents one validated channel (or a terminal done/error record).
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let newlineIndex;
-        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.slice(0, newlineIndex);
-          buffer = buffer.slice(newlineIndex + 1);
-          await handleLine(line);
-        }
-      }
-      // Flush any final partial line (shouldn't normally happen, but be safe).
-      if (buffer.trim()) await handleLine(buffer);
-
-      if (addedCount > 0) {
-        showToast(`Added ${addedCount} stream${addedCount !== 1 ? 's' : ''} to Multi-View`, 'success');
-      } else {
-        showToast(doneMessage || 'No working streams found', 'error');
-      }
-    } catch (error) {
-      console.error('[Auto-fill] Error:', error);
-      showToast('Failed to auto-fill streams', 'error');
-    } finally {
-      setSearchingStream(false);
-      setAutoFillProgress(null);
-    }
-  };
-
-  const handleSearchChannel = async (e) => {
-    e.preventDefault();
-
-    if (!searchQuery.trim() || searchQuery.trim().length < 2) {
-      showToast('Enter at least 2 characters to search', 'error');
-      return;
-    }
-
-    setIsSearching(true);
-
-    try {
-      const currentSourceIds = autoFillSettings.avoidDuplicateSources
-        ? streams.map(s => s.sourceId).filter(id => id)
-        : [];
-      const currentChannelIds = streams.map(s => s.id).filter(id => id);
-
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setIsSearching(false);
-        return;
-      }
-
-      const response = await fetch('/api/live-events/search-channel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          query: searchQuery.trim(),
-          excludeSourceIds: currentSourceIds,
-          excludeChannelIds: currentChannelIds,
-          minQuality: autoFillSettings.minQuality
-        })
-      });
-
-      const data = await response.json();
-
-      if (data.success && data.channel) {
-        const success = await addToMultiview(data.channel);
-        if (success) {
-          window.dispatchEvent(new Event('multiviewUpdate'));
-          showToast(`Added "${data.channel.name}" to Multi-View`, 'success');
-          setSearchQuery('');
-          setShowSearchInput(false);
-        } else {
-          showToast('Failed to add channel to Multi-View', 'error');
-        }
-      } else {
-        showToast(data.message || 'No working channel found', 'error');
-      }
-    } catch (error) {
-      console.error('[Search] Error:', error);
-      showToast('Search failed', 'error');
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  // Handle clicking on a live score event in the ticker
-  const handleTickerEventClick = async (score) => {
-    // Check if we're already at max slots
-    if (streams.length >= autoFillSettings.maxSlots) {
-      showToast(`Already at max slots (${autoFillSettings.maxSlots})`, 'info');
-      return;
-    }
-
-    setSearchingStream(true);
-
-    try {
-      const currentSourceIds = autoFillSettings.avoidDuplicateSources
-        ? streams.map(s => s.sourceId).filter(id => id)
-        : [];
-      const currentChannelIds = streams.map(s => s.id).filter(id => id);
-      // Check if we already have this event
-      const currentEventIds = streams.map(s => s.espnEventId).filter(id => id);
-      if (currentEventIds.includes(score.event_id)) {
-        showToast('This game is already in your Multi-View', 'info');
-        setSearchingStream(false);
-        return;
-      }
-
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setSearchingStream(false);
-        return;
-      }
-
-      // Create a search query from the teams - use "Team1 at Team2" format to match backend parsing
-      const searchQuery = `${score.away_team} at ${score.home_team}`;
-
-      const response = await fetch('/api/live-events/search-channel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          query: searchQuery,
-          excludeSourceIds: currentSourceIds,
-          excludeChannelIds: currentChannelIds,
-          minQuality: autoFillSettings.minQuality,
-          espnEventId: score.event_id // Pass event ID for better matching
-        })
-      });
-
-      const data = await response.json();
-
-      if (data.success && data.channel) {
-        // Add the event ID to the channel data for duplicate detection
-        const channelWithEvent = {
-          ...data.channel,
-          espnEventId: score.event_id,
-          espnEventName: `${score.away_team} vs ${score.home_team}`
-        };
-
-        const success = await addToMultiview(channelWithEvent);
-        if (success) {
-          window.dispatchEvent(new Event('multiviewUpdate'));
-          const qualityText = data.channel.quality ? ` (${data.channel.quality}p)` : '';
-          showToast(`Added stream for ${score.away_team} vs ${score.home_team}${qualityText}`, 'success');
-        } else {
-          showToast('Failed to add channel to Multi-View', 'error');
-        }
-      } else {
-        showToast(data.message || `No working stream found for ${score.away_team} vs ${score.home_team}`, 'error');
-      }
-    } catch (error) {
-      console.error('[Ticker Event Click] Error:', error);
-      showToast('Failed to find stream for this game', 'error');
-    } finally {
-      setSearchingStream(false);
-    }
-  };
-
-  const handleFindAlternative = async (stream, isAutomatic = false) => {
-    const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
-
-    // Rate limiting for automatic (onStreamDead) calls to prevent network exhaustion
-    if (isAutomatic) {
-      const rateLimit = autoFindRateLimitRef.current;
-      const now = Date.now();
-
-      // Check if paused
-      if (rateLimit.isPaused) {
-        console.log('[Find Alternative] Auto-find paused due to too many failures');
-        return;
-      }
-
-      // Check cooldown
-      if (now - rateLimit.lastAutoFind < rateLimit.cooldownMs) {
-        console.log(`[Find Alternative] Rate limited - cooldown (${Math.round((rateLimit.cooldownMs - (now - rateLimit.lastAutoFind)) / 1000)}s remaining)`);
-        return;
-      }
-
-      // Check window limit
-      if (now - rateLimit.windowStart > rateLimit.windowMs) {
-        // Reset window
-        rateLimit.windowStart = now;
-        rateLimit.autoFindCount = 0;
-      }
-
-      if (rateLimit.autoFindCount >= rateLimit.maxAutoFinds) {
-        console.log(`[Find Alternative] Rate limited - max ${rateLimit.maxAutoFinds} auto-finds per minute reached`);
-        rateLimit.isPaused = true;
-        // Auto-unpause after pauseMs (default 30s)
-        setTimeout(() => {
-          rateLimit.isPaused = false;
-          rateLimit.autoFindCount = 0;
-          console.log('[Find Alternative] Auto-find unpaused');
-        }, rateLimit.pauseMs);
-        return;
-      }
-
-      // Update rate limit tracking
-      rateLimit.lastAutoFind = now;
-      rateLimit.autoFindCount++;
-      console.log(`[Find Alternative] Auto-find triggered (${rateLimit.autoFindCount}/${rateLimit.maxAutoFinds} this window)`);
-    }
-
-    // Skip only if THIS stream is already being searched for (other slots
-    // searching in parallel is fine and actually desirable).
-    if (findingAlternativeFor.has(streamKey)) {
-      console.log(`[Find Alternative] Already finding alternative for ${stream.name}, skipping duplicate request`);
-      return;
-    }
-
-    setFindingAlternativeFor(prev => {
-      const next = new Set(prev);
-      next.add(streamKey);
-      return next;
-    });
-
-    try {
-      // Exclude sources already in use in multiview (one source = one stream)
-      // This is required because some sources (especially stalker) only allow one concurrent stream
-      let excludeSourceIds = [];
-      if (stream.sourceId) {
-        excludeSourceIds.push(stream.sourceId);
-      }
-
-      // Also exclude other sources in multiview to maintain one source per stream rule
-      const otherSourceIds = streams
-        .filter(s => s.id !== stream.id || s.sourceId !== stream.sourceId)
-        .map(s => s.sourceId)
-        .filter(id => id && !excludeSourceIds.includes(id));
-      excludeSourceIds = [...excludeSourceIds, ...otherSourceIds];
-
-      const excludeChannelIds = stream.id ? [stream.id] : [];
-
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-
-      if (!token) {
-        showToast('Authentication required', 'error');
-        setFindingAlternativeFor(prev => {
-          const next = new Set(prev);
-          next.delete(streamKey);
-          return next;
-        });
-        return;
-      }
-
-      // Use stored search query or event name if available, otherwise extract from channel name
-      // Priority: searchQuery > espnEventName > cleaned channel name
-      let searchName = stream.searchQuery || stream.espnEventName;
-      // Use stored offset to continue from where we left off
-      let searchOffset = stream.searchOffset || 0;
-
-      if (!searchName) {
-        // Extract a cleaner search term from the channel name
-        // Try to find the actual channel/show name after any prefix
-        searchName = stream.name
-          // Remove provider prefixes like "Peacock Live | ", "SLING| ", "USA| "
-          .replace(/^[^|]+\|\s*/gi, '')
-          // Remove prefixes like "NHL TEAM| "
-          .replace(/^[A-Z]{2,}\s+TEAM\s*[\|:]?\s*/gi, '')
-          // Remove quality markers
-          .replace(/\s*(ᴿᴬᵂ|ᴴᴰ|ᶠᴴᴰ|HD|FHD|SD|4K|UHD)\s*/gi, '')
-          // Remove "ALTERNATE"
-          .replace(/\s*ALTERNATE\s*/gi, '')
-          // Remove parenthetical content
-          .replace(/\s*\(.*?\)\s*/g, '')
-          // Normalize spaces
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        if (searchName.length < 3) {
-          searchName = stream.name;
-        }
-        // Start from beginning when no stored offset
-        searchOffset = 0;
-      }
-
-      // If this search query was previously exhausted, reset to 0 and try again
-      const searchKey = searchName.toLowerCase();
-      if (exhaustedSearchesRef.current.has(searchKey)) {
-        console.log(`[Find Alternative] Previous search for "${searchName}" was exhausted, resetting to offset 0`);
-        searchOffset = 0;
-        exhaustedSearchesRef.current.delete(searchKey);
-      }
-
-      console.log(`[Find Alternative] Stream data: searchQuery="${stream.searchQuery}", espnEventName="${stream.espnEventName}", name="${stream.name}"`);
-      console.log(`[Find Alternative] Searching for "${searchName}" starting at offset ${searchOffset}`);
-
-      const response = await fetch('/api/live-events/search-channel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          query: searchName,
-          excludeSourceIds: excludeSourceIds,
-          excludeChannelIds: excludeChannelIds,
-          minQuality: autoFillSettings.minQuality,
-          searchOffset: searchOffset
-        })
-      });
-
-      // Parse defensively — a nodemon restart or dev-proxy timeout can return
-      // an empty body with a 5xx, which turns `response.json()` into a
-      // confusing `SyntaxError: Unexpected end of JSON input`.
-      const rawText = await response.text();
-      let data;
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch (parseErr) {
-        console.warn('[Find Alternative] Non-JSON response:', response.status, rawText.slice(0, 200));
-        showToast(
-          response.status >= 500
-            ? 'Server error while searching — backend may be restarting'
-            : `Search failed (${response.status || 'network error'})`,
-          'error'
-        );
-        return;
-      }
-
-      if (!response.ok) {
-        showToast(data?.error || data?.message || `Search failed (${response.status})`, 'error');
-        return;
-      }
-
-      if (data.success && data.channel) {
-        // Clear exhausted flag since we found a working channel
-        exhaustedSearchesRef.current.delete(searchKey);
-
-        const removeSuccess = await removeFromMultiview(stream.id, stream.sourceId);
-        if (removeSuccess) {
-          // Update local state immediately to unmount the old player
-          setStreams(prevStreams => prevStreams.filter(
-            s => !(s.id === stream.id && s.sourceId === stream.sourceId)
-          ));
-          // Clean up quality tracking for removed stream
-          const streamKey = `${stream.sourceId}_${stream.id}`;
-          setStreamQualities(prev => {
-            const { [streamKey]: removed, ...rest } = prev;
-            return rest;
-          });
-        }
-
-        const success = await addToMultiview(data.channel);
-
-        if (success) {
-          window.dispatchEvent(new Event('multiviewUpdate'));
-          const qualityText = data.channel.quality ? ` (${data.channel.quality}p)` : '';
-          showToast(`Replaced with "${data.channel.name}"${qualityText}`, 'success');
-        } else {
-          showToast('Failed to add replacement channel', 'error');
-        }
-      } else {
-        // Mark this search as exhausted so next attempt starts from 0
-        exhaustedSearchesRef.current.add(searchKey);
-        console.log(`[Find Alternative] Search exhausted for "${searchName}", will reset offset on next attempt`);
-        showToast(data.message || 'No alternative channel found', 'error');
-      }
-    } catch (error) {
-      console.error('[Find Alternative] Error:', error);
-      showToast('Failed to find alternative', 'error');
-    } finally {
-      setFindingAlternativeFor(prev => {
-        const next = new Set(prev);
-        next.delete(streamKey);
-        return next;
-      });
-    }
-  };
-
-  // Replace a dead stream with a channel for a *different* live event
-  // (not just another channel for the same game). Hits the same backend
-  // endpoint that auto-fill uses under the hood — random-working-stream —
-  // but excludes the current event plus everything already in the grid
-  // so we never duplicate slots.
-  const handleFindDifferentGame = async (stream) => {
-    const streamKey = `${stream.sourceId}_${stream.id}_${stream._refreshKey || ''}`;
-
-    if (findingAlternativeFor.has(streamKey)) {
-      console.log(`[Find Different Game] Already searching for ${stream.name}, skipping`);
-      return;
-    }
-
-    setFindingAlternativeFor(prev => {
-      const next = new Set(prev);
-      next.add(streamKey);
-      return next;
-    });
-
-    try {
-      const token = localStorage.getItem('auth_token') || sessionStorage.getItem('token') || localStorage.getItem('token');
-      if (!token) {
-        showToast('Authentication required', 'error');
-        return;
-      }
-
-      // Exclude every event + source currently on the grid so the
-      // replacement is genuinely new content.
-      const excludeEventIds = streams.map(s => s.espnEventId).filter(Boolean);
-      const excludeSourceIds = streams.map(s => s.sourceId).filter(Boolean);
-
-      const response = await fetch('/api/live-events/random-working-stream', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ excludeEventIds, excludeSourceIds })
-      });
-
-      const rawText = await response.text();
-      let data;
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch {
-        showToast(
-          response.status >= 500
-            ? 'Server error while searching — backend may be restarting'
-            : `Search failed (${response.status || 'network error'})`,
-          'error'
-        );
-        return;
-      }
-
-      if (!response.ok || !data.success || !data.channel) {
-        showToast(data?.message || data?.error || 'No other live games available', 'error');
-        return;
-      }
-
-      // Swap the dead stream for the new one.
-      const removeSuccess = await removeFromMultiview(stream.id, stream.sourceId);
-      if (removeSuccess) {
-        setStreams(prevStreams => prevStreams.filter(
-          s => !(s.id === stream.id && s.sourceId === stream.sourceId)
-        ));
-        const oldKey = `${stream.sourceId}_${stream.id}`;
-        setStreamQualities(prev => {
-          const { [oldKey]: _removed, ...rest } = prev;
-          return rest;
-        });
-      }
-
-      const added = await addToMultiview(data.channel);
-      if (added) {
-        window.dispatchEvent(new Event('multiviewUpdate'));
-        const eventLabel = data.event?.name ? ` — ${data.event.name}` : '';
-        showToast(`Replaced with "${data.channel.name}"${eventLabel}`, 'success');
-      } else {
-        showToast('Failed to add replacement channel', 'error');
-      }
-    } catch (error) {
-      console.error('[Find Different Game] Error:', error);
-      showToast('Failed to find a different game', 'error');
-    } finally {
-      setFindingAlternativeFor(prev => {
-        const next = new Set(prev);
-        next.delete(streamKey);
-        return next;
-      });
-    }
-  };
 
   // Drag and drop handlers
   const handleDragStart = useCallback((event) => {
@@ -1302,15 +234,15 @@ const MultiViewPage = ({ sessionId }) => {
           autoFillProgress={autoFillProgress}
           liveSports={liveSports}
           loadingSports={loadingSports}
-          onRandomStreamClick={handleRandomStreamClick}
-          onCancelSearch={handleCancelSearch}
+          onRandomStreamClick={openSportDropdown}
+          onCancelSearch={cancelSearch}
           onAutoFill={handleAutoFill}
-          onSportSelect={handleSportSelect}
-          onRandomSportsChannel={handleRandomSportsChannel}
-          onRandomAnyChannel={handleRandomAnyChannel}
+          onSportSelect={selectSport}
+          onRandomSportsChannel={findRandomSportsChannel}
+          onRandomAnyChannel={findRandomAnyChannel}
           autoFillSettings={autoFillSettings}
           onShowSettings={() => setShowSettingsModal(true)}
-          onFindLocalNews={handleFindLocalNews}
+          onFindLocalNews={findLocalNews}
           searchingNews={searchingNews}
           layoutMode={layoutMode}
           showLayoutMenu={showLayoutMenu}
@@ -1354,12 +286,12 @@ const MultiViewPage = ({ sessionId }) => {
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onToggleMute={toggleMute}
-          onRefresh={handleRefreshStream}
+          onRefresh={refreshStream}
           onFindAlternative={handleFindAlternative}
           onFindDifferentGame={handleFindDifferentGame}
-          onBlacklist={handleBlacklistChannel}
-          onRemove={handleRemoveStream}
-          onQualityDetected={handleQualityDetected}
+          onBlacklist={addToBlacklist}
+          onRemove={removeStream}
+          onQualityDetected={onQualityDetected}
         />
       </div>
 
@@ -1367,7 +299,7 @@ const MultiViewPage = ({ sessionId }) => {
       <ConfirmModal
         isOpen={showClearConfirm}
         onClose={() => setShowClearConfirm(false)}
-        onConfirm={handleClearAll}
+        onConfirm={clearAll}
         title="Clear All Streams"
         message={`Are you sure you want to remove all ${streams.length} stream${streams.length !== 1 ? 's' : ''} from Multi-View?`}
         confirmText="Clear All"
@@ -1379,7 +311,7 @@ const MultiViewPage = ({ sessionId }) => {
         isOpen={showBlacklistModal}
         onClose={() => setShowBlacklistModal(false)}
         blacklistedChannels={blacklistedChannels}
-        onRemoveFromBlacklist={handleRemoveFromBlacklist}
+        onRemoveFromBlacklist={removeFromBlacklist}
       />
 
       <SettingsModal
