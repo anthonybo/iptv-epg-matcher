@@ -406,6 +406,28 @@ const IPTVPlayer = ({
   const channelSourceId = selectedChannel?.sourceId;
   const channelRefreshKey = selectedChannel?._refreshKey;
 
+  // Listen for live search-channel / random-working-stream progress that
+  // useFindAlternative is dispatching on the window. When the error
+  // modal is already up (e.g. "Network error (HTTP 502). Finding
+  // alternative..."), replace its static text with the real-time
+  // "Tested 23 of 158 ..." coming from the backend so the user can see
+  // progress instead of staring at a frozen message.
+  useEffect(() => {
+    const myKey = `${channelSourceId}_${channelId}_${channelRefreshKey || ''}`;
+    const handler = (event) => {
+      const detail = event?.detail;
+      if (!detail || detail.streamKey !== myKey) return;
+      // Only update the modal text if we're already showing an error —
+      // don't create one just because a search kicked off.
+      setError((prev) => {
+        if (prev == null) return prev;
+        return detail.message || prev;
+      });
+    };
+    window.addEventListener('iptv:searchProgress', handler);
+    return () => window.removeEventListener('iptv:searchProgress', handler);
+  }, [channelId, channelSourceId, channelRefreshKey]);
+
   // Apply playback method when channel or method changes
   useEffect(() => {
     if (!sessionId || !selectedChannel) {
@@ -1155,9 +1177,23 @@ const IPTVPlayer = ({
           attemptSoftRecovery('Stream frozen');
         }
       } else {
-        // Video is progressing normally - update last known time
+        // Video is progressing normally - update last known time and
+        // clear any leftover recovery state. In resilient-proxy mode
+        // the `timeupdate` handler already does this every second, but
+        // this is the last-resort clear for cases where `timeupdate`
+        // isn't firing often enough (e.g. mpegts.js briefly reattaches
+        // listeners during unload/load).
         lastKnownCurrentTimeRef.current = currentTime;
         lastPlayingTimeRef.current = Date.now();
+
+        if (isRecoveringRef.current) {
+          isRecoveringRef.current = false;
+        }
+        if (recoveryTimeoutRef.current) {
+          clearTimeout(recoveryTimeoutRef.current);
+          recoveryTimeoutRef.current = null;
+        }
+        setRecoveryStatus((prev) => (prev == null ? prev : null));
       }
     }, checkInterval);
 
@@ -1789,11 +1825,41 @@ const IPTVPlayer = ({
             clearTimeout(stallTimerRef.current);
             stallTimerRef.current = null;
           }
+
+          // The video is actively advancing — whatever triggered recovery
+          // has resolved (or never really broke us). Clear the state so
+          // the `Reconnecting (soft N/N)` banner doesn't stay stuck and
+          // so the next health-check tick doesn't fire another
+          // soft-recovery attempt. Without this, mpegts' `unload()/load()`
+          // path doesn't pause the video element, so `'playing'` never
+          // re-fires and `isRecoveringRef` never clears on its own — we
+          // saw that loop in production as 4 consecutive backend fetch
+          // aborts exactly 10s apart (the soft-recovery timeout).
+          if (isRecoveringRef.current) {
+            isRecoveringRef.current = false;
+          }
+          if (recoveryTimeoutRef.current) {
+            clearTimeout(recoveryTimeoutRef.current);
+            recoveryTimeoutRef.current = null;
+          }
+          setRecoveryStatus((prev) => (prev == null ? prev : null));
         };
         addTrackedListener(videoEl, 'timeupdate', timeupdateHandler);
 
         // Stall detection - when video stops buffering/loading
         const handleStall = (eventType) => {
+          // In resilient-proxy mode the backend is already running a retry
+          // loop; calling `player.unload()` here aborts the in-flight fetch
+          // and makes the backend start over from attempt 1. That was the
+          // root cause of the "Reconnecting (soft N/N) stuck on a playing
+          // video" reports — the frontend kept cancelling the backend's
+          // reconnect and then showing its own stale recovery banner.
+          // The health-check still catches truly-dead streams (currentTime
+          // not advancing past MAX_STALE_TIME_MS).
+          if (shouldUseResilientProxy) {
+            return;
+          }
+
           log('warn', `Video ${eventType} - checking for stall`);
 
           // Clear any existing stall timer
@@ -1815,9 +1881,11 @@ const IPTVPlayer = ({
 
             const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
 
-            if (timeSinceLastPlaying > 5000) { // Stalled for more than 5 seconds
+            // 10s (was 5s) matches mpegts.js stash-buffer behaviour better —
+            // short stalls during key-frame alignment or network hiccups
+            // used to trigger a full unload/load that interrupted playback.
+            if (timeSinceLastPlaying > 10000) {
               log('error', `Video stalled for ${timeSinceLastPlaying}ms`);
-              // Try soft recovery first - stall might be temporary buffering issue
               attemptSoftRecovery('Stream stalled');
             }
           }, stallTimeout);
@@ -1850,6 +1918,15 @@ const IPTVPlayer = ({
           // Don't recover if channel has changed
           if (getChannelId() !== currentChannelIdRef.current) {
             log('info', 'Channel changed, ignoring stream end');
+            return;
+          }
+
+          // In resilient-proxy mode the backend owns reconnection. Let the
+          // health-check's stale-time guard promote this to a real failure
+          // after MAX_STALE_TIME_MS if playback doesn't resume — don't
+          // jump in with a client-side unload/load that will just abort
+          // the backend's retry.
+          if (shouldUseResilientProxy) {
             return;
           }
 

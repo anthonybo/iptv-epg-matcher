@@ -324,7 +324,8 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/x-ndjson'
         },
         body: JSON.stringify({
           query: searchQuery,
@@ -334,18 +335,59 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
           espnEventId: score.event_id
         })
       });
-      const data = await response.json();
 
-      if (data.success && data.channel) {
+      // search-channel streams NDJSON now (per-batch progress + a
+      // terminal `done`/`error` line). Drain the stream and use the
+      // terminal record. We don't need per-progress UI here since the
+      // ticker already shows a searching spinner via searchingStream.
+      let terminal = null;
+      if (response.body && response.body.getReader) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.type === 'done' || msg.type === 'error') terminal = msg;
+            } catch {
+              /* ignore bad NDJSON line */
+            }
+          }
+        }
+        if (buffer.trim()) {
+          try {
+            const msg = JSON.parse(buffer.trim());
+            if (msg.type === 'done' || msg.type === 'error') terminal = msg;
+          } catch {}
+        }
+      } else {
+        // Fallback to buffered JSON for environments without getReader.
+        try {
+          const text = await response.text();
+          terminal = text ? JSON.parse(text) : null;
+        } catch {
+          terminal = null;
+        }
+      }
+
+      if (terminal && terminal.success && terminal.channel) {
         const channelWithEvent = {
-          ...data.channel,
+          ...terminal.channel,
           espnEventId: score.event_id,
           espnEventName: `${score.away_team} vs ${score.home_team}`
         };
         const success = await addToMultiview(channelWithEvent);
         if (success) {
           window.dispatchEvent(new Event('multiviewUpdate'));
-          const qualityText = data.channel.quality ? ` (${data.channel.quality}p)` : '';
+          const qualityText = terminal.channel.quality ? ` (${terminal.channel.quality}p)` : '';
           showToast(
             `Added stream for ${score.away_team} vs ${score.home_team}${qualityText}`,
             'success'
@@ -355,7 +397,8 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
         }
       } else {
         showToast(
-          data.message ||
+          terminal?.message ||
+            terminal?.error ||
             `No working stream found for ${score.away_team} vs ${score.home_team}`,
           'error'
         );

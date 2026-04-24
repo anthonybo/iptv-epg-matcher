@@ -37,10 +37,16 @@ router.post('/random-working-stream', async (req, res) => {
 
     logger.info(`Finding random working stream (sport: ${sportType || 'any'}, league: ${leagueName || 'any'}, excludedEvents: ${excludeEventIds.length}, excludedSources: ${excludeSourceIds.length}, blacklistedChannels: ${blacklistedChannels.length})`);
 
-    // Build query for currently live events (PostgreSQL)
-    const conditions = ['event_start <= $1', 'event_end >= $2'];
-    const params = [new Date().toISOString(), new Date().toISOString()];
-    let paramIndex = 3;
+    // Build query for currently live events (PostgreSQL). "Live" =
+    // advertised window OR ESPN's is_live flag — keeps MLS/soccer
+    // games in scope when stoppage time has pushed past event_end.
+    const conditions = [
+      '((event_start <= $1 AND event_end >= $2) OR (is_live = TRUE AND event_end >= $3))'
+    ];
+    const now = new Date().toISOString();
+    const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const params = [now, now, halfHourAgo];
+    let paramIndex = 4;
 
     if (sportType) {
       conditions.push(`sport_type = $${paramIndex}`);

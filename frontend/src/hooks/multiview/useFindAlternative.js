@@ -26,6 +26,60 @@ async function parseJsonSafely(response) {
   }
 }
 
+// Push a live progress line out to any listening IPTVPlayer via a window
+// event. Using an event (rather than prop-drilling state through 4
+// components) keeps the existing hook/grid/cell/player interface stable
+// and lets the player swap its own error-modal text without a re-render
+// of the grid on every tick.
+function emitSearchProgress(streamKey, message) {
+  window.dispatchEvent(
+    new CustomEvent('iptv:searchProgress', { detail: { streamKey, message } })
+  );
+}
+
+// Stream the NDJSON body of a search-channel / random-working-stream
+// request and invoke `onMessage` for each JSON object the backend emits.
+// Returns the final `done` / `error` message (the terminal record in the
+// stream), or null if the body wasn't readable.
+async function consumeNdjson(response, onMessage) {
+  if (!response.body || !response.body.getReader) return null;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let terminal = null;
+
+  const handleLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let msg;
+    try {
+      msg = JSON.parse(trimmed);
+    } catch {
+      console.warn('[Find Alternative] Bad NDJSON line:', trimmed);
+      return;
+    }
+    if (msg.type === 'done' || msg.type === 'error') terminal = msg;
+    onMessage(msg);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      handleLine(line);
+    }
+  }
+  if (buffer.trim()) handleLine(buffer);
+
+  return terminal;
+}
+
 /**
  * Owns the "find alternative" slice for the multi-view page.
  *
@@ -192,7 +246,18 @@ export function useFindAlternative({
     const streamKey = streamKeyOf(stream);
 
     // Rate limit automatic (onStreamDead) calls — manual clicks skip this.
-    if (isAutomatic && !shouldAllowAutomaticFind()) return;
+    // When rate-limited, still escalate to find-different-game so the
+    // user doesn't silently get stuck on a dead stream for 2 minutes;
+    // the different-game endpoint is one request (not a ffprobe loop)
+    // so it doesn't worsen network pressure.
+    if (isAutomatic && !shouldAllowAutomaticFind()) {
+      emitSearchProgress(
+        streamKey,
+        'Auto-recovery paused (too many recent failures) — switching to a different live game...'
+      );
+      await handleFindDifferentGame(stream);
+      return;
+    }
 
     // Only block if THIS stream is already being searched for; other slots
     // searching in parallel is fine and actually desirable.
@@ -202,6 +267,14 @@ export function useFindAlternative({
       );
       return;
     }
+
+    // Track whether the current player was actually replaced with a new
+    // channel. If not (AND the call was automatic) we escalate to
+    // find-different-game after the search-channel lock is released.
+    // The value starts `false` and only flips `true` when the swap
+    // completes successfully — errors, terminal failures, and
+    // NDJSON-read-returned-null all leave it `false`.
+    let replaced = false;
 
     markSearching(streamKey);
 
@@ -222,78 +295,152 @@ export function useFindAlternative({
       const token = getToken();
       if (!token) {
         showToast('Authentication required', 'error');
-        return;
-      }
-
-      const { searchName, searchOffset, searchKey } = buildSearchForStream(stream);
-
-      console.log(
-        `[Find Alternative] Stream data: searchQuery="${stream.searchQuery}", espnEventName="${stream.espnEventName}", name="${stream.name}"`
-      );
-      console.log(`[Find Alternative] Searching for "${searchName}" starting at offset ${searchOffset}`);
-
-      const response = await fetch('/api/live-events/search-channel', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          query: searchName,
-          excludeSourceIds,
-          excludeChannelIds,
-          minQuality: autoFillSettings.minQuality,
-          searchOffset
-        })
-      });
-
-      const { data, rawText } = await parseJsonSafely(response);
-      if (!data) {
-        console.warn(
-          '[Find Alternative] Non-JSON response:',
-          response.status,
-          rawText.slice(0, 200)
-        );
-        showToast(
-          response.status >= 500
-            ? 'Server error while searching — backend may be restarting'
-            : `Search failed (${response.status || 'network error'})`,
-          'error'
-        );
-        return;
-      }
-
-      if (!response.ok) {
-        showToast(data?.error || data?.message || `Search failed (${response.status})`, 'error');
-        return;
-      }
-
-      if (data.success && data.channel) {
-        // Clear exhausted flag since we found a working channel.
-        exhaustedSearchesRef.current.delete(searchKey);
-
-        const success = await swapStream(stream, data.channel);
-        if (success) {
-          window.dispatchEvent(new Event('multiviewUpdate'));
-          const qualityText = data.channel.quality ? ` (${data.channel.quality}p)` : '';
-          showToast(`Replaced with "${data.channel.name}"${qualityText}`, 'success');
-        } else {
-          showToast('Failed to add replacement channel', 'error');
-        }
       } else {
-        // Mark this search as exhausted so the next attempt starts from 0.
-        exhaustedSearchesRef.current.add(searchKey);
+        const { searchName, searchOffset, searchKey } = buildSearchForStream(stream);
+
         console.log(
-          `[Find Alternative] Search exhausted for "${searchName}", will reset offset on next attempt`
+          `[Find Alternative] Stream data: searchQuery="${stream.searchQuery}", espnEventName="${stream.espnEventName}", name="${stream.name}"`
         );
-        showToast(data.message || 'No alternative channel found', 'error');
+        console.log(`[Find Alternative] Searching for "${searchName}" starting at offset ${searchOffset}`);
+
+        emitSearchProgress(streamKey, `Searching for "${searchName}"...`);
+
+        const response = await fetch('/api/live-events/search-channel', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/x-ndjson'
+          },
+          body: JSON.stringify({
+            query: searchName,
+            excludeSourceIds,
+            excludeChannelIds,
+            // Exclude by current channel name too so find-alternative
+            // won't just return "MLS TEAM | LAFC" from a different
+            // source when that's exactly what's already in the slot.
+            excludeChannelNames: stream.name ? [stream.name] : [],
+            minQuality: autoFillSettings.minQuality,
+            searchOffset,
+            // If we know the event id, the backend can look up sport /
+            // league and apply the cross-sport scoring penalty that
+            // pushes e.g. AHL channels below minScore for MLS searches.
+            espnEventId: stream.espnEventId || null
+          })
+        });
+
+        if (!response.body || !response.body.getReader) {
+          // Buffered fallback for environments without stream.getReader.
+          const { data, rawText } = await parseJsonSafely(response);
+          if (!data) {
+            console.warn('[Find Alternative] Non-JSON response:', response.status, rawText.slice(0, 200));
+            showToast(
+              response.status >= 500
+                ? 'Server error while searching — backend may be restarting'
+                : `Search failed (${response.status || 'network error'})`,
+              'error'
+            );
+          } else {
+            const terminal = data.type ? data : {
+              type: 'done',
+              success: data.success,
+              channel: data.channel,
+              error: data.error,
+              message: data.message
+            };
+            replaced = await handleSearchTerminal(stream, terminal, searchKey, searchName);
+          }
+        } else {
+          const terminal = await consumeNdjson(response, (msg) => {
+            if (msg.type !== 'progress') return;
+            // Phase-aware progress so the UI feels alive during slow DB
+            // queries, zero-filter batches, and ffprobe chunks alike.
+            let label;
+            if (msg.phase === 'tested') {
+              label = `Tested ${msg.tested}${msg.matched ? ` of ${msg.matched}` : ''} — "${searchName}"`;
+            } else if (msg.phase === 'fetched') {
+              label = `Scanning batch ${msg.batch || '?'} (${msg.matched} candidates so far)...`;
+            } else if (msg.phase === 'querying') {
+              label = `Searching batch ${msg.batch || '?'} for "${searchName}"...`;
+            } else {
+              label = `Searching "${searchName}"...`;
+            }
+            emitSearchProgress(streamKey, label);
+          });
+
+          if (!terminal) {
+            showToast('Search ended unexpectedly', 'error');
+            emitSearchProgress(streamKey, 'Search ended unexpectedly — trying a different game...');
+          } else if (terminal.type === 'error') {
+            const msg = terminal.error || 'Search failed';
+            showToast(msg, 'error');
+            emitSearchProgress(streamKey, isAutomatic ? `${msg} — trying a different game...` : msg);
+          } else {
+            replaced = await handleSearchTerminal(stream, terminal, searchKey, searchName);
+          }
+        }
       }
     } catch (error) {
       console.error('[Find Alternative] Error:', error);
       showToast('Failed to find alternative', 'error');
+      emitSearchProgress(streamKey, 'Failed to find alternative — trying a different game...');
     } finally {
       unmarkSearching(streamKey);
     }
+
+    // Escalate — but only on automatic triggers and only when the
+    // same-game search did not produce a working replacement. The
+    // previous version of this block had `return` statements inside
+    // the try that caused early function exit after `finally`, so
+    // this escalation never actually ran when the stream was
+    // `Search ended unexpectedly` or `type === 'error'`. That's why
+    // the modal would freeze on "trying a different game..." and no
+    // different game ever arrived.
+    if (!replaced && isAutomatic) {
+      emitSearchProgress(
+        streamKey,
+        'No stream for this game — switching to a different live game...'
+      );
+      await handleFindDifferentGame(stream);
+    }
+  };
+
+  // Handle the terminal `done` record from search-channel. Pulled out so
+  // the streaming and buffered paths can share it. Returns `true` iff
+  // the current player was successfully replaced with a new channel —
+  // the caller uses this to decide whether to escalate to
+  // handleFindDifferentGame.
+  const handleSearchTerminal = async (stream, terminal, searchKey, searchName) => {
+    const streamKey = streamKeyOf(stream);
+    if (terminal.success && terminal.channel) {
+      exhaustedSearchesRef.current.delete(searchKey);
+      // swapStream will unmount the current player, so the error modal
+      // disappears with the component — no need to emit a terminal
+      // message for the success path.
+      const success = await swapStream(stream, terminal.channel);
+      if (success) {
+        window.dispatchEvent(new Event('multiviewUpdate'));
+        const qualityText = terminal.channel.quality ? ` (${terminal.channel.quality}p)` : '';
+        showToast(`Replaced with "${terminal.channel.name}"${qualityText}`, 'success');
+        return true;
+      }
+      showToast('Failed to add replacement channel', 'error');
+      emitSearchProgress(streamKey, 'Found a replacement but could not add it — try again');
+      return false;
+    }
+
+    exhaustedSearchesRef.current.add(searchKey);
+    console.log(
+      `[Find Alternative] Search exhausted for "${searchName}", will reset offset on next attempt`
+    );
+    const failMsg = terminal.message || terminal.error || 'No alternative channel found';
+    // Emit the terminal message so the error modal updates from the
+    // last "Tested N of M..." progress tick to the real outcome.
+    // Otherwise the modal appears stuck at whatever the last progress
+    // line happened to be.
+    emitSearchProgress(streamKey, failMsg);
+    showToast(failMsg, 'error');
+    return false;
   };
 
   // Replace a dead stream with a channel for a *different* live event (not
@@ -309,6 +456,7 @@ export function useFindAlternative({
     }
 
     markSearching(streamKey);
+    emitSearchProgress(streamKey, 'Looking for a different live game...');
 
     try {
       const token = getToken();
@@ -333,20 +481,24 @@ export function useFindAlternative({
 
       const { data } = await parseJsonSafely(response);
       if (!data) {
-        showToast(
+        const msg =
           response.status >= 500
             ? 'Server error while searching — backend may be restarting'
-            : `Search failed (${response.status || 'network error'})`,
-          'error'
-        );
+            : `Search failed (${response.status || 'network error'})`;
+        showToast(msg, 'error');
+        emitSearchProgress(streamKey, msg);
         return;
       }
 
       if (!response.ok || !data.success || !data.channel) {
-        showToast(data?.message || data?.error || 'No other live games available', 'error');
+        const msg = data?.message || data?.error || 'No other live games available';
+        showToast(msg, 'error');
+        emitSearchProgress(streamKey, msg);
         return;
       }
 
+      // swapStream unmounts the current player so the error modal
+      // disappears with it — no need to update the progress on success.
       const success = await swapStream(stream, data.channel);
       if (success) {
         window.dispatchEvent(new Event('multiviewUpdate'));
@@ -354,10 +506,12 @@ export function useFindAlternative({
         showToast(`Replaced with "${data.channel.name}"${eventLabel}`, 'success');
       } else {
         showToast('Failed to add replacement channel', 'error');
+        emitSearchProgress(streamKey, 'Found a game but could not add it — try again');
       }
     } catch (error) {
       console.error('[Find Different Game] Error:', error);
       showToast('Failed to find a different game', 'error');
+      emitSearchProgress(streamKey, 'Failed to find a different game — try again');
     } finally {
       unmarkSearching(streamKey);
     }

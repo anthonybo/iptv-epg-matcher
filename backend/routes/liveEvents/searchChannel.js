@@ -20,27 +20,60 @@ const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/cha
  * and continues fetching more batches until a working stream is found or all exhausted
  */
 router.post('/search-channel', async (req, res) => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  const {
+    query,
+    excludeSourceIds = [],
+    excludeChannelIds = [],
+    excludeChannelNames = [], // NEW: exclude by name too (e.g. current stream's
+                              // channel name) so find-alternative doesn't
+                              // just return the same-named channel from a
+                              // different source and look like it did nothing.
+    minQuality = 0,
+    searchOffset = 0,
+    espnEventId = null,
+    sportType: sportTypeHint = null,
+    leagueName: leagueNameHint = null
+  } = req.body;
+
+  if (!query || typeof query !== 'string' || query.trim().length < 2) {
+    return res.status(400).json({
+      success: false,
+      error: 'Search query must be at least 2 characters'
+    });
+  }
+
+  const searchQuery = query.trim();
+  const minHeight = parseInt(minQuality) || 0;
+  const startOffset = parseInt(searchOffset) || 0;
+
+  // Stream progress back as NDJSON (same pattern as auto-fill) so the
+  // error modal in the player can show "Tested X of Y" in real time
+  // instead of a static "Finding alternative..." with no indication
+  // anything is actually happening.
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  const writeLine = (obj) => {
+    if (res.writableEnded || res.destroyed) return false;
+    res.write(JSON.stringify(obj) + '\n');
+    if (typeof res.flush === 'function') res.flush();
+    return true;
+  };
+
+  let clientGone = false;
+  req.on('close', () => { clientGone = true; });
+
+  logger.info(`[Find Alternative] Received search request: query="${searchQuery}", offset=${startOffset}, minQuality=${minHeight}p`);
+
   try {
-    const userId = req.user?.id;
-
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    const { query, excludeSourceIds = [], excludeChannelIds = [], minQuality = 0, searchOffset = 0 } = req.body;
-
-    if (!query || typeof query !== 'string' || query.trim().length < 2) {
-      return res.status(400).json({
-        success: false,
-        error: 'Search query must be at least 2 characters'
-      });
-    }
-
-    const searchQuery = query.trim();
-    const minHeight = parseInt(minQuality) || 0;
-    const startOffset = parseInt(searchOffset) || 0;
-
-    logger.info(`[Find Alternative] Received search request: query="${searchQuery}", offset=${startOffset}, minQuality=${minHeight}p`);
 
     // Fetch blacklisted channels
     const blacklistResult = await postgresService.query(
@@ -48,6 +81,33 @@ router.post('/search-channel', async (req, res) => {
       [userId]
     );
     const blacklistedChannels = blacklistResult.rows.map(row => row.channel_name);
+
+    // Resolve sport/league context for the event. The caller may pass
+    // sportType/leagueName hints directly (faster) OR an espnEventId
+    // which we look up from live_events. We feed this to the scorer so
+    // cross-sport false positives (e.g. "AHL | GRAND RAPIDS GRIFFINS"
+    // matching a Colorado Rapids MLS search via the mascot word
+    // "Rapids") get pushed below minScore via a league-conflict penalty.
+    let sportType = sportTypeHint;
+    let leagueName = leagueNameHint;
+    if (espnEventId && (!sportType || !leagueName)) {
+      try {
+        const eventLookup = await postgresService.query(
+          `SELECT sport_type, league_name FROM live_events WHERE event_id = $1 LIMIT 1`,
+          [espnEventId]
+        );
+        if (eventLookup.rows.length > 0) {
+          sportType = sportType || eventLookup.rows[0].sport_type;
+          leagueName = leagueName || eventLookup.rows[0].league_name;
+        }
+      } catch (err) {
+        logger.warn(`[Find Alternative] Event lookup failed for ${espnEventId}: ${err.message}`);
+      }
+    }
+    if (sportType || leagueName) {
+      logger.info(`[Find Alternative] Scoring context — sport: ${sportType || 'n/a'}, league: ${leagueName || 'n/a'}`);
+    }
+    const scoringContext = { sportType, leagueName };
 
     // Extract search terms using fuzzy matching logic (handles event names like "Temple Owls at Villanova Wildcats")
     const eventMatch = searchQuery.match(/^(.+?)\s+(?:at|vs\.?|@)\s+(.+?)$/i);
@@ -99,6 +159,20 @@ router.post('/search-channel', async (req, res) => {
       const channelPlaceholders = excludeChannelIds.map((_, i) => `$${channelParamIndex + i}`).join(', ');
       channelExclusion = `AND c.channel_id NOT IN (${channelPlaceholders})`;
       baseQueryParams.push(...excludeChannelIds);
+    }
+
+    // Additional name-based exclusion. The caller passes the CURRENT
+    // channel's name so find-alternative doesn't just return the same
+    // "MLS TEAM | LAFC" from a different source and look like it did
+    // nothing. The match is case-insensitive to catch variants like
+    // "mls team | lafc" vs "MLS TEAM | LAFC".
+    if (excludeChannelNames.length > 0) {
+      const nameStartIdx = baseQueryParams.length + 1;
+      const namePlaceholders = excludeChannelNames
+        .map((_, i) => `LOWER(c.name) != LOWER($${nameStartIdx + i})`)
+        .join(' AND ');
+      channelExclusion += ` AND (${namePlaceholders})`;
+      baseQueryParams.push(...excludeChannelNames);
     }
 
     // Build blacklist conditions
@@ -209,6 +283,22 @@ router.post('/search-channel', async (req, res) => {
     let lowQualitySkipped = 0;
 
     for (let batchNum = 0; batchNum < MAX_BATCHES; batchNum++) {
+      if (clientGone) break;
+
+      // Emit "querying" progress *before* the SQL query so the UI has
+      // something to show during slow per-batch lookups (multi-ILIKE
+      // queries on a large channels table can take several seconds).
+      // Without this, users see "Tested N of M — …" frozen for the
+      // full query duration and think the app broke.
+      writeLine({
+        type: 'progress',
+        phase: 'querying',
+        query: searchQuery,
+        batch: batchNum + 1,
+        tested: totalChannelsTested,
+        matched: totalChannelsMatched
+      });
+
       // Fetch next batch from database
       const limitParamIndex = baseQueryParams.length + 1;
       const offsetParamIndex = baseQueryParams.length + 2;
@@ -245,11 +335,15 @@ router.post('/search-channel', async (req, res) => {
       if (channels.length === 0) {
         // No more channels to fetch
         if (batchNum === 0) {
-          return res.json({
+          writeLine({
+            type: 'done',
             success: false,
             error: 'No channels found',
-            message: `No channels found matching "${searchQuery}"`
+            message: `No channels found matching "${searchQuery}"`,
+            tested: 0,
+            matched: 0
           });
+          return res.end();
         }
         break;
       }
@@ -257,10 +351,22 @@ router.post('/search-channel', async (req, res) => {
       totalChannelsMatched += channels.length;
       logger.info(`[Batch ${batchNum + 1}] Fetched ${channels.length} channels (offset: ${currentDbOffset})`);
 
+      // Tell the client how many candidates we've seen so far — this is
+      // what lets the UI say "Tested X of Y" instead of a static
+      // "Finding alternative...".
+      writeLine({
+        type: 'progress',
+        phase: 'fetched',
+        query: searchQuery,
+        matched: totalChannelsMatched,
+        tested: totalChannelsTested,
+        batch: batchNum + 1
+      });
+
       // Apply relevance scoring for event searches
       if (homeTeam || awayTeam) {
         channels = channels.map(channel => {
-          const score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
+          const score = calculateRelevanceScore(channel.name, homeTeam, awayTeam, scoringContext);
           return { ...channel, relevanceScore: score };
         });
 
@@ -282,7 +388,7 @@ router.post('/search-channel', async (req, res) => {
           // Log what we dropped at the top of the filtered bucket so we can
           // see whether the threshold is swallowing real matches.
           const droppedSample = channelsResult.rows
-            .map(c => ({ name: c.name, score: calculateRelevanceScore(c.name, homeTeam, awayTeam) }))
+            .map(c => ({ name: c.name, score: calculateRelevanceScore(c.name, homeTeam, awayTeam, scoringContext) }))
             .filter(c => c.score < minScore && c.score > 0)
             .sort((a, b) => b.score - a.score)
             .slice(0, 3)
@@ -329,6 +435,7 @@ router.post('/search-channel', async (req, res) => {
 
       // Test channels in parallel batches
       for (let i = 0; i < channels.length; i += PARALLEL_TESTS) {
+        if (clientGone) break;
         const chunk = channels.slice(i, i + PARALLEL_TESTS);
         const results = await Promise.all(chunk.map((channel, chunkIndex) => {
           const globalIndex = i + chunkIndex;
@@ -337,6 +444,16 @@ router.post('/search-channel', async (req, res) => {
         }));
 
         totalChannelsTested += chunk.length;
+
+        // Per-chunk progress update so the UI can tick up in real time.
+        writeLine({
+          type: 'progress',
+          phase: 'tested',
+          query: searchQuery,
+          tested: totalChannelsTested,
+          matched: totalChannelsMatched,
+          lastCandidate: chunk[chunk.length - 1]?.name || null
+        });
 
         // Check results for a working channel
         const successfulResults = results.filter(r => r.success).sort((a, b) => a.index - b.index);
@@ -357,8 +474,11 @@ router.post('/search-channel', async (req, res) => {
           // Calculate next offset for future searches
           const nextSearchOffset = currentDbOffset + i + result.index + 1;
 
-          return res.json({
+          writeLine({
+            type: 'done',
             success: true,
+            tested: totalChannelsTested,
+            matched: totalChannelsMatched,
             channel: {
               id: channel.id,
               name: channel.name,
@@ -377,6 +497,7 @@ router.post('/search-channel', async (req, res) => {
               searchOffset: nextSearchOffset
             }
           });
+          return res.end();
         }
 
         // Log failed results
@@ -414,18 +535,21 @@ router.post('/search-channel', async (req, res) => {
 
     logger.info(`[Find Alternative] Search exhausted: ${errorMessage}`);
 
-    return res.json({
+    writeLine({
+      type: 'done',
       success: false,
       error: 'No working streams found',
-      message: errorMessage
+      message: errorMessage,
+      tested: totalChannelsTested,
+      matched: totalChannelsMatched
     });
+    return res.end();
 
   } catch (error) {
     logger.error('Search channel failed:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    // Headers are already sent — stream the error rather than res.status().
+    writeLine({ type: 'error', error: error.message });
+    if (!res.writableEnded) res.end();
   }
 });
 

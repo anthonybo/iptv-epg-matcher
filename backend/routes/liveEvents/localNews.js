@@ -301,8 +301,12 @@ router.post('/local-news', authMiddleware, async (req, res) => {
             return { success: false, reason: 'No stream URL', index };
           }
 
-          // Test with ffprobe
-          const execFileAsync = promisify(execFile);
+          // Test with ffprobe (execFileAsync is imported from streamAgents
+          // at the top of this file). A leftover local redeclaration via
+          // `promisify(execFile)` was throwing a ReferenceError on every
+          // attempt after the route-split refactor, which is why every
+          // news channel was being reported dead and the endpoint always
+          // returned "No working news streams found".
           const ffprobeArgs = [
             '-v', 'error',
             '-select_streams', 'v:0',

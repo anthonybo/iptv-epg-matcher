@@ -71,10 +71,18 @@ router.post('/auto-fill-streams', async (req, res) => {
     const usedEventIds = new Set(excludeEventIds);
     const usedChannelIds = new Set(excludeChannelIds);
 
-    // Build query for currently live events (PostgreSQL)
-    const conditions = ['event_start <= $1', 'event_end >= $2'];
-    const params = [new Date().toISOString(), new Date().toISOString()];
-    let paramIndex = 3;
+    // Build query for currently live events (PostgreSQL). "Live" =
+    // time window OR ESPN's is_live flag — this keeps MLS (and other
+    // soccer) games available to auto-fill when stoppage time has
+    // pushed them past their estimated event_end. The half-hour floor
+    // on event_end guards against stale is_live flags.
+    const conditions = [
+      '((event_start <= $1 AND event_end >= $2) OR (is_live = TRUE AND event_end >= $3))'
+    ];
+    const now = new Date().toISOString();
+    const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const params = [now, now, halfHourAgo];
+    let paramIndex = 4;
 
     if (sportType) {
       conditions.push(`sport_type = $${paramIndex}`);
@@ -330,7 +338,13 @@ router.post('/auto-fill-streams', async (req, res) => {
 
         // Score channels using fuzzy matching (prioritize channels with BOTH teams)
         channels = channels.map(channel => {
-          let score = calculateRelevanceScore(channel.name, homeTeam, awayTeam);
+          // Pass the event's sport/league so the scorer can penalise
+          // cross-sport false positives (e.g. an AHL channel whose
+          // mascot happens to share a word with an MLS team name).
+          let score = calculateRelevanceScore(channel.name, homeTeam, awayTeam, {
+            sportType: event.sport_type,
+            leagueName: event.league_name
+          });
 
           // League name bonus
           if (event.league_name && channel.name.toLowerCase().includes(event.league_name.toLowerCase())) {

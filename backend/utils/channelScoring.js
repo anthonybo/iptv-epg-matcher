@@ -91,24 +91,176 @@ function scoreTeamAgainstChannel(channelLower, teamName) {
   if (!team) return { score: 0, tier: null };
 
   const full = team.toLowerCase();
-  const words = team.split(/\s+/);
-  const mascot = (words[words.length - 1] || '').toLowerCase();
-  const city = words.slice(0, -1).join(' ').toLowerCase();
+
+  // MLS teams (and some others) end in a league-suffix — FC, SC, CF — that
+  // isn't a mascot ("Inter Miami CF", "New York City FC", "Nashville SC",
+  // "Atlanta United FC"). The raw mascot check would either use the
+  // suffix (fails the length>=4 guard) or, worse, use "FC"/"SC"/"CF" and
+  // miss channels that just say "INTER MIAMI". Stripping the suffix
+  // before computing mascot/city fixes both.
+  const stripped = team.replace(/\s+(FC|SC|CF)$/i, '').trim();
+  const strippedWords = stripped.split(/\s+/);
+  const mascot = (strippedWords[strippedWords.length - 1] || '').toLowerCase();
+  const city = strippedWords.slice(0, -1).join(' ').toLowerCase();
 
   if (full && wordContains(channelLower, full)) return { score: 150, tier: 'full' };
-  if (mascot.length >= 4 && wordContains(channelLower, mascot)) return { score: 100, tier: 'mascot' };
+
+  // If the suffix-stripped form is still multi-word, treat a hit on
+  // that phrase as a full-team match ("INTER MIAMI" counts for
+  // "Inter Miami CF"). Single-word stripped forms fall through —
+  // matching "Nashville" alone would over-match "Nashville Predators"
+  // (NHL) as if we'd seen the real MLS team.
+  const strippedLower = stripped.toLowerCase();
+  const strippedIsMultiWord = stripped.includes(' ');
+  if (strippedIsMultiWord && strippedLower !== full && wordContains(channelLower, strippedLower)) {
+    return { score: 150, tier: 'full' };
+  }
+
+  // When the team name is effectively just "CITY + league suffix"
+  // (Nashville SC / Charlotte FC / Cincinnati FC), the word we'd
+  // otherwise treat as "mascot" is actually just the city — matching
+  // it shouldn't earn the higher mascot-tier score. Downgrade to
+  // city-level so the league-context penalty can correctly push
+  // wrong-sport channels ("Nashville Predators", NHL) below minScore.
+  if (mascot.length >= 4 && wordContains(channelLower, mascot)) {
+    const tier = strippedIsMultiWord ? 'mascot' : 'city';
+    const score = strippedIsMultiWord ? 100 : 50;
+    return { score, tier };
+  }
   if (city.length >= 4 && wordContains(channelLower, city)) return { score: 50, tier: 'city' };
   return { score: 0, tier: null };
+}
+
+// League → set of abbreviations / phrases that typically appear in channel
+// names for that league. Used for cross-sport disambiguation: if an event
+// is MLS, channels with `NHL` / `AHL` / `NBA` in their name are almost
+// certainly a different sport (e.g., "AHL 12 | GRAND RAPIDS GRIFFINS"
+// matching a Colorado Rapids search via mascot-word "Rapids").
+const LEAGUE_KEYWORDS = {
+  mls: ['mls'],
+  nhl: ['nhl'],
+  ahl: ['ahl'],
+  nba: ['nba'],
+  wnba: ['wnba'],
+  nfl: ['nfl'],
+  mlb: ['mlb'],
+  ncaa: ['ncaa', 'college'],
+  cfb: ['cfb'],
+  cbb: ['cbb'],
+  epl: ['epl', 'premier league'],
+  laliga: ['la liga', 'laliga'],
+  seriea: ['serie a'],
+  bundesliga: ['bundesliga'],
+  ucl: ['champions league', 'ucl'],
+  uel: ['europa league', 'uel'],
+  qmjhl: ['qmjhl'],
+  khl: ['khl']
+};
+
+// Which sport each league belongs to, for cross-sport conflict detection.
+const LEAGUE_SPORT = {
+  mls: 'soccer',
+  epl: 'soccer',
+  laliga: 'soccer',
+  seriea: 'soccer',
+  bundesliga: 'soccer',
+  ucl: 'soccer',
+  uel: 'soccer',
+  nhl: 'hockey',
+  ahl: 'hockey',
+  qmjhl: 'hockey',
+  khl: 'hockey',
+  nba: 'basketball',
+  wnba: 'basketball',
+  cbb: 'basketball',
+  nfl: 'football',
+  cfb: 'football',
+  mlb: 'baseball'
+};
+
+// Normalise a free-form league name like "MLS" / "Major League Soccer" /
+// "NCAA Football" / "ESP.1" to one of the keys above (or null).
+function normalizeLeague(leagueName) {
+  if (!leagueName) return null;
+  const lower = leagueName.toLowerCase();
+  if (/\bmls\b|major league soccer/.test(lower)) return 'mls';
+  if (/\bahl\b/.test(lower)) return 'ahl';
+  if (/\bnhl\b/.test(lower)) return 'nhl';
+  if (/\bwnba\b/.test(lower)) return 'wnba';
+  if (/\bnba\b/.test(lower)) return 'nba';
+  if (/\bnfl\b/.test(lower)) return 'nfl';
+  if (/\bmlb\b/.test(lower)) return 'mlb';
+  if (/\bepl\b|premier league/.test(lower)) return 'epl';
+  if (/la liga|laliga/.test(lower)) return 'laliga';
+  if (/serie a/.test(lower)) return 'seriea';
+  if (/bundesliga/.test(lower)) return 'bundesliga';
+  if (/champions league|\bucl\b/.test(lower)) return 'ucl';
+  if (/europa league|\buel\b/.test(lower)) return 'uel';
+  if (/\bqmjhl\b/.test(lower)) return 'qmjhl';
+  if (/\bncaa\b.*football|\bcfb\b|college football/.test(lower)) return 'cfb';
+  if (/\bncaa\b.*basketball|\bcbb\b|college basketball/.test(lower)) return 'cbb';
+  if (/\bncaa\b/.test(lower)) return 'ncaa';
+  return null;
+}
+
+/**
+ * Sport / league context bonus (or penalty).
+ *
+ * + bonus when the channel name clearly advertises the SAME league or sport
+ *   we're searching for ("MLS TEAM | LAFC" for an MLS event → +50).
+ * − penalty when the channel name advertises a DIFFERENT sport ("AHL 12 |
+ *   GRAND RAPIDS GRIFFINS" for an MLS event → −120).
+ *
+ * This is the fix for the cross-sport false positives we hit on teams
+ * with common-word mascots (Rapids, United, City, Union, Kings): without
+ * it, a mascot-word hit scored 100 whether the channel was the right
+ * league or an AHL hockey team that happened to share a word.
+ */
+function scoreLeagueContext(channelLower, sportType, leagueName) {
+  const targetLeague = normalizeLeague(leagueName);
+  const targetSport = (sportType || '').toLowerCase() ||
+    (targetLeague ? LEAGUE_SPORT[targetLeague] : null);
+
+  if (!targetLeague && !targetSport) return 0;
+
+  let score = 0;
+
+  // Bonus for same-league keywords.
+  if (targetLeague) {
+    for (const kw of LEAGUE_KEYWORDS[targetLeague] || []) {
+      if (wordContains(channelLower, kw)) {
+        score += 50;
+        break;
+      }
+    }
+  }
+
+  // Scan for any other known league's keywords. If we find a keyword
+  // belonging to a different sport, that's a strong signal the channel
+  // is the wrong content and we want to push it below minScore.
+  for (const [league, keywords] of Object.entries(LEAGUE_KEYWORDS)) {
+    if (league === targetLeague) continue;
+    const otherSport = LEAGUE_SPORT[league];
+    if (!otherSport || otherSport === targetSport) continue;
+    for (const kw of keywords) {
+      if (wordContains(channelLower, kw)) {
+        score -= 120;
+        return score; // one conflict is enough — stop
+      }
+    }
+  }
+
+  return score;
 }
 
 /**
  * Calculate relevance score between a channel name and team names.
  *
- * Scoring model (per-team tiers, additive + both-teams bonus + fuzzy fallback):
- *   Per team: 150 full / 100 mascot / 50 city / 0 nothing
- *   Bonus:   +200 when BOTH teams have any literal hit (that's almost always
- *            the game's versus channel, e.g. "KNICKS @ HAWKS NBA 04")
- *   Fuzzy:   only if nothing matched literally, up to +50 per team (typos)
+ * Scoring model (per-team tiers + both-teams bonus + league context + fuzzy fallback):
+ *   Per team:   150 full / 100 mascot / 50 city / 0 nothing
+ *   Both teams: +200
+ *   League:     +50 same-league keyword / −120 conflicting-sport keyword
+ *   Fuzzy:      up to +50 per team (only when literal matching found nothing)
  *
  * This replaces the earlier "any-term-contains" substring check, which
  * scored "Atlanta Falcons News" identically to "Atlanta Hawks HD" for a
@@ -116,8 +268,13 @@ function scoreTeamAgainstChannel(channelLower, teamName) {
  * along with false positives. With tiering, a real dedicated-team channel
  * scores 100+, a city-only false positive scores 50, and the two are
  * distinguishable by the caller.
+ *
+ * The league-context layer was added after we saw MLS "Colorado Rapids"
+ * searches match "AHL | GRAND RAPIDS GRIFFINS" at score 100 (common-word
+ * mascot "Rapids"). The AHL penalty pushes that to −20 (under minScore)
+ * while legitimate "MLS TEAM | LAFC" gets +50 on top of its team hit.
  */
-function calculateRelevanceScore(channelName, homeTeam, awayTeam) {
+function calculateRelevanceScore(channelName, homeTeam, awayTeam, context = {}) {
   if (!channelName) return 0;
   const channelLower = channelName.toLowerCase();
 
@@ -128,11 +285,17 @@ function calculateRelevanceScore(channelName, homeTeam, awayTeam) {
   // Both-teams bonus — the channel names the matchup explicitly.
   if (home.score > 0 && away.score > 0) total += 200;
 
+  // League / sport context (optional — only applies when the caller
+  // knows the event's sport or league).
+  if (context && (context.sportType || context.leagueName)) {
+    total += scoreLeagueContext(channelLower, context.sportType, context.leagueName);
+  }
+
   // Fuzzy fallback — only when literal matching found nothing. Typo
   // tolerance for unusual phrasings ("St. Louis" vs "St Louis"), mangled
   // unicode, etc. Bounded to +50 per team so fuzzy can never outscore a
   // real literal match.
-  if (total === 0 && (homeTeam || awayTeam)) {
+  if (home.score === 0 && away.score === 0 && (homeTeam || awayTeam)) {
     const channelWords = channelLower.split(/[\s|:@\-]+/).filter((w) => w.length >= 3);
     if (channelWords.length > 0) {
       const fuzzy = FuzzySet(channelWords);
@@ -157,5 +320,7 @@ function calculateRelevanceScore(channelName, homeTeam, awayTeam) {
 module.exports = {
   extractSearchTerms,
   calculateRelevanceScore,
-  scoreTeamAgainstChannel
+  scoreTeamAgainstChannel,
+  scoreLeagueContext,
+  normalizeLeague
 };

@@ -258,11 +258,27 @@ async function getCurrentlyLiveEvents() {
   try {
     const now = new Date().toISOString();
 
+    // "Live" = either inside the advertised time window OR ESPN says
+    // `is_live = TRUE`. Needed because:
+    //   - MLS and other soccer routinely run past event_end (stoppage
+    //     + halftime often push 2h+); our stored event_end is an
+    //     estimate, so the ticker (which reads is_live directly from
+    //     ESPN's scoreboard) would keep showing the game live while
+    //     this query already dropped it.
+    //   - Inverse happens too: games go in-progress slightly before
+    //     our stored event_start during pregame transitions.
+    //
+    // Boundary guard: don't let `is_live = TRUE` pull in rows that
+    // finished hours ago (stale ESPN flag) — clamp to a reasonable
+    // window via event_end >= NOW − 30 min as a safety net.
+    const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+
     const result = await postgresService.query(`
       SELECT * FROM live_events
-      WHERE event_start <= $1 AND event_end >= $2
+      WHERE (event_start <= $1 AND event_end >= $2)
+         OR (is_live = TRUE AND event_end >= $3)
       ORDER BY event_start
-    `, [now, now]);
+    `, [now, now, halfHourAgo]);
 
     return result.rows || [];
   } catch (error) {
