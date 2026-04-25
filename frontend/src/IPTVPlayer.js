@@ -28,6 +28,9 @@ import {
 import {
   initializeMpegtsPlayer as initializeMpegtsPlayerExt
 } from './utils/player/initMpegts';
+import {
+  initializeHlsPlayer as initializeHlsPlayerExt
+} from './utils/player/initHls';
 import useEpgData from './hooks/player/useEpgData';
 import useSearchProgressListener from './hooks/player/useSearchProgressListener';
 import useHandleCast from './hooks/player/useHandleCast';
@@ -366,6 +369,7 @@ const IPTVPlayer = ({
   const initializeVlcLink = () => initializeVlcLinkExt(buildPlayerCtx());
   const initializeTestVideo = () => initializeTestVideoExt(buildPlayerCtx());
   const initializeMpegtsPlayer = () => initializeMpegtsPlayerExt(buildPlayerCtx());
+  const initializeHlsPlayer = () => initializeHlsPlayerExt(buildPlayerCtx());
 
   // Single dispatch point the recovery hook calls during retry/fresh-start.
   const reinitialize = (method) => {
@@ -375,6 +379,10 @@ const IPTVPlayer = ({
         break;
       case 'mpegts-player':
         initializeMpegtsPlayer();
+        break;
+      case 'hls-stream':
+        // Backend HLS remux + hls.js. iOS-friendly and self-recovering.
+        initializeHlsPlayer();
         break;
       case 'vlc-link':
         initializeVlcLink();
@@ -424,7 +432,7 @@ const IPTVPlayer = ({
     setLoading(true);
     setError(null);
     reinitialize(playbackMethod);
-    if (!['hls-player', 'mpegts-player', 'vlc-link', 'test-video'].includes(playbackMethod)) {
+    if (!['hls-player', 'mpegts-player', 'hls-stream', 'vlc-link', 'test-video'].includes(playbackMethod)) {
       setError('Unknown playback method');
       setLoading(false);
       isInitializingRef.current = false;

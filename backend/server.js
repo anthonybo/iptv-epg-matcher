@@ -395,6 +395,10 @@ if (!settingsRouter || typeof settingsRouter !== 'function') {
 app.use('/api/auth', authRoutes);
 app.use('/api/channels', channelRoutes);
 app.use('/api/epg', epgRoutes);
+// HLS-for-player router must come before the generic /api/stream router so
+// /api/stream/hls/* doesn't get swallowed by the catch-all `:sessionId/:channelId`
+// segment serving in stream.js (which is for Chromecast).
+app.use('/api/stream/hls', require('./routes/streamHls'));
 app.use('/api/stream', streamRoutes);
 app.use('/api/debug', debugRoutes);
 app.use('/api/xtream', xtreamRoutes);
