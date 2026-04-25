@@ -119,7 +119,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         setLoadingEpgSources(true);
         try {
             console.log('Fetching EPG sources for session:', session);
-            const response = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+            const response = await fetch(`/api/epg/${session}/sources?_t=${Date.now()}`);
             
             if (!response.ok) {
                 console.log('Failed to load EPG sources, initializing session...');
@@ -160,14 +160,14 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         
         try {
             // First try to load EPG sources from the server
-            const sourcesResponse = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+            const sourcesResponse = await fetch(`/api/epg/${session}/sources?_t=${Date.now()}`);
             
             if (!sourcesResponse.ok) {
                 // If that fails, try to initialize the EPG session
                 console.log('No EPG sources found, initializing EPG session first...');
                 
                 // First try simple initialization without loading everything
-                const initResponse = await fetch(`http://localhost:5001/api/epg/init`, {
+                const initResponse = await fetch(`/api/epg/init`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -182,7 +182,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 console.log('EPG session initialized, loading sources...');
                 
                 // Now try to fetch sources again
-                const sourcesRetryResponse = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+                const sourcesRetryResponse = await fetch(`/api/epg/${session}/sources?_t=${Date.now()}`);
                 
                 if (!sourcesRetryResponse.ok) {
                     throw new Error(`Failed to load EPG sources after initialization: ${sourcesRetryResponse.status} ${sourcesRetryResponse.statusText}`);
@@ -210,7 +210,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
             console.log('Attempting to load EPG data directly...');
             
             // Try to load a specific source to trigger the backend to initialize
-            const loadResponse = await fetch(`http://localhost:5001/api/epg/${session}/load`, {
+            const loadResponse = await fetch(`/api/epg/${session}/load`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -232,7 +232,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
             console.log('EPG data load response:', loadData);
             
             // Try to get sources one more time
-            const sourcesAfterLoadResponse = await fetch(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+            const sourcesAfterLoadResponse = await fetch(`/api/epg/${session}/sources?_t=${Date.now()}`);
             
             if (!sourcesAfterLoadResponse.ok) {
                 throw new Error(`Still failed to load EPG sources: ${sourcesAfterLoadResponse.status} ${sourcesAfterLoadResponse.statusText}`);
@@ -482,7 +482,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
             try {
                 console.log(`Searching EPG channels with term: "${term}" in session ${session}`);
                 const response = await axios.get(
-                    `http://localhost:5001/api/epg/${session}/search?term=${encodeURIComponent(term)}&_t=${Date.now()}`
+                    `/api/epg/${session}/search?term=${encodeURIComponent(term)}&_t=${Date.now()}`
                 );
                 
                 console.log('EPG search response:', response.data);
@@ -523,7 +523,7 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 try {
                     console.log(`Falling back to debug search with term: "${term}"`);
                     const debugResponse = await axios.get(
-                        `http://localhost:5001/api/debug/search-epg?term=${encodeURIComponent(term)}&_t=${Date.now()}`
+                        `/api/debug/search-epg?term=${encodeURIComponent(term)}&_t=${Date.now()}`
                     );
                     
                     console.log('Debug search response:', debugResponse.data);
@@ -1159,14 +1159,14 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                         <button
                             onClick={async () => {
                                 try {
-                                    const initResponse = await axios.post(`http://localhost:5001/api/epg/init`, {
+                                    const initResponse = await axios.post(`/api/epg/init`, {
                                         sessionId: session
                                     });
                                     console.log('EPG session re-initialization response:', initResponse.data);
                                     alert('EPG session reinitialized. Check console for details.');
 
                                     // Re-fetch sources
-                                    const sourcesResponse = await axios.get(`http://localhost:5001/api/epg/${session}/sources?_t=${Date.now()}`);
+                                    const sourcesResponse = await axios.get(`/api/epg/${session}/sources?_t=${Date.now()}`);
                                     if (sourcesResponse.data && sourcesResponse.data.sources) {
                                         console.log('Reloaded EPG sources:', sourcesResponse.data.sources);
                                         window.dispatchEvent(new CustomEvent('epgSourcesUpdated', { detail: sourcesResponse.data.sources }));

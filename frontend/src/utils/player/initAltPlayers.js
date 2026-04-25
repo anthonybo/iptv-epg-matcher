@@ -48,7 +48,7 @@ export function initializeClapprPlayer(ctx) {
     return;
   }
 
-  let baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
+  let baseUrl = `/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
   // Scope the search to the originating source so we don't match a
   // same-named channel from a different IPTV provider.
   if (selectedChannel?.sourceId) {
@@ -236,7 +236,7 @@ export function initializeVlcLink(ctx) {
 
   log('info', 'Initializing VLC link page');
 
-  let baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+  let baseTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
   if (selectedChannel?.sourceId) {
     baseTsUrl += `&source_id=${selectedChannel.sourceId}`;
   }

@@ -29,7 +29,7 @@ export default function useHandleCast({
     }
 
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
+      const apiUrl = import.meta.env.VITE_API_URL || '/api';
       const networkInfoUrl = `${apiUrl}/network-info`;
 
       log('info', 'Fetching network info for casting', { networkInfoUrl });

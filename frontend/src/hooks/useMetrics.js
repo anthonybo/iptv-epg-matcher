@@ -23,7 +23,7 @@ export function useMetrics() {
       try {
         // Use current origin for API URL (works for both dev and production)
         const baseUrl = window.location.hostname === 'localhost'
-          ? 'http://localhost:5001'
+          ? ''
           : window.location.origin;
         const url = `${baseUrl}/api/metrics/stream?token=${encodeURIComponent(token)}`;
 

@@ -113,7 +113,7 @@ const DashboardView = () => {
     const fetchTimeSeries = async () => {
       try {
         const baseUrl = window.location.hostname === 'localhost'
-          ? 'http://localhost:5001'
+          ? ''
           : window.location.origin;
 
         const types = ['bandwidth', 'streams', 'requests', 'memory'];

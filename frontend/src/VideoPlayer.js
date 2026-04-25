@@ -159,7 +159,7 @@ const VideoPlayer = ({ sessionId, selectedChannel }) => {
     });
 
     // Strategy 1: Try direct TS URL first (more reliable)
-    const directTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+    const directTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
     log('info', 'Using direct TS URL for playback', { url: directTsUrl });
     setStreamUrl(directTsUrl);
     

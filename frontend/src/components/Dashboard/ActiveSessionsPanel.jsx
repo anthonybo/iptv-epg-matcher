@@ -18,7 +18,7 @@ const ActiveSessionsPanel = ({ streams = [] }) => {
     const fetchSessions = async () => {
       try {
         const baseUrl = window.location.hostname === 'localhost'
-          ? 'http://localhost:5001'
+          ? ''
           : window.location.origin;
 
         const response = await fetch(`${baseUrl}/api/metrics/sessions/active`, {

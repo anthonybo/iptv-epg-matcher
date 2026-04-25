@@ -186,12 +186,12 @@ const SimplePlayer = ({ sessionId, selectedChannel }) => {
         log('INFO', 'Using direct channel URL', { url: streamUrl });
       } else if (streamMode === 'hls') {
         // Use HLS format from proxy
-        const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+        const baseUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
         streamUrl = addAuthToStreamUrl(baseUrl);
         log('INFO', 'Using HLS proxy URL', { url: streamUrl });
       } else {
         // Use TS format from proxy (default)
-        const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+        const baseUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
         streamUrl = addAuthToStreamUrl(baseUrl);
         log('INFO', 'Using TS proxy URL', { url: streamUrl });
       }

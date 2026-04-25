@@ -56,7 +56,7 @@ const LoadingProgress = ({
                 return `${window.location.protocol}//${window.location.hostname}:5001`;
             }
 
-            return 'http://localhost:5001';
+            return '';
         };
 
         const baseUrl = resolveApiBase();

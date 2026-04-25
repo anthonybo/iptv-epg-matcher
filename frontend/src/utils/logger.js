@@ -362,7 +362,7 @@ class FrontendLogger {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const response = await fetch(`http://localhost:5001${this.endpoint}`, {
+      const response = await fetch(`${this.endpoint}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ logs })

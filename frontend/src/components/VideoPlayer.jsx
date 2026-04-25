@@ -40,7 +40,7 @@ const VideoPlayer = ({ channel }) => {
       
       if (!videoElement) return;
 
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
+      const apiUrl = import.meta.env.VITE_API_URL || '/api';
       const streamUrl = `${apiUrl}/stream/${SESSION_ID}/${channel.tvgId}?format=ts`;
       
       console.log(`Attempting to play stream from URL: ${streamUrl}`);
@@ -168,7 +168,7 @@ const VideoPlayer = ({ channel }) => {
         const videoElement = videoRef.current;
         if (!videoElement) return;
         
-        const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5001/api';
+        const apiUrl = import.meta.env.VITE_API_URL || '/api';
         const streamUrl = `${apiUrl}/stream/${SESSION_ID}/${channel.tvgId}?format=ts`;
         
         const player = mpegts.createPlayer({

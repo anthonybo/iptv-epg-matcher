@@ -58,7 +58,7 @@ export function initializeMpegtsPlayer(ctx) {
 export function validateStreamUrl(ctx, url) {
   const { log, sessionId, selectedChannel, getChannelId } = ctx;
 
-  if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+  if (!url || typeof url !== 'string' || !(url.startsWith('http') || url.startsWith('/'))) {
     log('error', 'Invalid stream URL', { url });
     return false;
   }
@@ -130,10 +130,10 @@ export function initializeMpegtsPlayerInstance(ctx) {
   // proxy connection we don't want to churn.
   let baseTsUrl;
   if (shouldUseResilientProxy) {
-    baseTsUrl = `http://localhost:5001/api/stream/resilient/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    baseTsUrl = `/api/stream/resilient/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
     log('info', 'Using resilient stream proxy (backend-level retry)');
   } else {
-    baseTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    baseTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
   }
   if (selectedChannel?.sourceId) {
     baseTsUrl += `&source_id=${selectedChannel.sourceId}`;

@@ -42,7 +42,7 @@ const ReactPlayerComponent = ({ sessionId, selectedChannel }) => {
       setStreamUrl(selectedChannel.url);
     } else {
       // Fall back to the proxy stream URL
-      const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+      const baseUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
       const proxyUrl = addAuthToStreamUrl(baseUrl);
       console.log('[INFO] Using proxy stream URL:', proxyUrl);
       setStreamUrl(proxyUrl);

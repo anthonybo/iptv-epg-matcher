@@ -77,7 +77,7 @@ const HLSPlayer = ({ sessionId, selectedChannel }) => {
       });
 
       // Create URL for the backend proxy endpoint
-      const baseUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(channelId)}`;
+      const baseUrl = `/api/stream/${sessionId}/${encodeURIComponent(channelId)}`;
       const proxyUrl = addAuthToStreamUrl(baseUrl);
       console.log('[INFO] Using proxy stream URL:', proxyUrl);
       
@@ -89,7 +89,7 @@ const HLSPlayer = ({ sessionId, selectedChannel }) => {
         xhrSetup: (xhr) => {
           // Add custom headers for IPTV stream request
           xhr.setRequestHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-          xhr.setRequestHeader('Referer', 'http://localhost:5001/');
+          xhr.setRequestHeader('Referer', '/');
         }
       });
       

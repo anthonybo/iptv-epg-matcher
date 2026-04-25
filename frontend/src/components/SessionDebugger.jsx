@@ -63,7 +63,7 @@ const resolveApiBase = () => {
     return `${window.location.protocol}//${window.location.hostname}:5001`;
   }
 
-  return 'http://localhost:5001';
+  return '';
 };
 
 const SessionDebugger = ({ isOpen, onClose }) => {

@@ -34,7 +34,7 @@ export const SESSION_ID = getSessionId();
 export const apiSlice = createApi({
   reducerPath: 'api',
   baseQuery: fetchBaseQuery({ 
-    baseUrl: import.meta.env.VITE_API_URL || 'http://localhost:5001/api',
+    baseUrl: import.meta.env.VITE_API_URL || '/api',
     // Add custom headers if needed
     prepareHeaders: (headers) => {
       const sessionId = getSessionId();
@@ -99,7 +99,7 @@ class SSEManager {
     }
 
     const currentSessionId = getSessionId(); // Get current ID
-    const url = `${import.meta.env.VITE_API_URL || 'http://localhost:5001/api'}/stream-updates/${currentSessionId}`;
+    const url = `${import.meta.env.VITE_API_URL || '/api'}/stream-updates/${currentSessionId}`;
     
     try {
       console.log(`[SSE] Connecting to SSE stream at ${url}`);

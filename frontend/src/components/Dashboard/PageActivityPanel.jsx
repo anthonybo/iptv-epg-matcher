@@ -15,7 +15,7 @@ const PageActivityPanel = () => {
     const fetchSessions = async () => {
       try {
         const baseUrl = window.location.hostname === 'localhost'
-          ? 'http://localhost:5001'
+          ? ''
           : window.location.origin;
 
         console.log('[PageActivityPanel] Fetching sessions from:', `${baseUrl}/api/metrics/sessions/active`);

@@ -220,7 +220,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
 
       const baseUrl = window.location.hostname === 'localhost'
-        ? 'http://localhost:5001'
+        ? ''
         : window.location.origin;
 
       const streamUrl = `${baseUrl}/api/stream/${sessionId}/${channel.id}?source_id=${channel.sourceId}`;

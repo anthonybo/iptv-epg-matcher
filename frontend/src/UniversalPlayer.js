@@ -135,8 +135,8 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
 
     // Determine the stream URLs for different methods
     const directUrl = selectedChannel.url || '';
-    const proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
-    const proxyHlsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+    const proxyTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+    const proxyHlsUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
     
     // Start with iframe method (most compatible)
     setPlaybackMethod('iframe');
@@ -185,7 +185,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
       setPlaybackMethod('hls');
       
       // Use HLS URL through the proxy
-      const proxyHlsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+      const proxyHlsUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
       setStreamUrl(proxyHlsUrl);
       setupHlsPlayback(proxyHlsUrl);
     } 
@@ -196,7 +196,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
       
       // Try direct URL if available, otherwise use proxy TS URL
       const directUrl = selectedChannel.url || '';
-      const proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+      const proxyTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
       const nativeUrl = directUrl || proxyTsUrl;
       
       setStreamUrl(nativeUrl);
@@ -208,7 +208,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
       setPlaybackMethod('videojs');
       
       // Try proxy TS URL with Video.js
-      const proxyTsUrl = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+      const proxyTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
       setStreamUrl(proxyTsUrl);
       setupVideoJSPlayback(proxyTsUrl);
     }
@@ -703,7 +703,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
           onClick={() => {
             setPlaybackMethod('iframe');
             cleanupPlayback();
-            setStreamUrl(`http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`);
+            setStreamUrl(`/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`);
           }}
           style={{
             background: playbackMethod === 'iframe' ? '#4CAF50' : '#333',
@@ -722,7 +722,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
           onClick={() => {
             setPlaybackMethod('hls');
             cleanupPlayback();
-            const url = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
+            const url = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}`;
             setStreamUrl(url);
             setupHlsPlayback(url);
           }}
@@ -743,7 +743,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
           onClick={() => {
             setPlaybackMethod('native');
             cleanupPlayback();
-            const url = selectedChannel.url || `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+            const url = selectedChannel.url || `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
             setStreamUrl(url);
             setupNativePlayback(url);
           }}
@@ -764,7 +764,7 @@ const UniversalPlayer = ({ sessionId, selectedChannel }) => {
           onClick={() => {
             setPlaybackMethod('videojs');
             cleanupPlayback();
-            const url = `http://localhost:5001/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
+            const url = `/api/stream/${sessionId}/${encodeURIComponent(selectedChannel.tvgId)}?format=ts`;
             setStreamUrl(url);
             setupVideoJSPlayback(url);
           }}
