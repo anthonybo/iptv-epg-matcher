@@ -81,7 +81,11 @@ export default function useStreamRecovery({
   const MAX_TOTAL_RECOVERY_ATTEMPTS = theatreMode ? 10 : 20;
   const RECOVERY_WINDOW_MS = theatreMode ? 30000 : 60000;
   const MAX_RECOVERIES_IN_WINDOW = theatreMode ? 4 : 6;
-  const MAX_STALE_TIME_MS = 120000;
+  // Resilient proxy mode: backend has ~30-35s retry budget (20s stale
+  // threshold + 3 retries with backoff), so wait ~45s before promoting
+  // to dead. Non-resilient: frontend recovery is doing the work, so the
+  // 120s ceiling is just a safety net.
+  const MAX_STALE_TIME_MS = shouldUseResilientProxy ? 45000 : 120000;
   const MAX_SOFT_RECOVERIES = 3;
 
   const clearRecoveryState = (decrementActive = false) => {

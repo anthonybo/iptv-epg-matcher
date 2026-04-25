@@ -1020,6 +1020,218 @@ router.get('/xtream/:sessionId/:type/:id', async (req, res) => {
 });
 
 // ============================================================================
+// FFMPEG-BACKED STREAM ENDPOINT - Use ffmpeg for upstream resilience
+// ============================================================================
+// Why ffmpeg instead of raw fetch():
+//   - mpegts.js hard-codes "no auto-reconnect on live EOF" (io-controller.js
+//     EARLY_EOF branch). When Xtream closes the socket the player gives up.
+//   - ffmpeg's HTTP demuxer has -reconnect_at_eof / -reconnect_streamed which
+//     transparently reopen the upstream socket on EOF or network error. The
+//     downstream demuxer never sees the gap. This is what every production
+//     IPTV-on-web project (NodeCast TV, IPTV-Restream, Threadfin, xTeVe,
+//     Dispatcharr) does.
+//   - Plus +genpts+igndts+discardcorrupt absorbs PCR/PTS discontinuities
+//     between reconnects so mpegts.js doesn't choke on them.
+//
+// `-c copy` means no transcoding — ffmpeg just rewraps bytes, ~3-5% of one
+// core per stream.
+
+const FFMPEG_BINARY = process.env.FFMPEG_PATH || 'ffmpeg';
+
+/**
+ * Spawn ffmpeg with HTTP reconnect flags and pipe output to res.
+ * Replaces createResilientStreamConnection's fetch-with-manual-retry loop.
+ */
+function createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, logger) {
+    const startTime = Date.now();
+    let totalBytesStreamed = 0;
+    let isDestroyed = false;
+    let ffmpegProc = null;
+
+    resilientStreams.set(streamKey, {
+        channel: channel.name,
+        url: streamUrl,
+        startTime,
+        mode: 'ffmpeg'
+    });
+
+    const cleanup = (reason = 'unknown') => {
+        if (isDestroyed) return;
+        isDestroyed = true;
+
+        logger.info(`[FFMPEG ${streamKey}] Cleanup (${reason}, streamed ${(totalBytesStreamed / 1024 / 1024).toFixed(2)} MB after ${Math.round((Date.now() - startTime) / 1000)}s)`);
+
+        if (ffmpegProc && !ffmpegProc.killed) {
+            try {
+                ffmpegProc.kill('SIGKILL');
+            } catch (e) {
+                // Already gone.
+            }
+        }
+
+        resilientStreams.delete(streamKey);
+        metricsService.trackStreamEnd(streamKey);
+    };
+
+    // Stalker portals require MAC cookie + STB user-agent on every request.
+    // ffmpeg only takes one -user_agent + a single -headers blob (CRLF
+    // separated), so build them up here.
+    const isStalker = channel.source_type === 'stalker';
+    const userAgent = isStalker
+        ? 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3'
+        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36';
+    const extraHeaders = [];
+    if (isStalker) {
+        extraHeaders.push('X-User-Agent: Model: MAG250; Link: WiFi');
+        extraHeaders.push(`Cookie: mac=${channel.source_mac || '00:1A:79:00:00:00'}; stb_lang=en; timezone=America/New_York`);
+    }
+
+    const ffmpegArgs = [
+        '-hide_banner',
+        '-loglevel', 'warning',
+        '-user_agent', userAgent,
+    ];
+    if (extraHeaders.length) {
+        ffmpegArgs.push('-headers', extraHeaders.join('\r\n') + '\r\n');
+    }
+    ffmpegArgs.push(
+        // HTTP reconnect knobs — these are why this works.
+        '-reconnect', '1',
+        '-reconnect_at_eof', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_on_network_error', '1',
+        '-reconnect_on_http_error', '4xx,5xx',
+        '-reconnect_delay_max', '30',
+        // Read timeout per fetch attempt (microseconds). 15s.
+        '-rw_timeout', '15000000',
+        // Discontinuity tolerance.
+        '-fflags', '+genpts+igndts+discardcorrupt',
+        '-err_detect', 'ignore_err',
+        '-i', streamUrl,
+        // Stream copy — no decode/encode.
+        '-c', 'copy',
+        '-copyts',
+        '-muxdelay', '0',
+        '-f', 'mpegts',
+        'pipe:1'
+    );
+
+    logger.info(`[FFMPEG ${streamKey}] Spawning ffmpeg for: ${streamUrl.substring(0, 80)}...`);
+
+    try {
+        ffmpegProc = spawn(FFMPEG_BINARY, ffmpegArgs, {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+    } catch (e) {
+        logger.error(`[FFMPEG ${streamKey}] Failed to spawn ffmpeg: ${e.message}`);
+        recordSourceFailure(streamUrl, channel?.source_username, e);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Failed to start stream process' });
+        } else {
+            res.end();
+        }
+        cleanup('spawn_failed');
+        return;
+    }
+
+    let firstChunkReceived = false;
+    ffmpegProc.stdout.on('data', (chunk) => {
+        if (isDestroyed) return;
+        if (!firstChunkReceived) {
+            firstChunkReceived = true;
+            logger.info(`[FFMPEG ${streamKey}] First chunk received, stream is live`);
+            recordSourceSuccess(streamUrl, channel?.source_username);
+        }
+        totalBytesStreamed += chunk.length;
+        try {
+            const ok = res.write(chunk);
+            // Backpressure: pause ffmpeg's stdout if the client can't keep up.
+            // Otherwise ffmpeg will buffer in our process and OOM under load.
+            if (!ok) {
+                ffmpegProc.stdout.pause();
+                res.once('drain', () => {
+                    if (!isDestroyed) ffmpegProc.stdout.resume();
+                });
+            }
+        } catch (err) {
+            logger.error(`[FFMPEG ${streamKey}] Write error: ${err.message}`);
+            cleanup('write_error');
+        }
+    });
+
+    // Capture stderr for diagnostics. Log warnings/errors but don't act on
+    // them — ffmpeg's exit code is the source of truth.
+    let stderrBuf = '';
+    ffmpegProc.stderr.on('data', (data) => {
+        const text = data.toString();
+        stderrBuf = (stderrBuf + text).slice(-4096);
+        // Only surface lines that look meaningful — ffmpeg is chatty.
+        text.split('\n').forEach((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            if (/error|fatal|invalid|failed/i.test(trimmed)) {
+                logger.warn(`[FFMPEG ${streamKey}] ${trimmed}`);
+            }
+        });
+    });
+
+    ffmpegProc.on('error', (err) => {
+        logger.error(`[FFMPEG ${streamKey}] Process error: ${err.message}`);
+        recordSourceFailure(streamUrl, channel?.source_username, err);
+        if (!res.headersSent) {
+            res.status(502).json({ error: 'Stream process error', details: err.message });
+        }
+        cleanup('process_error');
+    });
+
+    ffmpegProc.on('exit', (code, signal) => {
+        if (isDestroyed) return;
+        const ranFor = Math.round((Date.now() - startTime) / 1000);
+        if (signal === 'SIGKILL' || signal === 'SIGTERM') {
+            logger.info(`[FFMPEG ${streamKey}] Killed by signal ${signal} after ${ranFor}s`);
+        } else if (code === 0) {
+            logger.info(`[FFMPEG ${streamKey}] Exited cleanly after ${ranFor}s`);
+        } else {
+            logger.warn(`[FFMPEG ${streamKey}] Exited with code ${code} after ${ranFor}s. Last stderr: ${stderrBuf.split('\n').slice(-3).join(' | ')}`);
+            // Only count as a source failure if we never got data — otherwise
+            // it's just the source being intermittent, which the circuit
+            // breaker should not punish.
+            if (!firstChunkReceived) {
+                recordSourceFailure(streamUrl, channel?.source_username, new Error(`ffmpeg exit ${code}`));
+            }
+        }
+        try { res.end(); } catch (e) { /* already ended */ }
+        cleanup(`exit_${code ?? signal}`);
+    });
+
+    req.on('close', () => {
+        if (!isDestroyed) {
+            logger.info(`[FFMPEG ${streamKey}] Client disconnected`);
+        }
+        cleanup('client_disconnect');
+    });
+
+    res.on('error', (err) => {
+        logger.error(`[FFMPEG ${streamKey}] Response error: ${err.message}`);
+        cleanup('response_error');
+    });
+
+    // Hard cap on stream duration (matches old RESILIENT_CONFIG.maxStreamDuration).
+    const maxDurationTimer = setTimeout(() => {
+        logger.info(`[FFMPEG ${streamKey}] Max stream duration (4h) reached`);
+        cleanup('max_duration');
+    }, RESILIENT_CONFIG.maxStreamDuration);
+    ffmpegProc.on('exit', () => clearTimeout(maxDurationTimer));
+
+    metricsService.trackStreamStart(streamKey, {
+        channel: channel.name,
+        channelId: channel.id,
+        source: channel.groupTitle || 'Unknown',
+        type: 'ffmpeg'
+    });
+}
+
+// ============================================================================
 // RESILIENT STREAM ENDPOINT - Automatic retry/reconnect at proxy level
 // ============================================================================
 
@@ -1446,8 +1658,11 @@ router.get('/resilient/:sessionId/:channelId', authMiddleware, async (req, res) 
         // Create unique stream key
         const streamKey = `resilient_${sessionId}_${channelId}_${Date.now()}`;
 
-        // Start resilient streaming (pass streamUrl for circuit breaker recording)
-        await createResilientStreamConnection(streamUrl, streamKey, channel, res, req, logger);
+        // Use ffmpeg-backed pipeline so upstream EOF/network drops are
+        // transparently recovered before they reach mpegts.js. The old
+        // fetch-loop implementation (createResilientStreamConnection) is
+        // kept in this file but no longer called.
+        createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, logger);
 
     } catch (error) {
         logger.error(`[RESILIENT] Stream error: ${error.message}`, {
