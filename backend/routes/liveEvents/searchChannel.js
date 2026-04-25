@@ -13,6 +13,7 @@ const { execFileAsync, httpAgent, httpsAgent } = require('../../utils/streamAgen
 const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/channelScoring');
 const teamMatcher = require('../../utils/teamMatcher');
 const teamAliasesService = require('../../services/teamAliasesService');
+const { expandBroadcastersList } = require('../../utils/broadcasterAliases');
 
 /**
  * POST /api/live-events/search-channel
@@ -92,15 +93,17 @@ router.post('/search-channel', async (req, res) => {
     // "Rapids") get pushed below minScore via a league-conflict penalty.
     let sportType = sportTypeHint;
     let leagueName = leagueNameHint;
-    if (espnEventId && (!sportType || !leagueName)) {
+    let broadcasts = [];
+    if (espnEventId) {
       try {
         const eventLookup = await postgresService.query(
-          `SELECT sport_type, league_name FROM live_events WHERE event_id = $1 LIMIT 1`,
+          `SELECT sport_type, league_name, broadcasts FROM live_events WHERE event_id = $1 LIMIT 1`,
           [espnEventId]
         );
         if (eventLookup.rows.length > 0) {
           sportType = sportType || eventLookup.rows[0].sport_type;
           leagueName = leagueName || eventLookup.rows[0].league_name;
+          broadcasts = eventLookup.rows[0].broadcasts || [];
         }
       } catch (err) {
         logger.warn(`[Find Alternative] Event lookup failed for ${espnEventId}: ${err.message}`);
@@ -109,7 +112,14 @@ router.post('/search-channel', async (req, res) => {
     if (sportType || leagueName) {
       logger.info(`[Find Alternative] Scoring context — sport: ${sportType || 'n/a'}, league: ${leagueName || 'n/a'}`);
     }
-    const scoringContext = { sportType, leagueName };
+    // Broadcaster aliases let us pull in generic-named channels (e.g.
+    // ":BTN+ 25") when ESPN says the game is on B1G+. Without these we
+    // were missing every conference-network channel in the user's DB.
+    const broadcasterTerms = expandBroadcastersList(broadcasts);
+    if (broadcasterTerms.length > 0) {
+      logger.info(`[Find Alternative] Broadcasters: ${broadcasts.join(', ')} → search terms: ${broadcasterTerms.join(', ')}`);
+    }
+    const scoringContext = { sportType, leagueName, broadcasterTerms };
 
     // Extract search terms using fuzzy matching logic (handles event names like "Temple Owls at Villanova Wildcats")
     const eventMatch = searchQuery.match(/^(.+?)\s+(?:at|vs\.?|@)\s+(.+?)$/i);
@@ -168,9 +178,13 @@ router.post('/search-channel', async (req, res) => {
 
     logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
 
-    // Build base query parameters (without LIMIT/OFFSET which will be added per batch)
-    const channelConditions = searchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
-    const searchParams = searchTerms.map(term => `%${term}%`);
+    // Combine team-name terms with broadcaster aliases so the SQL filter
+    // pulls both signals into the candidate pool. The relevance scorer
+    // (which knows about broadcasters via the channel_name match plus
+    // EPG confirmation) sorts the right one to the top.
+    const allSearchTerms = [...searchTerms, ...broadcasterTerms];
+    const channelConditions = allSearchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
+    const searchParams = allSearchTerms.map(term => `%${term}%`);
     let baseQueryParams = [userId, ...searchParams];
 
     // Build scoring conditions for SQL

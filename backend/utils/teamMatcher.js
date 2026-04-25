@@ -99,6 +99,36 @@ const LEAGUE_SPORT = {
   mlb: 'baseball'
 };
 
+// Generic sport-marker keywords. Used as a fallback cross-sport penalty
+// when LEAGUE_KEYWORDS doesn't cover a sport (volleyball, lacrosse,
+// tennis, softball, etc.). Without this, a search for College Baseball
+// scored "Beach Volleyball: USC Trojans vs Cal" at 150 because the
+// volleyball channel doesn't contain any LEAGUE_KEYWORDS entry — the
+// cross-sport penalty couldn't fire and a false match won.
+//
+// Keys are the canonical sport (matches LEAGUE_SPORT values + a few we
+// don't have leagues for); values are word-boundary keywords that
+// indicate this sport is in the channel name.
+const SPORT_KEYWORDS = {
+  soccer: ['soccer', 'futbol', 'fussball'],
+  hockey: ['hockey', 'nhl'],
+  basketball: ['basketball', 'nba', 'wnba'],
+  football: ['nfl', 'gridiron'],
+  baseball: ['baseball', 'mlb'],
+  volleyball: ['volleyball', 'beach volleyball', 'volley'],
+  lacrosse: ['lacrosse'],
+  tennis: ['tennis', 'atp', 'wta'],
+  softball: ['softball'],
+  golf: ['golf', 'pga', 'lpga'],
+  mma: ['ufc', 'mma', 'bellator'],
+  racing: ['nascar', 'indycar', 'formula 1', 'formula1', 'f1 ', 'motogp'],
+  rugby: ['rugby', 'rugby league', 'nrl', 'super rugby'],
+  cricket: ['cricket', 'ipl', 't20'],
+  'australian-football': ['afl', 'australian football', 'aussie rules'],
+  gymnastics: ['gymnastics'],
+  wrestling: ['wwe', 'aew', 'wrestling']
+};
+
 function normalizeLeague(leagueName) {
   if (!leagueName) return null;
   const lower = String(leagueName).toLowerCase();
@@ -239,6 +269,23 @@ function scoreLeagueContext(scrubbed, sportType, leagueName) {
     }
   }
 
+  // Generic sport-marker fallback. LEAGUE_KEYWORDS only covers a
+  // handful of leagues — volleyball, lacrosse, tennis, softball etc.
+  // are missed and let "Beach Volleyball: USC Trojans" match a search
+  // for "USC Trojans" college baseball. Apply the same -120 penalty
+  // when ANY other sport's keyword is in the channel name.
+  if (targetSport) {
+    for (const [sport, keywords] of Object.entries(SPORT_KEYWORDS)) {
+      if (sport === targetSport) continue;
+      for (const kw of keywords) {
+        if (wordContains(scrubbed, kw)) {
+          score -= 120;
+          return score;
+        }
+      }
+    }
+  }
+
   return score;
 }
 
@@ -302,6 +349,36 @@ function scoreText(text, homeAliases, awayAliases, context = {}) {
 function matchChannel(channel, homeAliases, awayAliases, context = {}) {
   const nameResult = scoreText(channel.name, homeAliases, awayAliases, context);
 
+  // Broadcaster bonus. ESPN tells us the network airing the game (e.g.
+  // B1G+ for the Purdue/USC College Baseball game). Conference network
+  // channels in IPTV ("BTN+ 25", "ACCNX 03", etc.) carry that game but
+  // have no team name in their channel name and often no tvg_id, so
+  // both the name scorer and the EPG path return zero. Without this
+  // bonus they get filtered out before we ever try to play one.
+  // We use substring (case-insensitive) match here rather than the
+  // word-boundary `wordContains` because broadcasters routinely have
+  // non-word chars (BTN+, ESPN+, ACC Extra) that break \b regex.
+  let broadcasterBonus = 0;
+  let broadcasterMatched = null;
+  const broadcasters = context.broadcasterTerms || [];
+  if (broadcasters.length > 0 && channel.name) {
+    const upperName = channel.name.toUpperCase();
+    for (const term of broadcasters) {
+      if (!term) continue;
+      const upperTerm = String(term).toUpperCase();
+      if (upperTerm.length < 2) continue;
+      if (upperName.includes(upperTerm)) {
+        // 120 puts it just above the 100 minScore threshold the
+        // search-channel route uses for two-team queries — enough to
+        // get tested, not so high that it beats real team-name
+        // matches when both exist.
+        broadcasterBonus = 120;
+        broadcasterMatched = upperTerm;
+        break;
+      }
+    }
+  }
+
   let programResult = null;
   let programBonus = 0;
   let epgConfirmed = false;
@@ -332,10 +409,12 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
   }
 
   return {
-    score: nameResult.score + programBonus,
+    score: nameResult.score + programBonus + broadcasterBonus,
     details: {
       nameScore: nameResult.score,
       programBonus,
+      broadcasterBonus,
+      broadcasterMatched,
       epgConfirmed,
       epgMismatch,
       hasEpgProgram: Boolean(channel.currentProgramTitle),

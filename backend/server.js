@@ -1069,23 +1069,32 @@ if (EPG_AUTO_REFRESH_ENABLED) {
 // Set up automatic live events refresh schedule
 // Run daily at 6 AM to fetch upcoming sports events
 const liveEventsService = require('./services/liveEventsService');
-logger.info('Setting up automatic live events refresh schedule: Daily at 6:00 AM');
+// Live events table needs to stay current as today's games progress —
+// daily-at-6am missed any game that started after the cron tick (and
+// any cron miss left us 24h+ stale, which was the "MLB game live but
+// not in ticker" symptom). Refresh every 3h plus once on startup.
+logger.info('Setting up automatic live events refresh schedule: every 3 hours + on startup');
 
-cron.schedule('0 6 * * *', async () => {
-  logger.info('Starting scheduled live events refresh');
-
+const runLiveEventsRefresh = async (trigger = 'scheduled') => {
+  logger.info(`Starting live events refresh (${trigger})`);
   try {
     const result = await liveEventsService.refreshLiveEvents();
-
     if (result.success) {
-      logger.info(`Scheduled live events refresh completed: fetched=${result.totalFetched}, stored=${result.totalStored}, errors=${result.errors}`);
+      logger.info(`Live events refresh completed (${trigger}): fetched=${result.totalFetched}, stored=${result.totalStored}, errors=${result.errors}`);
     } else {
-      logger.error(`Scheduled live events refresh failed: ${result.error}`);
+      logger.error(`Live events refresh failed (${trigger}): ${result.error}`);
     }
   } catch (error) {
-    logger.error(`Scheduled live events refresh error: ${error.message}`);
+    logger.error(`Live events refresh error (${trigger}): ${error.message}`);
   }
-});
+};
+
+cron.schedule('0 */3 * * *', () => runLiveEventsRefresh('cron'));
+
+// Fire once at startup, after a short delay so the DB pool + other
+// services are ready. setTimeout instead of awaiting at module load so
+// the HTTP server can come up immediately.
+setTimeout(() => runLiveEventsRefresh('startup'), 5000);
 
 logger.info('Automatic live events refresh schedule configured successfully');
 

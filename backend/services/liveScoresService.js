@@ -7,52 +7,17 @@
 const axios = require('axios');
 const logger = require('../config/logger');
 const postgresService = require('./postgresService');
+const { SPORTS_TO_FETCH } = require('./liveEventsService');
 
 // ESPN API configuration
 const ESPN_BASE_URL = 'http://site.api.espn.com/apis/site/v2/sports';
 
-// Sports configuration - same as liveEventsService for consistency
-const SPORTS_CONFIG = [
-  // American Football
-  { sport: 'football', league: 'nfl', name: 'NFL' },
-  { sport: 'football', league: 'college-football', name: 'NCAAF' },
-
-  // Basketball
-  { sport: 'basketball', league: 'nba', name: 'NBA' },
-  { sport: 'basketball', league: 'mens-college-basketball', name: 'NCAAB' },
-  { sport: 'basketball', league: 'womens-college-basketball', name: 'WCAAB' },
-  { sport: 'basketball', league: 'wnba', name: 'WNBA' },
-
-  // Hockey
-  { sport: 'hockey', league: 'nhl', name: 'NHL' },
-
-  // Soccer
-  { sport: 'soccer', league: 'eng.1', name: 'Premier League' },
-  { sport: 'soccer', league: 'usa.1', name: 'MLS' },
-  { sport: 'soccer', league: 'esp.1', name: 'La Liga' },
-  { sport: 'soccer', league: 'ger.1', name: 'Bundesliga' },
-  { sport: 'soccer', league: 'ita.1', name: 'Serie A' },
-  { sport: 'soccer', league: 'fra.1', name: 'Ligue 1' },
-  { sport: 'soccer', league: 'uefa.champions', name: 'Champions League' },
-  { sport: 'soccer', league: 'uefa.europa', name: 'Europa League' },
-  { sport: 'soccer', league: 'mex.1', name: 'Liga MX' },
-
-  // Combat Sports
-  { sport: 'mma', league: 'ufc', name: 'UFC' },
-
-  // Golf
-  { sport: 'golf', league: 'pga', name: 'PGA' },
-
-  // Tennis
-  { sport: 'tennis', league: 'atp', name: 'ATP' },
-  { sport: 'tennis', league: 'wta', name: 'WTA' },
-
-  // Baseball
-  { sport: 'baseball', league: 'mlb', name: 'MLB' },
-
-  // Racing
-  { sport: 'racing', league: 'f1', name: 'Formula 1' },
-];
+// Source of truth lives in liveEventsService — these two used to be two
+// hand-maintained copies and drifted, causing leagues like NCAA Lacrosse,
+// AFL, EFL Championship, IndyCar etc. to be inserted into live_events
+// (by the events service) but never have their is_live flag flipped
+// (because this service didn't know about them). Reuse the same list.
+const SPORTS_CONFIG = SPORTS_TO_FETCH;
 
 // Background update interval reference
 let updateInterval = null;
@@ -119,7 +84,10 @@ function parseGameStatus(status, competition) {
  */
 async function fetchScoresFromESPN(sport, league) {
   try {
-    const url = `${ESPN_BASE_URL}/${sport}/${league}/scoreboard`;
+    // Match liveEventsService — boxing/wrestling have no league segment.
+    const url = league
+      ? `${ESPN_BASE_URL}/${sport}/${league}/scoreboard`
+      : `${ESPN_BASE_URL}/${sport}/scoreboard`;
 
     const response = await axios.get(url, { timeout: 8000 });
 
