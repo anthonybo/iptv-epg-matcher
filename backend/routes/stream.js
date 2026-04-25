@@ -1047,6 +1047,7 @@ function createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, l
     let totalBytesStreamed = 0;
     let isDestroyed = false;
     let ffmpegProc = null;
+    let noDataTimer = null;
 
     resilientStreams.set(streamKey, {
         channel: channel.name,
@@ -1061,6 +1062,8 @@ function createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, l
 
         logger.info(`[FFMPEG ${streamKey}] Cleanup (${reason}, streamed ${(totalBytesStreamed / 1024 / 1024).toFixed(2)} MB after ${Math.round((Date.now() - startTime) / 1000)}s)`);
 
+        if (noDataTimer) clearInterval(noDataTimer);
+
         if (ffmpegProc && !ffmpegProc.killed) {
             try {
                 ffmpegProc.kill('SIGKILL');
@@ -1068,6 +1071,8 @@ function createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, l
                 // Already gone.
             }
         }
+
+        try { res.end(); } catch (_) { /* already ended */ }
 
         resilientStreams.delete(streamKey);
         metricsService.trackStreamEnd(streamKey);
@@ -1101,9 +1106,14 @@ function createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, l
         '-reconnect_streamed', '1',
         '-reconnect_on_network_error', '1',
         '-reconnect_on_http_error', '4xx,5xx',
-        '-reconnect_delay_max', '30',
-        // Read timeout per fetch attempt (microseconds). 15s.
-        '-rw_timeout', '15000000',
+        '-reconnect_delay_max', '8',
+        // Cap retries so a permanently-dead source doesn't trap us in
+        // an infinite loop. After this many failures ffmpeg exits and
+        // our process watchdog tears the response down so the frontend
+        // can pick an alternative.
+        '-reconnect_max_retries', '4',
+        // Read timeout per fetch attempt (microseconds). 8s.
+        '-rw_timeout', '8000000',
         // Discontinuity tolerance.
         '-fflags', '+genpts+igndts+discardcorrupt',
         '-err_detect', 'ignore_err',
@@ -1135,8 +1145,25 @@ function createFfmpegStreamConnection(streamUrl, streamKey, channel, res, req, l
     }
 
     let firstChunkReceived = false;
+    let lastDataAt = Date.now();
+    // No-data watchdog: if ffmpeg's reconnect loop drags on without
+    // producing bytes (dead source returning empty 200s, etc.) the
+    // frontend is sitting there frozen. Bail after 25s so the client
+    // can pick an alternative.
+    const NO_DATA_WATCHDOG_MS = 25000;
+    noDataTimer = setInterval(() => {
+        if (isDestroyed) return;
+        const idleMs = Date.now() - lastDataAt;
+        if (idleMs > NO_DATA_WATCHDOG_MS) {
+            logger.warn(`[FFMPEG ${streamKey}] No data for ${Math.round(idleMs / 1000)}s — killing stream so client can fail over`);
+            recordSourceFailure(streamUrl, channel?.source_username, new Error('no_data_watchdog'));
+            cleanup('no_data_watchdog');
+        }
+    }, 5000);
+
     ffmpegProc.stdout.on('data', (chunk) => {
         if (isDestroyed) return;
+        lastDataAt = Date.now();
         if (!firstChunkReceived) {
             firstChunkReceived = true;
             logger.info(`[FFMPEG ${streamKey}] First chunk received, stream is live`);
