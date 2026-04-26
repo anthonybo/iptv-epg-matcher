@@ -14,6 +14,8 @@ const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/cha
 const teamMatcher = require('../../utils/teamMatcher');
 const teamAliasesService = require('../../services/teamAliasesService');
 const { expandBroadcastersList, expandLeagueBroadcastersFallback } = require('../../utils/broadcasterAliases');
+const { findChannelsByEpg } = require('../../utils/epgSearch');
+const { lookupSoccerBroadcasters } = require('../../utils/liveSoccerTvEnricher');
 
 /**
  * POST /api/live-events/search-channel
@@ -133,6 +135,27 @@ router.post('/search-channel', async (req, res) => {
       broadcasterTerms = expandLeagueBroadcastersFallback(leagueName);
       if (broadcasterTerms.length > 0) {
         logger.info(`[Find Alternative] Broadcasters from league fallback (${leagueName}): ${broadcasterTerms.length} search terms`);
+      }
+    }
+
+    // Phase 2: still no broadcasters and the event is a soccer match?
+    // Try LiveSoccerTV — they scrape region-aware "what TV channel is
+    // this match on" data covering ~50 leagues including all the long-
+    // tail ones our static map doesn't have great coverage for
+    // (Brasileirão, Argentine Primera, J/K League, MLS, Liga MX, etc.).
+    // This is a single ~1-2s HTTP scrape gated by an in-memory 1h
+    // cache, so the same event clicked twice in an hour is free.
+    if (broadcasterTerms.length === 0 && sportType === 'Soccer' && homeTeam && awayTeam) {
+      const tvs = await lookupSoccerBroadcasters({
+        sportType,
+        leagueName,
+        homeTeam,
+        awayTeam,
+        eventStart: new Date().toISOString()
+      });
+      if (tvs.length > 0) {
+        broadcasterTerms = expandBroadcastersList(tvs);
+        logger.info(`[Find Alternative] Broadcasters from LiveSoccerTV: ${tvs.join(', ')} → ${broadcasterTerms.length} search terms`);
       }
     }
     const scoringContext = { sportType, leagueName, broadcasterTerms };
@@ -357,6 +380,132 @@ router.post('/search-channel', async (req, res) => {
     // "we tried and the streams were dead".
     let totalEpgAvailable = 0;
     let totalEpgConfirmed = 0;
+
+    // ─── EPG-first pre-pass ──────────────────────────────────────────
+    // Channels whose CURRENT EPG program contains both team names are
+    // the strongest possible signal — the broadcaster is literally
+    // airing this game right now. Test them BEFORE the broader name-
+    // and broadcaster-based candidate pool so we get to a working
+    // stream faster. Only runs when we have alias bundles for both
+    // teams (i.e. event-format query, not free-form text search).
+    if (homeAliases && awayAliases && !clientGone) {
+      writeLine({
+        type: 'progress',
+        phase: 'querying',
+        query: searchQuery,
+        batch: 0,
+        tested: 0,
+        matched: 0,
+        note: 'epg-first'
+      });
+
+      const epgHits = await findChannelsByEpg({
+        homeAliases,
+        awayAliases,
+        userId,
+        sessionId: req.params?.sessionId, // best-effort; the route doesn't consume it but resolveChannel may have
+        excludeSourceIds,
+        excludeChannelIds,
+        limit: 30
+      });
+
+      // Dedupe by (name, host) — same as the main loop does.
+      const hostOf = (url) => {
+        if (!url) return '';
+        try { return new URL(url).host.toLowerCase(); }
+        catch { return ''; }
+      };
+      const seenKeys = new Set();
+      const epgCandidates = [];
+      for (const hit of epgHits) {
+        const c = hit.channel;
+        const key = `${(c.name || '').toLowerCase().trim()}::${hostOf(c.source_url || c.url)}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        // Tag the candidate so we can prefer EPG-confirmed in the test
+        // results sort below.
+        epgCandidates.push({ ...c, _epgProgram: hit.epgTitle, _epgConfirmed: true });
+      }
+
+      if (epgCandidates.length > 0) {
+        logger.info(`[Find Alternative] EPG pre-pass: testing ${epgCandidates.length} EPG-confirmed channels first`);
+        writeLine({
+          type: 'progress',
+          phase: 'fetched',
+          query: searchQuery,
+          matched: epgCandidates.length,
+          tested: 0,
+          batch: 0,
+          note: 'epg-first'
+        });
+
+        // Test EPG candidates in parallel chunks, same as the main loop.
+        for (let i = 0; i < epgCandidates.length; i += PARALLEL_TESTS) {
+          if (clientGone) break;
+          const chunk = epgCandidates.slice(i, i + PARALLEL_TESTS);
+          const results = await Promise.all(chunk.map((channel, chunkIndex) => {
+            const globalIndex = i + chunkIndex;
+            logger.info(`Testing EPG-confirmed: ${channel.name} (currently airing "${channel._epgProgram?.substring(0, 80)}")`);
+            return testSingleChannel(channel, globalIndex);
+          }));
+
+          totalChannelsTested += chunk.length;
+          totalChannelsMatched += chunk.length;
+          totalEpgAvailable += chunk.length;
+          totalEpgConfirmed += chunk.length;
+
+          writeLine({
+            type: 'progress',
+            phase: 'tested',
+            query: searchQuery,
+            tested: totalChannelsTested,
+            matched: totalChannelsMatched,
+            lastCandidate: chunk[chunk.length - 1]?.name || null,
+            note: 'epg-first'
+          });
+
+          const successfulResults = results.filter(r => r.success).sort((a, b) => a.index - b.index);
+          for (const result of successfulResults) {
+            const channel = result.channel;
+            const streamHeight = result.height;
+
+            if (minHeight > 0 && streamHeight < minHeight) {
+              lowQualitySkipped++;
+              continue;
+            }
+
+            logger.info(`✓ Found EPG-confirmed channel: ${channel.name} (${streamHeight}p) airing "${channel._epgProgram?.substring(0, 60)}"`);
+            writeLine({
+              type: 'done',
+              success: true,
+              tested: totalChannelsTested,
+              matched: totalChannelsMatched,
+              channel: {
+                id: channel.id,
+                name: channel.name,
+                logo: channel.logo,
+                url: channel.url,
+                sourceId: channel.source_id,
+                sourceName: channel.source_name,
+                sourceType: channel.source_type,
+                sourceUrl: channel.source_url,
+                sourceUsername: channel.source_username,
+                sourcePassword: channel.source_password,
+                sourceMac: channel.source_mac,
+                category: channel.category,
+                quality: streamHeight,
+                searchQuery,
+                searchOffset: 0,
+                epgConfirmed: true,
+                epgProgram: channel._epgProgram
+              }
+            });
+            return res.end();
+          }
+        }
+        logger.info(`[Find Alternative] EPG pre-pass: tested ${epgCandidates.length}, none working — falling through to name/broadcaster search`);
+      }
+    }
 
     for (let batchNum = 0; batchNum < MAX_BATCHES; batchNum++) {
       if (clientGone) break;

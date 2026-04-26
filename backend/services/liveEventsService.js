@@ -64,7 +64,19 @@ async function refreshLiveEvents() {
                         event_start = EXCLUDED.event_start,
                         event_end = EXCLUDED.event_end,
                         source = EXCLUDED.source,
-                        broadcasts = EXCLUDED.broadcasts,
+                        -- Preserve broadcasts when the new payload is empty.
+                        -- TheSportsDB's free-tier eventstv.php / lookuptv.php
+                        -- routinely 1015-rate-limits during a refresh, so a
+                        -- subsequent refresh would otherwise wipe out the
+                        -- broadcasts we successfully fetched earlier. Once
+                        -- a broadcaster is known for an event it doesn't
+                        -- change, so sticky is correct.
+                        broadcasts = CASE
+                          WHEN EXCLUDED.broadcasts IS NOT NULL
+                               AND array_length(EXCLUDED.broadcasts, 1) > 0
+                          THEN EXCLUDED.broadcasts
+                          ELSE live_events.broadcasts
+                        END,
                         canonical_id = EXCLUDED.canonical_id,
                         sources = EXCLUDED.sources,
                         is_live = EXCLUDED.is_live,
