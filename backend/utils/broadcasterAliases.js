@@ -76,6 +76,117 @@ const BROADCASTER_ALIASES = {
   'BTN+': ['BTN+', 'B1G+'],
   'FloSports': ['FLOSPORTS', 'FLO HOOPS', 'FLO BASEBALL', 'FLO RACING', 'FLO WRESTLING'],
   'B1G+': ['B1G+', 'BTN+'],
+
+  // ── Australian ───────────────────────────────────────────────
+  // Fox Sports 501-507 channels — substrings include the channel
+  // number to avoid catching the unrelated 'FOX SPORTS' US lineup.
+  'Fox Sports AU': [
+    'FOX SPORTS 501', 'FOX SPORTS 502', 'FOX SPORTS 503',
+    'FOX SPORTS 504', 'FOX SPORTS 505', 'FOX SPORTS 506',
+    'FOX SPORTS 507', 'FOX SPORTS AU', 'FOX CRICKET', 'FOX LEAGUE',
+    'FOX FOOTY'
+  ],
+  'Fox Cricket': ['FOX CRICKET', 'FOX SPORTS 501'],
+  'Fox League':  ['FOX LEAGUE',  'FOX SPORTS 502'],
+  'Fox Footy':   ['FOX FOOTY'],
+  // AU-specific qualifier prefixes ('AU: CHANNEL 9', '|AU| Channel 9')
+  // keep us off Bangladesh's BD | CHANNEL 9.
+  'Channel 9 AU': [
+    'AU: CHANNEL 9', '|AU| CHANNEL 9',
+    'CHANNEL 9 (ADELAIDE)', 'CHANNEL 9 (BRISBANE)',
+    'CHANNEL 9 (MELBOURNE)', 'CHANNEL 9 (PERTH)', 'CHANNEL 9 (SYDNEY)',
+    'CHANNEL 9 ADELAIDE', 'CHANNEL 9 BRISBANE',
+    'CHANNEL 9 MELBOURNE', 'CHANNEL 9 PERTH',  'CHANNEL 9 SYDNEY'
+  ],
+  'Channel 7 AU': ['AU: CHANNEL 7', '|AU| CHANNEL 7', 'CHANNEL 7 ADELAIDE', 'CHANNEL 7 SYDNEY'],
+  '10 Sport AU': ['10 SPORT 01', '10 SPORT 02', '10 SPORT 03', '10 SPORT 04'],
+  'Kayo Sports':   ['KAYO'],
+  'Optus Sport':   ['OPTUS SPORT'],
+  'beIN Sports AU': ['AU | BEIN SPORTS', 'AU: BEIN SPORTS'],
+
+  // ── Indian / Cricket ────────────────────────────────────────
+  'Star Sports':  ['STAR SPORTS'],
+  'Sport18':      ['SPORT18', 'SPORTS18'],
+  'Willow':       ['WILLOW'],
+  'JioCinema':    ['JIOCINEMA', 'JIO CINEMA'],
+  'Hotstar':      ['HOTSTAR'],
+  'Sony Sports':  ['SONY SPORTS', 'SONY TEN', 'SONY SIX'],
+
+  // ── South American ──────────────────────────────────────────
+  'Premiere':     ['PREMIERE'],
+  'SporTV':       ['SPORTV'],
+  'Globo':        ['GLOBO ESPORTE', 'GLOBOSAT'],
+  'TyC Sports':   ['TYC SPORTS'],
+  'ESPN Argentina': ['ESPN ARGENTINA', 'ESPN AR'],
+  'TNT Sports Argentina': ['TNT SPORTS ARGENTINA'],
+  'Fox Sports MX': ['FOX SPORTS MX', 'FOX SPORTS MEXICO'],
+
+  // ── Asian ────────────────────────────────────────────────────
+  'DAZN Japan':   ['DAZN JAPAN', 'DAZN JP'],
+  'Coupang Play': ['COUPANG'],
+  'tvN Sports':   ['TVN SPORTS'],
+
+  // ── Middle East / Africa ───────────────────────────────────
+  'SSC Sports':    ['SSC SPORTS', 'SSC1', 'SSC2', 'SSC3', 'SSC4'],
+  'beIN Sports MENA': ['BEIN SPORTS MENA', 'BEIN SPORTS HD ARABIA']
+};
+
+// ─── League → broadcaster fallback ─────────────────────────────────
+// ESPN's API only supplies the `broadcasts` field reliably for North-
+// American leagues. For everyone else (J League, A-League, K-League,
+// IPL, Brasileirão, Argentine Primera, Aussie Netball/AFL/NRL, etc.)
+// the field comes back empty, so the matcher had nothing to anchor
+// against and the team-name search picked up cross-sport collisions
+// instead (e.g. "Mavericks" → NBA, "Firebirds" → AHL hockey).
+//
+// This is the hand-curated fallback the search-channel route uses
+// when an event's broadcasts[] is empty but its league_name is known.
+// Each entry is a list of canonical broadcaster keys from
+// BROADCASTER_ALIASES above; expandLeagueBroadcastersFallback walks
+// each through expandBroadcaster() to flatten into channel-name
+// substrings ready for SQL ILIKE.
+const LEAGUE_BROADCASTER_FALLBACKS = {
+  // Australian
+  'Australian Super Netball League': ['Fox Sports AU', 'Channel 9 AU'],
+  'UK Netball Superleague':          ['Sky Sports'],
+  'AFL':                              ['Fox Sports AU', 'Fox Footy', 'Channel 7 AU'],
+  'AFLW':                             ['Fox Sports AU', 'Fox Footy', 'Channel 7 AU'],
+  'NRL':                              ['Fox Sports AU', 'Fox League', 'Channel 9 AU'],
+  'Big Bash':                         ['Fox Sports AU', 'Fox Cricket', '10 Sport AU'],
+  'A-League':                         ['Channel 10', '10 Sport AU', 'Paramount+'],
+
+  // Cricket — ESPN doesn't cover cricket scores at all so these come
+  // from theSportsDB schedule; no broadcaster info.
+  'Indian Premier League':            ['Star Sports', 'Sport18', 'JioCinema', 'Willow', 'Hotstar'],
+  'IPL':                              ['Star Sports', 'Sport18', 'JioCinema', 'Willow', 'Hotstar'],
+  'Pakistan Super League':            ['PTV Sports', 'A Sports', 'Willow'],
+  'Cricket World Cup':                ['Star Sports', 'Willow', 'Sky Sports'],
+
+  // Soccer — non-major leagues
+  'J League':                         ['DAZN Japan'],
+  'K League':                         ['Coupang Play', 'tvN Sports'],
+  'Saudi Pro League':                 ['SSC Sports', 'beIN Sports MENA'],
+  'Brasileirão Série A':              ['Premiere', 'SporTV', 'Globo'],
+  'Brasileirão Série B':              ['Premiere', 'SporTV'],
+  'Argentine Primera':                ['TyC Sports', 'ESPN Argentina', 'TNT Sports Argentina'],
+  'Liga MX':                          ['TUDN', 'Fox Sports MX', 'ESPN Deportes'],
+  'Ascenso MX':                       ['TUDN', 'Fox Sports MX'],
+
+  // Hockey — non-NHL
+  'DEL':                              ['MagentaSport', 'Sport1'],
+
+  // Basketball — non-NBA
+  'EuroLeague':                       ['DAZN', 'Sport1'],
+  'EuroCup':                          ['DAZN'],
+  'Italian Lega Basket':              ['Eurosport'],
+  'Polish Basketball League':         ['Polsat Sport'],
+
+  // Handball
+  'German Handball-Bundesliga':       ['Sky Sports', 'DAZN'],
+
+  // International friendlies / world cups
+  'International Friendlies Ice Hockey': [],
+  'Slovak Extraliga':                 ['JOJ Sport']
 };
 
 /**
@@ -110,8 +221,21 @@ function expandBroadcastersList(names) {
   return Array.from(out);
 }
 
+/**
+ * Look up a league's likely broadcasters when ESPN didn't supply any.
+ * Returns deduped channel-name substrings ready for SQL ILIKE.
+ */
+function expandLeagueBroadcastersFallback(leagueName) {
+  if (!leagueName) return [];
+  const broadcasters = LEAGUE_BROADCASTER_FALLBACKS[leagueName];
+  if (!broadcasters) return [];
+  return expandBroadcastersList(broadcasters);
+}
+
 module.exports = {
   BROADCASTER_ALIASES,
+  LEAGUE_BROADCASTER_FALLBACKS,
   expandBroadcaster,
   expandBroadcastersList,
+  expandLeagueBroadcastersFallback,
 };

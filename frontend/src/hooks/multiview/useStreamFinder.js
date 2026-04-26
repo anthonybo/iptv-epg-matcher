@@ -291,7 +291,14 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
   // tagging the channel with espnEventId/espnEventName so later features
   // (find-alternative, duplicate detection) know what game it represents.
   const handleTickerEventClick = async (score) => {
+    // Log bail conditions as console.warn so they relay to the backend
+    // via utils/logger.js — otherwise "click did nothing" is impossible
+    // to diagnose (the toasts are easy to miss, and the local log()
+    // helper is silenced in theatre mode).
+    const tag = `[ticker-click ${score?.event_id || '?'}]`;
+
     if (streams.length >= autoFillSettings.maxSlots) {
+      console.warn(`${tag} blocked: max slots (${streams.length}/${autoFillSettings.maxSlots}) — remove a stream first or raise the cap in settings`);
       showToast(`Already at max slots (${autoFillSettings.maxSlots})`, 'info');
       return;
     }
@@ -305,6 +312,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
       const currentChannelIds = streams.map((s) => s.id).filter((id) => id);
       const currentEventIds = streams.map((s) => s.espnEventId).filter((id) => id);
       if (currentEventIds.includes(score.event_id)) {
+        console.warn(`${tag} blocked: ${score.event_name} already in multi-view`);
         showToast('This game is already in your Multi-View', 'info');
         setSearchingStream(false);
         return;
@@ -312,10 +320,13 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
 
       const token = getToken();
       if (!token) {
+        console.error(`${tag} blocked: no auth token`);
         showToast('Authentication required', 'error');
         setSearchingStream(false);
         return;
       }
+
+      console.log(`${tag} firing search: "${score.away_team} at ${score.home_team}" (${score.sport_type}/${score.league_name})`);
 
       // Use "Team1 at Team2" so the backend event parser picks up both
       // teams (the searchChannel endpoint splits on at/vs/@).

@@ -13,7 +13,7 @@ const { execFileAsync, httpAgent, httpsAgent } = require('../../utils/streamAgen
 const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/channelScoring');
 const teamMatcher = require('../../utils/teamMatcher');
 const teamAliasesService = require('../../services/teamAliasesService');
-const { expandBroadcastersList } = require('../../utils/broadcasterAliases');
+const { expandBroadcastersList, expandLeagueBroadcastersFallback } = require('../../utils/broadcasterAliases');
 
 /**
  * POST /api/live-events/search-channel
@@ -115,9 +115,25 @@ router.post('/search-channel', async (req, res) => {
     // Broadcaster aliases let us pull in generic-named channels (e.g.
     // ":BTN+ 25") when ESPN says the game is on B1G+. Without these we
     // were missing every conference-network channel in the user's DB.
-    const broadcasterTerms = expandBroadcastersList(broadcasts);
+    let broadcasterTerms = expandBroadcastersList(broadcasts);
     if (broadcasterTerms.length > 0) {
-      logger.info(`[Find Alternative] Broadcasters: ${broadcasts.join(', ')} → search terms: ${broadcasterTerms.join(', ')}`);
+      logger.info(`[Find Alternative] Broadcasters from ESPN: ${broadcasts.join(', ')} → ${broadcasterTerms.length} search terms`);
+    }
+
+    // Fallback: ESPN doesn't expose broadcasts for non-North-American
+    // leagues (Australian Netball/AFL/NRL, J League, IPL, Brasileirão,
+    // Argentine Primera, etc.). For those, pivot off a hand-curated
+    // league → broadcaster map (utils/broadcasterAliases.js
+    // LEAGUE_BROADCASTER_FALLBACKS). Without this, those games found
+    // 1000 cross-sport name collisions ("Mavericks" → NBA, "Firebirds"
+    // → AHL hockey) and the matcher correctly rejected all of them —
+    // returning "no real match" even when the user had Fox Sports AU,
+    // Star Sports, TyC Sports, etc. sitting right there in their lineup.
+    if (broadcasterTerms.length === 0 && leagueName) {
+      broadcasterTerms = expandLeagueBroadcastersFallback(leagueName);
+      if (broadcasterTerms.length > 0) {
+        logger.info(`[Find Alternative] Broadcasters from league fallback (${leagueName}): ${broadcasterTerms.length} search terms`);
+      }
     }
     const scoringContext = { sportType, leagueName, broadcasterTerms };
 
