@@ -225,6 +225,18 @@ export function useFindAlternative({
 
   // Swap a dead stream for a fresh channel in local state + backend.
   // Shared by both handlers below so replacement behaviour stays in sync.
+  //
+  // CRITICAL: the search-channel response does not include espnEventId,
+  // espnEventName or searchQuery — those were stamped onto the original
+  // ticker-click stream by handleTickerEventClick. If we don't carry
+  // them across the swap, every subsequent find-alternative call on
+  // this slot loses the event context: backend can't resolve sport /
+  // league, broadcaster fallback doesn't fire, the cross-sport penalty
+  // can't reject "Adelaide-something" / "Brisbane-something" channels
+  // that happen to share a city name with the team — and after a few
+  // swaps the player ends up on a 24/7 movie channel that just has
+  // "Adelaide" or "Lions" somewhere in its name. Propagate the
+  // identity onto the replacement so the chain stays anchored.
   const swapStream = async (deadStream, newChannel) => {
     const removeSuccess = await removeFromMultiview(deadStream.id, deadStream.sourceId);
     if (removeSuccess) {
@@ -239,7 +251,13 @@ export function useFindAlternative({
         return rest;
       });
     }
-    return addToMultiview(newChannel);
+    const enriched = {
+      ...newChannel,
+      espnEventId:   newChannel.espnEventId   ?? deadStream.espnEventId   ?? null,
+      espnEventName: newChannel.espnEventName ?? deadStream.espnEventName ?? null,
+      searchQuery:   newChannel.searchQuery   ?? deadStream.searchQuery   ?? null,
+    };
+    return addToMultiview(enriched);
   };
 
   const handleFindAlternative = async (stream, isAutomatic = false) => {
@@ -397,6 +415,27 @@ export function useFindAlternative({
     // the modal would freeze on "trying a different game..." and no
     // different game ever arrived.
     if (!replaced && isAutomatic) {
+      // Auto-escalate to a different live game — but ONLY when this
+      // slot was a "find me anything" auto-fill, not a specific event
+      // the user picked from the ticker. If the user clicked
+      // "Adelaide Crows at Brisbane Lions" and we couldn't find a
+      // working AFL channel, silently swapping them to "24/7 First
+      // Wives Club" because that's the next thing find-different-game
+      // happened to return is the wrong UX — it looks like the app
+      // randomly reassigned their tile to garbage.
+      //
+      // espnEventId is set by ticker clicks (handleTickerEventClick)
+      // and propagated across swaps by swapStream. When it's present,
+      // the user explicitly wanted this event; respect that and stop
+      // the chain instead of cascading.
+      if (stream.espnEventId) {
+        emitSearchProgress(
+          streamKey,
+          `Couldn't find a working channel for ${stream.espnEventName || 'this game'}. Try another game from the ticker.`
+        );
+        showToast('No working stream for that game right now', 'error');
+        return;
+      }
       emitSearchProgress(
         streamKey,
         'No stream for this game — switching to a different live game...'
