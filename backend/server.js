@@ -134,9 +134,34 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase JSON size limit
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Add Morgan HTTP request logging - log ALL requests
+// Suppress access logging for high-frequency polling endpoints. These
+// log lines aren't useful for diagnostics (the interesting state lives
+// in the per-stream lifecycle logs we emit elsewhere) and they drown
+// out everything else — HLS playlist polling alone produced ~9.5k
+// lines per session, ~60% of the entire log file.
+//
+// Match by prefix; query strings and IDs are ignored.
+const NOISY_LOG_PREFIXES = [
+  '/api/stream/hls/',          // hls.js polls index.m3u8 every ~2s + many segs
+  '/api/logs/frontend',        // frontend log relay — body is logged separately
+  '/api/live-scores',          // ticker poll every 60s per client
+  '/api/multiview',            // multi-view state checks
+  '/api/iptv/sources',         // source-list refreshes
+  '/api/status/session',       // session validation pings
+  '/api/metrics/page-view'     // page-view beacons (handler logs them itself)
+];
+const isNoisyRequest = (req) => {
+  const path = req.originalUrl?.split('?')[0] || req.path || '';
+  return NOISY_LOG_PREFIXES.some((p) => path.startsWith(p));
+};
+
+// Morgan HTTP access log — skips noisy paths only on 2xx. 4xx/5xx on
+// the same paths still log so we don't lose visibility on real errors
+// (e.g. hls.js requesting a segment that ffmpeg's rolling window has
+// already deleted — that 404 IS the diagnostic we need).
 app.use(morgan(':method :url :status :res[content-length] - :response-time ms', {
-  stream: logger.stream
+  stream: logger.stream,
+  skip: (req, res) => isNoisyRequest(req) && res.statusCode < 400
 }));
 
 // Add proper middleware for attaching logger to req
@@ -145,19 +170,24 @@ app.use((req, res, next) => {
   next();
 });
 
-// Add request logging middleware
+// Custom [REQUEST] log — same skip rule.
 app.use((req, res, next) => {
-  // Log all incoming requests at INFO level so we always see them
-  logger.info(`[REQUEST] ${req.method} ${req.originalUrl} from ${req.ip}`);
+  if (!isNoisyRequest(req)) {
+    logger.info(`[REQUEST] ${req.method} ${req.originalUrl} from ${req.ip}`);
+  }
 
-  // Track response for logging
-  const originalSend = res.send;
-  res.send = function(data) {
-    logger.debug(`RESPONSE: ${req.method} ${req.originalUrl} - Status: ${res.statusCode}`, {
-      responseData: typeof data === 'string' && data.length < 1000 ? data : 'Too large to log'
-    });
-    return originalSend.apply(this, arguments);
-  };
+  // Response body is logged at debug level only; doesn't show up in
+  // the normal log stream but still useful when DEBUG is on. Skip the
+  // noisy paths there too so a debug session isn't drowned either.
+  if (!isNoisyRequest(req)) {
+    const originalSend = res.send;
+    res.send = function(data) {
+      logger.debug(`RESPONSE: ${req.method} ${req.originalUrl} - Status: ${res.statusCode}`, {
+        responseData: typeof data === 'string' && data.length < 1000 ? data : 'Too large to log'
+      });
+      return originalSend.apply(this, arguments);
+    };
+  }
 
   next();
 });

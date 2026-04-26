@@ -146,55 +146,55 @@ async function updateAllScores() {
   const startTime = Date.now();
 
   try {
-    let totalUpdated = 0;
-    let liveGames = 0;
-
     // Fetch scores for all sports in parallel (batched to avoid overwhelming ESPN)
+    const allUpdates = [];
     const batchSize = 5;
     for (let i = 0; i < SPORTS_CONFIG.length; i += batchSize) {
       const batch = SPORTS_CONFIG.slice(i, i + batchSize);
-
       const results = await Promise.all(
         batch.map(({ sport, league }) => fetchScoresFromESPN(sport, league))
       );
+      for (const scoreUpdates of results) allUpdates.push(...scoreUpdates);
+    }
 
-      // Process all score updates
-      for (const scoreUpdates of results) {
-        for (const update of scoreUpdates) {
-          try {
-            const result = await postgresService.query(`
-              UPDATE live_events
-              SET
-                home_score = $1,
-                away_score = $2,
-                game_status = $3,
-                game_clock = $4,
-                status_type = $5,
-                is_live = $6,
-                scores_updated_at = CURRENT_TIMESTAMP
-              WHERE event_id = $7
-              RETURNING id
-            `, [
-              update.homeScore,
-              update.awayScore,
-              update.gameStatus,
-              update.gameClock,
-              update.statusType,
-              update.isLive,
-              update.eventId
-            ]);
+    // Single batched UPDATE instead of one query per event. Previously
+    // 436 events × ~50ms per round-trip = 22-32s, which overlapped the
+    // 30s polling interval and starved every other DB consumer (search,
+    // ticker, etc.). With unnest() arrays this collapses to one query
+    // that runs in well under a second.
+    let totalUpdated = 0;
+    let liveGames = 0;
+    if (allUpdates.length > 0) {
+      const eventIds   = allUpdates.map((u) => u.eventId);
+      const homeScores = allUpdates.map((u) => u.homeScore);
+      const awayScores = allUpdates.map((u) => u.awayScore);
+      const statuses   = allUpdates.map((u) => u.gameStatus);
+      const clocks     = allUpdates.map((u) => u.gameClock);
+      const stypes     = allUpdates.map((u) => u.statusType);
+      const isLives    = allUpdates.map((u) => Boolean(u.isLive));
 
-            if (result.rowCount > 0) {
-              totalUpdated++;
-              if (update.isLive) {
-                liveGames++;
-              }
-            }
-          } catch (dbError) {
-            logger.error(`Error updating score for ${update.eventId}:`, dbError.message);
-          }
-        }
-      }
+      const result = await postgresService.query(`
+        UPDATE live_events AS le
+        SET
+          home_score        = data.home_score,
+          away_score        = data.away_score,
+          game_status       = data.game_status,
+          game_clock        = data.game_clock,
+          status_type       = data.status_type,
+          is_live           = data.is_live,
+          scores_updated_at = CURRENT_TIMESTAMP
+        FROM (
+          SELECT * FROM unnest(
+            $1::text[], $2::int[], $3::int[], $4::text[],
+            $5::text[], $6::text[], $7::boolean[]
+          ) AS u(event_id, home_score, away_score, game_status, game_clock, status_type, is_live)
+        ) AS data
+        WHERE le.event_id = data.event_id
+        RETURNING le.event_id, le.is_live
+      `, [eventIds, homeScores, awayScores, statuses, clocks, stypes, isLives]);
+
+      totalUpdated = result.rowCount || 0;
+      liveGames = (result.rows || []).filter((r) => r.is_live === true).length;
     }
 
     const duration = Date.now() - startTime;
