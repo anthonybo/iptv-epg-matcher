@@ -221,15 +221,42 @@ function expandBroadcastersList(names) {
   return Array.from(out);
 }
 
+// Optional Wikidata-fetched supplement. Loaded once at module init.
+// Hand-curated entries above take precedence; Wikidata fills gaps for
+// long-tail leagues we haven't manually mapped (Catalan Basketball,
+// Liga ASOBAL handball, Korean Baduk League, etc.). Refreshed by
+// `node backend/scripts/fetchWikidataBroadcasters.js`.
+let WIKIDATA_FALLBACKS = {};
+try {
+  // eslint-disable-next-line global-require
+  const wd = require('../config/wikidata_broadcasters.json');
+  WIKIDATA_FALLBACKS = wd?.leagues || {};
+} catch (_) {
+  // File doesn't exist yet — that's fine. Run the script to populate.
+}
+
 /**
  * Look up a league's likely broadcasters when ESPN didn't supply any.
  * Returns deduped channel-name substrings ready for SQL ILIKE.
+ *
+ * Resolution order:
+ *   1. Hand-curated LEAGUE_BROADCASTER_FALLBACKS (above).
+ *   2. Wikidata-derived WIKIDATA_FALLBACKS (json file). Used only when
+ *      no hand-curated entry exists for the league. The Wikidata
+ *      payload's broadcaster names are passed through expandBroadcaster
+ *      same as the hand-curated ones — common names (Fox Sports, ESPN,
+ *      BeIN Sports, etc.) get expanded into channel-name substrings;
+ *      unknown names pass through verbatim as a literal substring.
  */
 function expandLeagueBroadcastersFallback(leagueName) {
   if (!leagueName) return [];
-  const broadcasters = LEAGUE_BROADCASTER_FALLBACKS[leagueName];
-  if (!broadcasters) return [];
-  return expandBroadcastersList(broadcasters);
+  const handCurated = LEAGUE_BROADCASTER_FALLBACKS[leagueName];
+  if (handCurated) return expandBroadcastersList(handCurated);
+  const fromWikidata = WIKIDATA_FALLBACKS[leagueName];
+  if (fromWikidata && fromWikidata.length > 0) {
+    return expandBroadcastersList(fromWikidata);
+  }
+  return [];
 }
 
 module.exports = {
