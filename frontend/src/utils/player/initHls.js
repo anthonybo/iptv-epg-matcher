@@ -138,23 +138,56 @@ export function initializeHlsPlayer(ctx) {
         // hls.js path (Chrome/Firefox/Edge/etc.)
         // ============================================================
         const hls = new Hls({
-            // Live-stream tuning. Keep latency reasonable in multi-view
-            // but don't chase the live edge so aggressively we keep
-            // hitting buffer underruns.
-            liveSyncDurationCount: theatreMode ? 2 : 3,
-            liveMaxLatencyDurationCount: theatreMode ? 6 : 10,
-            // Quietly retry transient fragment failures.
-            fragLoadingMaxRetry: 6,
-            fragLoadingRetryDelay: 500,
-            fragLoadingMaxRetryTimeout: 8000,
-            manifestLoadingMaxRetry: 4,
-            manifestLoadingRetryDelay: 500,
-            levelLoadingMaxRetry: 4,
+            // Per hls.js docs: liveSyncDurationCount default is 3.
+            //   "Decreasing this value is likely to cause playback
+            //   stalls."
+            // Our previous value of 2 was below the documented floor
+            // and was almost certainly contributing to the "froze a
+            // few seconds in" symptom — hls.js was trying to play
+            // within 4s of the live edge while ffmpeg was still
+            // writing fragment N+1.
+            liveSyncDurationCount: theatreMode ? 3 : 4,
+            // Must be strictly > liveSyncDurationCount per docs.
+            // Default is Infinity — we set explicit ceilings so a
+            // long stall triggers a recovery seek instead of getting
+            // stuck.
+            liveMaxLatencyDurationCount: theatreMode ? 8 : 12,
             // Drop the worker in theatre mode — 6 web workers (one per
             // tile) compounded the memory pressure we hit before.
             enableWorker: !theatreMode,
             lowLatencyMode: false,
             backBufferLength: theatreMode ? 10 : 30,
+            // Modern Load Policy API. The previous fragLoadingMaxRetry /
+            // manifestLoadingMaxRetry / etc. keys were deprecated and
+            // silently ignored — hls.js was using its defaults the
+            // whole time. We mirror the documented defaults verbatim
+            // for visibility, with a slightly higher errorRetry budget
+            // on the manifest + playlist paths since our backend is on
+            // the LAN and the cost of an extra retry is trivial.
+            manifestLoadPolicy: {
+                default: {
+                    maxTimeToFirstByteMs: Infinity,
+                    maxLoadTimeMs: 20000,
+                    timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
+                    errorRetry:   { maxNumRetry: 4, retryDelayMs: 500, maxRetryDelayMs: 8000 }
+                }
+            },
+            playlistLoadPolicy: {
+                default: {
+                    maxTimeToFirstByteMs: 10000,
+                    maxLoadTimeMs: 20000,
+                    timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 0 },
+                    errorRetry:   { maxNumRetry: 4, retryDelayMs: 500, maxRetryDelayMs: 8000 }
+                }
+            },
+            fragLoadPolicy: {
+                default: {
+                    maxTimeToFirstByteMs: 10000,
+                    maxLoadTimeMs: 120000,
+                    timeoutRetry: { maxNumRetry: 4, retryDelayMs: 0, maxRetryDelayMs: 0 },
+                    errorRetry:   { maxNumRetry: 6, retryDelayMs: 1000, maxRetryDelayMs: 8000 }
+                }
+            }
         });
 
         hls.attachMedia(videoEl);
@@ -173,18 +206,38 @@ export function initializeHlsPlayer(ctx) {
             setLoading(false);
         });
 
+        // Diagnostic logging for hls.js events. We bypass the IPTVPlayer
+        // `log()` helper here because it's gated by theatreMode (only
+        // "Video playing" gets through in multi-view), which is exactly
+        // when we MOST need visibility. console.warn / console.error
+        // are intercepted by utils/logger.js and relayed to the backend
+        // /api/logs/frontend, so they show up in the server log too.
+        const cid = getChannelId();
+        const tag = `[hls ${cid}]`;
+        let lastNonFatalAt = 0;
+
         hls.on(Hls.Events.ERROR, (_event, data) => {
             const { type, details, fatal } = data;
             if (!fatal) {
-                // hls.js recovers non-fatal errors internally — log only
-                // the noisy ones.
-                if (/error|fail/i.test(details)) {
-                    log('warn', `hls non-fatal: ${type}/${details}`);
+                // Throttle non-fatal warning logs to one per 2s per
+                // detail-type so a flapping fragment doesn't spam.
+                const now = Date.now();
+                if (now - lastNonFatalAt > 2000) {
+                    lastNonFatalAt = now;
+                    console.warn(`${tag} non-fatal ${type}/${details}`, {
+                        url: data.url,
+                        reason: data.reason,
+                        response: data.response?.code
+                    });
                 }
                 return;
             }
 
-            log('error', `hls fatal: ${type}/${details}`);
+            console.error(`${tag} FATAL ${type}/${details}`, {
+                url: data.url,
+                reason: data.reason,
+                response: data.response?.code
+            });
             switch (type) {
                 case Hls.ErrorTypes.NETWORK_ERROR:
                     setRecoveryStatus('Reconnecting…');
@@ -200,6 +253,26 @@ export function initializeHlsPlayer(ctx) {
                     try { hls.destroy(); } catch (_) {}
                     break;
             }
+        });
+
+        // Video element diagnostics. These help distinguish "hls.js
+        // fired an error" from "decoder/MSE/<video> got stuck on its
+        // own". Suppress events fired during the first 2s of mount —
+        // a stalled-while-loading is normal.
+        const mountedAt = Date.now();
+        const sinceMount = () => Date.now() - mountedAt;
+        addTrackedListener(videoEl, 'stalled', () => {
+            if (sinceMount() > 2000) console.warn(`${tag} <video> stalled (no data) at t=${videoEl.currentTime.toFixed(1)}s`);
+        });
+        addTrackedListener(videoEl, 'waiting', () => {
+            if (sinceMount() > 2000) console.warn(`${tag} <video> waiting (buffering) at t=${videoEl.currentTime.toFixed(1)}s`);
+        });
+        addTrackedListener(videoEl, 'error', () => {
+            const err = videoEl.error;
+            console.error(`${tag} <video> error code=${err?.code} msg=${err?.message}`);
+        });
+        addTrackedListener(videoEl, 'ended', () => {
+            console.warn(`${tag} <video> ended (live should not end)`);
         });
 
         playerInstanceRef.current = hls;

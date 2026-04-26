@@ -108,9 +108,24 @@ function spawnFfmpeg({ key, dir, streamUrl, channel }) {
         '-muxdelay', '0',
         '-f', 'hls',
         '-hls_time', '2',
-        '-hls_list_size', '6',
+        // 12 segments × 2s = 24s playlist window. delete_segments keeps
+        // each file on disk for an extra (segment + playlist) seconds
+        // after it rolls off, giving a real ~50s grace period.
+        '-hls_list_size', '12',
         '-hls_segment_filename', segmentPattern,
-        '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments',
+        // delete_segments + append_list + omit_endlist is the canonical
+        // rolling-live combo per the FFmpeg HLS muxer docs.
+        // We do NOT add independent_segments here even though hls.js
+        // would prefer it: that flag writes
+        // `#EXT-X-INDEPENDENT-SEGMENTS` into the playlist promising
+        // every fragment starts with a keyframe. With `-c copy` from
+        // an upstream we don't control, we can't guarantee that — and
+        // mismatched first-frames are exactly the "playback froze a
+        // few seconds in" symptom (segment 0 plays from the original
+        // stream start, segment 1+ start mid-GOP, decoder produces no
+        // frames). Without the flag, hls.js inspects each segment
+        // header at runtime instead of trusting a global promise.
+        '-hls_flags', 'delete_segments+append_list+omit_endlist',
         '-hls_segment_type', 'mpegts',
         playlistPath
     );
@@ -253,12 +268,22 @@ router.get('/:sessionId/:channelId/seg-:n.ts', authMiddleware, (req, res) => {
     const key = sessionKey(sessionId, channelId, sourceId);
     const sess = sessions.get(key);
     if (!sess) {
+        // Log explicitly — hls.js sees this as a fatal fragLoadError
+        // and stops polling, which is exactly the "stream froze a few
+        // seconds in" symptom. Visibility into when this happens is
+        // worth the log line (we silence successful HLS access in
+        // server.js, but errors should always bubble up).
+        logger.warn(`[HLS ${key}] seg-${n}.ts requested but session is gone`);
         return res.status(404).json({ error: 'HLS session not found' });
     }
     sess.lastAccess = Date.now();
 
     const segPath = path.join(sess.dir, `seg-${n}.ts`);
     if (!fs.existsSync(segPath)) {
+        // Same logic — hls.js has fallen behind ffmpeg's rolling window
+        // and is asking for a segment that's already been deleted. Log
+        // so we can see the rate. (See -hls_list_size in spawnFfmpeg.)
+        logger.warn(`[HLS ${key}] seg-${n}.ts not on disk (rolled out of window)`);
         return res.status(404).json({ error: 'Segment not found' });
     }
 
