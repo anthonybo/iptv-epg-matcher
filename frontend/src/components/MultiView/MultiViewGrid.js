@@ -26,6 +26,7 @@ const MultiViewGrid = ({
   findingAlternativeFor,
   activeId,
   loadingStreams,
+  playerType = 'mpegts-player',
   // Callbacks
   onDragStart,
   onDragEnd,
@@ -146,6 +147,7 @@ const MultiViewGrid = ({
                   isMuted={mutedStreams.has(streamKey)}
                   quality={streamQualities[streamKey]}
                   isFindingAlternative={findingAlternativeFor && findingAlternativeFor.has && findingAlternativeFor.has(streamKey)}
+                  playerType={playerType}
                   onToggleMute={() => onToggleMute(streamKey)}
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
                   onFindAlternative={() => onFindAlternative(stream, false)}

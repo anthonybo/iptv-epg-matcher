@@ -40,7 +40,11 @@ const MultiViewPage = ({ sessionId }) => {
       avoidDuplicateSources: true,
       avoidDuplicateEvents: true,
       minQuality: 0,
-      showLiveScoresTicker: false
+      showLiveScoresTicker: false,
+      // Default to mpegts.js (raw TS) — matches the historical behaviour.
+      // 'hls-stream' switches to the ffmpeg-remuxed HLS pipeline +
+      // hls.js (better recovery, iOS-native playback).
+      playerType: 'mpegts-player'
     };
     if (saved) {
       const parsed = JSON.parse(saved);
@@ -283,6 +287,7 @@ const MultiViewPage = ({ sessionId }) => {
           findingAlternativeFor={findingAlternativeFor}
           activeId={activeId}
           loadingStreams={loadingStreams}
+          playerType={autoFillSettings.playerType}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onToggleMute={toggleMute}

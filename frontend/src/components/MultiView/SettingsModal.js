@@ -1,5 +1,98 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import LocationSelector from '../LocationSelector';
+
+// ─── Static option metadata ────────────────────────────────────────────
+
+const QUALITY_TIERS = [
+  { value: 0,    label: 'Any',    sub: '—'   },
+  { value: 480,  label: '480p',   sub: 'SD'  },
+  { value: 720,  label: '720p',   sub: 'HD'  },
+  { value: 1080, label: '1080p',  sub: 'FHD' },
+  { value: 1440, label: '1440p',  sub: '2K'  },
+  { value: 2160, label: '2160p',  sub: '4K'  },
+  { value: 4320, label: '4320p',  sub: '8K'  }
+];
+
+const PLAYER_OPTIONS = [
+  {
+    value: 'mpegts-player',
+    title: 'mpegts.js',
+    subtitle: 'Raw TS · MSE',
+    description:
+      'Direct MPEG-TS over MSE. Lowest latency and the fastest channel switch in the grid.',
+    tags: ['Low latency', 'Direct TS', 'Default']
+  },
+  {
+    value: 'hls-stream',
+    title: 'hls.js',
+    subtitle: 'ffmpeg → HLS · hls.js',
+    description:
+      'Backend remuxes upstream into a live HLS playlist; hls.js plays it. Self-recovering, native on iOS Safari.',
+    tags: ['iOS native', 'Auto-recover', '+~2s buffer']
+  }
+];
+
+const SECTIONS = [
+  { id: 'autofill', label: 'Auto-fill',   mark: '01' },
+  { id: 'playback', label: 'Playback',    mark: '02' },
+  { id: 'display',  label: 'Display',     mark: '03' },
+  { id: 'location', label: 'Location',    mark: '04' }
+];
+
+// ─── Small, presentation-only sub-components ───────────────────────────
+
+const SectionHeader = ({ mark, title, subtitle }) => (
+  <div className="flex items-end gap-4 pb-3 border-b border-slate-800/60">
+    <span className="text-[10px] font-mono text-slate-700 tabular-nums">§ {mark}</span>
+    <div className="flex-1 min-w-0">
+      <h3 className="text-base font-semibold text-slate-100 tracking-tight">{title}</h3>
+      {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+    </div>
+  </div>
+);
+
+const Field = ({ label, hint, children }) => (
+  <div>
+    <label className="block text-sm font-medium text-slate-200 mb-2">{label}</label>
+    {children}
+    {hint && <p className="mt-2 text-xs text-slate-500">{hint}</p>}
+  </div>
+);
+
+const Toggle = ({ active, onToggle, label, hint }) => (
+  <button
+    type="button"
+    onClick={onToggle}
+    className={`group flex items-center justify-between gap-4 p-4 rounded-xl border text-left transition w-full ${
+      active
+        ? 'border-emerald-500/40 bg-emerald-500/5 hover:bg-emerald-500/10'
+        : 'border-slate-800 bg-slate-900/40 hover:bg-slate-900/70 hover:border-slate-700'
+    }`}
+    aria-pressed={active}
+  >
+    <div className="min-w-0 flex-1">
+      <div className={`text-sm font-medium ${active ? 'text-emerald-100' : 'text-slate-200'}`}>
+        {label}
+      </div>
+      {hint && (
+        <div className="text-xs text-slate-500 mt-0.5">{hint}</div>
+      )}
+    </div>
+    <div
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+        active ? 'bg-emerald-500' : 'bg-slate-800'
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+          active ? 'translate-x-6' : 'translate-x-1'
+        }`}
+      />
+    </div>
+  </button>
+);
+
+// ─── Modal ─────────────────────────────────────────────────────────────
 
 const SettingsModal = ({
   isOpen,
@@ -8,243 +101,437 @@ const SettingsModal = ({
   autoFillSettings,
   setAutoFillSettings
 }) => {
+  const [activeSection, setActiveSection] = useState('autofill');
+  const sectionRefs = useRef({});
+  const scrollContainerRef = useRef(null);
+
+  // Single setter for any partial update.
+  const setSetting = useCallback(
+    (patch) => setAutoFillSettings((prev) => ({ ...prev, ...patch })),
+    [setAutoFillSettings]
+  );
+
+  // Escape closes the modal.
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
+
+  // Scroll-spy: highlight the section the user is currently looking at.
+  // The rootMargin puts the active band roughly between 30%–45% from
+  // the top of the scroll viewport so a section "activates" as it
+  // crosses into view, not when it's already left.
+  useEffect(() => {
+    if (!isOpen) return;
+    const root = scrollContainerRef.current;
+    if (!root) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const intersecting = entries.filter((e) => e.isIntersecting);
+        if (intersecting.length === 0) return;
+        // Pick the topmost — when several short sections fit the active
+        // band at once, last-fires-wins gives wrong results.
+        const top = intersecting.reduce((acc, cur) =>
+          cur.boundingClientRect.top < acc.boundingClientRect.top ? cur : acc
+        );
+        setActiveSection(top.target.id);
+      },
+      { root, rootMargin: '-30% 0px -55% 0px', threshold: 0 }
+    );
+    SECTIONS.forEach(({ id }) => {
+      const el = sectionRefs.current[id];
+      if (el) observer.observe(el);
+    });
+    return () => observer.disconnect();
+  }, [isOpen]);
+
+  const scrollToSection = useCallback((id) => {
+    const el = sectionRefs.current[id];
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
   if (!isOpen) return null;
 
+  const activePlayer = PLAYER_OPTIONS.find((p) => p.value === autoFillSettings.playerType)
+    || PLAYER_OPTIONS[0];
+  const slotsOpen = Math.max(0, autoFillSettings.maxSlots - streams.length);
+
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-md w-full overflow-hidden">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-700">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-slate-100">Multi-View Settings</h2>
-            <button
-              onClick={onClose}
-              className="text-slate-400 hover:text-slate-200 transition-colors"
-            >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          <p className="mt-1 text-sm text-slate-400">
-            Configure auto-fill behavior for quick stream population
-          </p>
-        </div>
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center p-6"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-modal-title"
+    >
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md" />
 
-        {/* Content */}
-        <div className="p-6 space-y-6">
-          {/* Max Slots Setting */}
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Max Auto-Fill Slots
-            </label>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min="1"
-                max="9"
-                value={autoFillSettings.maxSlots}
-                onChange={(e) => setAutoFillSettings(prev => ({ ...prev, maxSlots: parseInt(e.target.value) }))}
-                className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-              />
-              <span className="w-8 text-center text-lg font-bold text-emerald-400">
-                {autoFillSettings.maxSlots}
-              </span>
+      {/* Modal panel */}
+      <div
+        className="relative w-full max-w-5xl max-h-[85vh] grid grid-rows-[auto_1fr_auto] rounded-2xl border border-slate-800/80 bg-slate-950 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.7)] overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          // Subtle two-tone atmosphere; reads more like control-room
+          // glass than a flat slate sheet.
+          backgroundImage:
+            'radial-gradient(ellipse 600px 400px at top left, rgba(16,185,129,0.06) 0%, transparent 70%), radial-gradient(ellipse 600px 400px at bottom right, rgba(99,102,241,0.05) 0%, transparent 70%)'
+        }}
+      >
+        {/* Top accent rule */}
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-500/50 to-transparent" />
+
+        {/* HEADER */}
+        <header className="px-8 py-5 border-b border-slate-800/60 flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-emerald-400/80 font-mono">
+              Multi-View · Settings
             </div>
-            <p className="mt-1 text-xs text-slate-500">
-              When you click a sport, auto-fill will add up to {autoFillSettings.maxSlots} stream{autoFillSettings.maxSlots !== 1 ? 's' : ''} total
+            <h2
+              id="settings-modal-title"
+              className="mt-1.5 text-2xl font-semibold text-slate-50 tracking-tight"
+            >
+              Configure your control deck
+            </h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Auto-fill behaviour, player engine, and display options for the multi-view grid.
             </p>
           </div>
-
-          {/* Quick Presets */}
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Quick Presets
-            </label>
-            <div className="grid grid-cols-4 gap-2">
-              {[2, 4, 6, 9].map((num) => (
-                <button
-                  key={num}
-                  onClick={() => setAutoFillSettings(prev => ({ ...prev, maxSlots: num }))}
-                  className={`px-3 py-2 rounded-lg text-sm font-semibold transition ${
-                    autoFillSettings.maxSlots === num
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
-                  }`}
-                >
-                  {num} slots
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Avoid Duplicate Sources */}
-          <div className="flex items-center justify-between">
-            <div>
-              <label className="block text-sm font-medium text-slate-300">
-                Avoid Duplicate Sources
-              </label>
-              <p className="text-xs text-slate-500">
-                Use different IPTV sources for each stream
-              </p>
-            </div>
-            <button
-              onClick={() => setAutoFillSettings(prev => ({ ...prev, avoidDuplicateSources: !prev.avoidDuplicateSources }))}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                autoFillSettings.avoidDuplicateSources ? 'bg-emerald-600' : 'bg-slate-700'
-              }`}
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  autoFillSettings.avoidDuplicateSources ? 'translate-x-6' : 'translate-x-1'
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Avoid Duplicate Events */}
-          <div className="flex items-center justify-between">
-            <div>
-              <label className="block text-sm font-medium text-slate-300">
-                Avoid Duplicate Events
-              </label>
-              <p className="text-xs text-slate-500">
-                Don't add the same game/event twice
-              </p>
-            </div>
-            <button
-              onClick={() => setAutoFillSettings(prev => ({ ...prev, avoidDuplicateEvents: !prev.avoidDuplicateEvents }))}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                autoFillSettings.avoidDuplicateEvents ? 'bg-emerald-600' : 'bg-slate-700'
-              }`}
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  autoFillSettings.avoidDuplicateEvents ? 'translate-x-6' : 'translate-x-1'
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Minimum Quality Setting */}
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Minimum Stream Quality
-            </label>
-            <div className="grid grid-cols-4 gap-2">
-              {[
-                { value: 0, label: 'Any' },
-                { value: 480, label: '480p' },
-                { value: 720, label: '720p' },
-                { value: 1080, label: '1080p' }
-              ].map((quality) => (
-                <button
-                  key={quality.value}
-                  onClick={() => setAutoFillSettings(prev => ({ ...prev, minQuality: quality.value }))}
-                  className={`px-3 py-2 rounded-lg text-sm font-semibold transition ${
-                    autoFillSettings.minQuality === quality.value
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
-                  }`}
-                >
-                  {quality.label}
-                </button>
-              ))}
-            </div>
-            <div className="grid grid-cols-3 gap-2 mt-2">
-              {[
-                { value: 1440, label: '1440p (2K)' },
-                { value: 2160, label: '2160p (4K)' },
-                { value: 4320, label: '4320p (8K)' }
-              ].map((quality) => (
-                <button
-                  key={quality.value}
-                  onClick={() => setAutoFillSettings(prev => ({ ...prev, minQuality: quality.value }))}
-                  className={`px-3 py-2 rounded-lg text-sm font-semibold transition ${
-                    autoFillSettings.minQuality === quality.value
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-300'
-                  }`}
-                >
-                  {quality.label}
-                </button>
-              ))}
-            </div>
-            <p className="mt-1 text-xs text-slate-500">
-              {autoFillSettings.minQuality === 0
-                ? 'Accept any stream quality'
-                : `Only accept streams ${autoFillSettings.minQuality}p or higher`
-              }
-            </p>
-          </div>
-
-          {/* Location Setting for Local News */}
-          <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              Your Location
-            </label>
-            <p className="text-xs text-slate-500 mb-3">
-              Used for finding local news channels
-            </p>
-            <LocationSelector compact={false} showLabel={true} className="w-full" />
-          </div>
-
-          {/* Display Settings Divider */}
-          <div className="border-t border-slate-700 pt-4">
-            <h3 className="text-sm font-medium text-slate-300 mb-4">Display Settings</h3>
-          </div>
-
-          {/* Live Scores Ticker Toggle */}
-          <div className="flex items-center justify-between">
-            <div>
-              <label className="block text-sm font-medium text-slate-300">
-                Live Scores Ticker
-              </label>
-              <p className="text-xs text-slate-500">
-                Show live sports scores at the bottom
-              </p>
-            </div>
-            <button
-              onClick={() => setAutoFillSettings(prev => ({ ...prev, showLiveScoresTicker: !prev.showLiveScoresTicker }))}
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                autoFillSettings.showLiveScoresTicker ? 'bg-emerald-600' : 'bg-slate-700'
-              }`}
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  autoFillSettings.showLiveScoresTicker ? 'translate-x-6' : 'translate-x-1'
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Current Status */}
-          <div className="p-3 rounded-lg bg-slate-800/50 border border-slate-700">
-            <div className="flex items-center gap-2 text-sm text-slate-400">
-              <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>
-                Currently: {streams.length} stream{streams.length !== 1 ? 's' : ''} active
-                {streams.length < autoFillSettings.maxSlots && (
-                  <span className="text-emerald-400 ml-1">
-                    ({autoFillSettings.maxSlots - streams.length} slot{autoFillSettings.maxSlots - streams.length !== 1 ? 's' : ''} available)
-                  </span>
-                )}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-700 bg-slate-900/50">
           <button
             onClick={onClose}
-            className="w-full px-4 py-2 text-sm font-semibold rounded-lg border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-500 transition-colors"
+            className="h-9 w-9 shrink-0 flex items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-500 hover:text-slate-200 hover:border-slate-700 transition"
+            aria-label="Close settings"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </header>
+
+        {/* BODY: section rail + scrollable content */}
+        <div className="grid grid-cols-[220px_1fr] overflow-hidden">
+          {/* Left rail */}
+          <nav className="border-r border-slate-800/60 px-4 py-6 overflow-y-auto">
+            <div className="text-[10px] uppercase tracking-[0.3em] text-slate-600 font-mono mb-3 px-2">
+              Sections
+            </div>
+            <ul className="space-y-1">
+              {SECTIONS.map((s) => {
+                const isActive = activeSection === s.id;
+                return (
+                  <li key={s.id}>
+                    <button
+                      onClick={() => scrollToSection(s.id)}
+                      className={`w-full flex items-center gap-3 px-2 py-2 rounded-md text-left transition ${
+                        isActive
+                          ? 'bg-slate-800/80 text-slate-100'
+                          : 'text-slate-500 hover:text-slate-300 hover:bg-slate-900/60'
+                      }`}
+                    >
+                      <span
+                        className={`text-[10px] font-mono tabular-nums ${
+                          isActive ? 'text-emerald-400' : 'text-slate-700'
+                        }`}
+                      >
+                        {s.mark}
+                      </span>
+                      <span className="text-sm font-medium">{s.label}</span>
+                      {isActive && (
+                        <span className="ml-auto h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+
+            {/* Live state read-out — anchored in the nav so it's always
+                visible while you're tweaking settings up top. */}
+            <div className="mt-8 p-3 rounded-lg border border-slate-800/60 bg-slate-900/40">
+              <div className="text-[10px] uppercase tracking-[0.25em] text-slate-600 font-mono">
+                Live state
+              </div>
+              <div className="mt-2 flex items-baseline gap-1.5">
+                <span className="text-3xl font-mono tabular-nums text-emerald-400 leading-none">
+                  {streams.length}
+                </span>
+                <span className="text-sm text-slate-500 font-mono leading-none">
+                  / {autoFillSettings.maxSlots}
+                </span>
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                stream{streams.length !== 1 ? 's' : ''} active
+              </div>
+              {slotsOpen > 0 && (
+                <div className="mt-2 text-[11px] text-emerald-400/80">
+                  +{slotsOpen} slot{slotsOpen !== 1 ? 's' : ''} open
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 p-3 rounded-lg border border-slate-800/60 bg-slate-900/40">
+              <div className="text-[10px] uppercase tracking-[0.25em] text-slate-600 font-mono">
+                Player
+              </div>
+              <div className="mt-2 text-sm text-slate-200 font-medium">
+                {activePlayer.title}
+              </div>
+              <div className="text-[11px] text-slate-500 font-mono">
+                {activePlayer.subtitle}
+              </div>
+            </div>
+          </nav>
+
+          {/* Scrollable content */}
+          <div
+            ref={scrollContainerRef}
+            className="overflow-y-auto px-8 py-6 space-y-10 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-800 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-slate-700"
+          >
+            {/* ─── 01 · AUTO-FILL ─────────────────────────────────── */}
+            <section
+              id="autofill"
+              ref={(el) => { sectionRefs.current.autofill = el; }}
+              className="space-y-6 scroll-mt-2"
+            >
+              <SectionHeader
+                mark="01"
+                title="Auto-fill"
+                subtitle="Behaviour when populating the grid from a sport, an event, or 'find any'."
+              />
+
+              {/* Max slots */}
+              <Field
+                label="Max auto-fill slots"
+                hint={`Auto-fill stops after ${autoFillSettings.maxSlots} stream${autoFillSettings.maxSlots !== 1 ? 's' : ''} total.`}
+              >
+                <div className="flex items-center gap-5">
+                  <input
+                    type="range"
+                    min="1"
+                    max="9"
+                    value={autoFillSettings.maxSlots}
+                    onChange={(e) => setSetting({ maxSlots: parseInt(e.target.value, 10) })}
+                    className="flex-1 h-1.5 bg-slate-800 rounded-full appearance-none cursor-pointer accent-emerald-500 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-emerald-400 [&::-webkit-slider-thumb]:shadow-[0_0_0_4px_rgba(16,185,129,0.18)] [&::-webkit-slider-thumb]:transition-transform [&::-webkit-slider-thumb]:hover:scale-110"
+                  />
+                  <div className="min-w-[3.5rem] text-right">
+                    <span className="text-3xl font-mono tabular-nums text-emerald-400 leading-none">
+                      {autoFillSettings.maxSlots}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-4 gap-1.5">
+                  {[2, 4, 6, 9].map((num) => {
+                    const active = autoFillSettings.maxSlots === num;
+                    return (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setSetting({ maxSlots: num })}
+                        className={`px-3 py-1.5 rounded-md text-xs font-mono tabular-nums transition border ${
+                          active
+                            ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                            : 'border-slate-800 bg-transparent text-slate-500 hover:bg-slate-900 hover:text-slate-300'
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+
+              {/* Two toggles side by side — was awkwardly stacked before */}
+              <div className="grid grid-cols-2 gap-3">
+                <Toggle
+                  active={autoFillSettings.avoidDuplicateSources}
+                  onToggle={() =>
+                    setSetting({ avoidDuplicateSources: !autoFillSettings.avoidDuplicateSources })
+                  }
+                  label="Avoid duplicate sources"
+                  hint="Different IPTV providers per stream"
+                />
+                <Toggle
+                  active={autoFillSettings.avoidDuplicateEvents}
+                  onToggle={() =>
+                    setSetting({ avoidDuplicateEvents: !autoFillSettings.avoidDuplicateEvents })
+                  }
+                  label="Avoid duplicate events"
+                  hint="Don't add the same game twice"
+                />
+              </div>
+
+              {/* Quality tier ladder — single horizontal row */}
+              <Field
+                label="Minimum stream quality"
+                hint={
+                  autoFillSettings.minQuality === 0
+                    ? 'Accept any quality.'
+                    : `Reject streams below ${autoFillSettings.minQuality}p.`
+                }
+              >
+                <div className="grid grid-cols-7 gap-1">
+                  {QUALITY_TIERS.map((q) => {
+                    const active = autoFillSettings.minQuality === q.value;
+                    return (
+                      <button
+                        key={q.value}
+                        type="button"
+                        onClick={() => setSetting({ minQuality: q.value })}
+                        className={`relative px-2 py-2.5 rounded-md text-center transition border ${
+                          active
+                            ? 'bg-indigo-500/10 border-indigo-500/50 text-indigo-200'
+                            : 'border-slate-800 bg-transparent text-slate-400 hover:bg-slate-900 hover:text-slate-200 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-xs font-mono font-semibold tabular-nums">
+                          {q.label}
+                        </div>
+                        <div
+                          className={`text-[10px] font-mono mt-0.5 tracking-wider ${
+                            active ? 'text-indigo-400/90' : 'text-slate-600'
+                          }`}
+                        >
+                          {q.sub}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </Field>
+            </section>
+
+            {/* ─── 02 · PLAYBACK ──────────────────────────────────── */}
+            <section
+              id="playback"
+              ref={(el) => { sectionRefs.current.playback = el; }}
+              className="space-y-5 scroll-mt-2"
+            >
+              <SectionHeader
+                mark="02"
+                title="Playback"
+                subtitle="Engine that renders each multi-view tile."
+              />
+
+              <div className="grid grid-cols-2 gap-3">
+                {PLAYER_OPTIONS.map((opt) => {
+                  const active = autoFillSettings.playerType === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setSetting({ playerType: opt.value })}
+                      className={`group relative text-left p-5 rounded-xl border transition overflow-hidden ${
+                        active
+                          ? 'border-emerald-500/50 bg-emerald-500/5'
+                          : 'border-slate-800 bg-slate-900/40 hover:bg-slate-900/70 hover:border-slate-700'
+                      }`}
+                      aria-pressed={active}
+                    >
+                      {active && (
+                        <span className="absolute top-3 right-3 inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-[0.2em] text-emerald-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
+                          active
+                        </span>
+                      )}
+                      <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500 font-mono">
+                        {opt.subtitle}
+                      </div>
+                      <div
+                        className={`mt-1.5 text-xl font-semibold tracking-tight ${
+                          active ? 'text-emerald-200' : 'text-slate-100'
+                        }`}
+                      >
+                        {opt.title}
+                      </div>
+                      <p className="mt-2 text-xs text-slate-400 leading-relaxed">
+                        {opt.description}
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {opt.tags.map((tag) => (
+                          <span
+                            key={tag}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border ${
+                              active
+                                ? 'bg-emerald-500/10 text-emerald-300/80 border-emerald-500/20'
+                                : 'bg-slate-800/60 text-slate-500 border-slate-800'
+                            }`}
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Switching restarts every active stream. HLS adds ~2s latency vs raw TS but
+                recovers from upstream blips without rotating to a different source.
+              </p>
+            </section>
+
+            {/* ─── 03 · DISPLAY ───────────────────────────────────── */}
+            <section
+              id="display"
+              ref={(el) => { sectionRefs.current.display = el; }}
+              className="space-y-5 scroll-mt-2"
+            >
+              <SectionHeader
+                mark="03"
+                title="Display"
+                subtitle="On-screen overlays and chrome."
+              />
+
+              <Toggle
+                active={autoFillSettings.showLiveScoresTicker}
+                onToggle={() =>
+                  setSetting({ showLiveScoresTicker: !autoFillSettings.showLiveScoresTicker })
+                }
+                label="Live scores ticker"
+                hint="Scrolling sports ticker at the bottom of the screen"
+              />
+            </section>
+
+            {/* ─── 04 · LOCATION ──────────────────────────────────── */}
+            <section
+              id="location"
+              ref={(el) => { sectionRefs.current.location = el; }}
+              className="space-y-5 scroll-mt-2 pb-2"
+            >
+              <SectionHeader
+                mark="04"
+                title="Location"
+                subtitle="Used to find local news channels and regional broadcasts."
+              />
+              <div className="p-4 rounded-xl border border-slate-800 bg-slate-900/40">
+                <LocationSelector compact={false} showLabel={true} className="w-full" />
+              </div>
+            </section>
+          </div>
+        </div>
+
+        {/* FOOTER */}
+        <footer className="px-8 py-4 border-t border-slate-800/60 bg-slate-950/60 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-[0.2em] text-slate-500">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              {streams.length}/{autoFillSettings.maxSlots} slots
+            </span>
+            <span className="text-slate-700">·</span>
+            <span>{activePlayer.title}</span>
+            <span className="text-slate-700">·</span>
+            <span>Ticker {autoFillSettings.showLiveScoresTicker ? 'on' : 'off'}</span>
+          </div>
+          <button
+            onClick={onClose}
+            className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-emerald-950 text-sm font-semibold tracking-tight shadow-[0_0_24px_-6px_rgba(16,185,129,0.6)] transition"
           >
             Done
           </button>
-        </div>
+        </footer>
       </div>
     </div>
   );

@@ -341,6 +341,7 @@ const StreamCellInner = memo(({
   isMuted,
   quality,
   isFindingAlternative,
+  playerType = 'mpegts-player',
   onToggleMute,
   onRefresh,
   onFindAlternative,
@@ -485,7 +486,7 @@ const StreamCellInner = memo(({
         <IPTVPlayer
           sessionId={sessionId}
           selectedChannel={stream}
-          playbackMethod="mpegts-player"
+          playbackMethod={playerType}
           matchedChannels={{}}
           theatreMode={true}
           muted={isMuted}
@@ -505,7 +506,8 @@ const StreamCellInner = memo(({
     prevProps.isTheatreMode === nextProps.isTheatreMode &&
     prevProps.isMuted === nextProps.isMuted &&
     prevProps.quality?.resolution === nextProps.quality?.resolution &&
-    prevProps.isFindingAlternative === nextProps.isFindingAlternative
+    prevProps.isFindingAlternative === nextProps.isFindingAlternative &&
+    prevProps.playerType === nextProps.playerType
   );
 });
 
@@ -518,6 +520,7 @@ export const SortableStreamCell = ({
   isMuted,
   quality,
   isFindingAlternative,
+  playerType = 'mpegts-player',
   onToggleMute,
   onRefresh,
   onFindAlternative,
@@ -558,6 +561,7 @@ export const SortableStreamCell = ({
         isMuted={isMuted}
         quality={quality}
         isFindingAlternative={isFindingAlternative}
+        playerType={playerType}
         onToggleMute={onToggleMute}
         onRefresh={onRefresh}
         onFindAlternative={onFindAlternative}
