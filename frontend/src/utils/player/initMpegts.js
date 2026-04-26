@@ -263,17 +263,19 @@ export function initializeMpegtsPlayerInstance(ctx) {
         errorContext = `Media error (${errorDetail})`;
       }
 
-      // Resilient proxy mode: the backend has its own retry loop. If it
-      // surfaces an error to us it's already exhausted; don't double
-      // up with frontend recovery.
-      if (shouldUseResilientProxy) {
-        log('info', 'Using resilient proxy - backend retry exhausted, showing error');
-        setError(`${errorContext}. Finding alternative...`);
-        notifyStreamDead('exhausted');
-        return;
-      }
-
-      attemptRecovery(errorContext);
+      // Resilient proxy mode: try a soft recovery (mpegts unload/load —
+      // equivalent to a page refresh, kicks a fresh fetch which spawns
+      // a new backend ffmpeg pipe) before declaring the stream dead.
+      // The original "give up immediately" path was assuming the
+      // backend would only surface an error after exhausting its own
+      // retries, but in practice TS continuity gaps from upstream
+      // ffmpeg reconnects and transient frontend network blips fire
+      // ERROR/LOADING_COMPLETE while the backend is still happily
+      // streaming — that's why a manual page refresh "fixes" it. Soft
+      // recovery automates the refresh; attemptSoftRecovery itself
+      // escalates to notifyStreamDead after MAX_SOFT_RECOVERIES failed
+      // attempts, so we don't loop forever on a truly dead source.
+      attemptSoftRecovery(errorContext);
     });
 
     player.on(window.mpegts.Events.LOADING_COMPLETE, () => {
@@ -286,13 +288,11 @@ export function initializeMpegtsPlayerInstance(ctx) {
         return;
       }
 
-      if (shouldUseResilientProxy) {
-        log('info', 'Using resilient proxy - backend connection closed, showing error');
-        setError('Stream ended. Finding alternative...');
-        notifyStreamDead('closed');
-        return;
-      }
-
+      // Same reasoning as the ERROR handler — let soft recovery try a
+      // refresh before giving up. mpegts.js often fires LOADING_COMPLETE
+      // for transient EOF on the backend response (e.g. when ffmpeg's
+      // upstream socket cycles and our io-controller sees the response
+      // close briefly) even though the backend is fine.
       attemptSoftRecovery('Stream ended (loading complete)');
     });
 
