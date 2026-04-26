@@ -99,6 +99,18 @@ export function initializeHlsPlayer(ctx) {
             }
         };
 
+        // Diagnostics + progress watchdog need to live BEFORE the
+        // native-HLS early return below, because Safari users (Mac +
+        // iOS) take that path and we still need to know when their
+        // stream isn't actually rendering. We bypass the IPTVPlayer
+        // log() helper because it's gated by theatreMode; console.warn
+        // / console.error are intercepted by utils/logger.js and
+        // relayed to the backend.
+        const cid = getChannelId();
+        const tag = `[hls ${cid}]`;
+        const mountedAt = Date.now();
+        const sinceMount = () => Date.now() - mountedAt;
+
         addTrackedListener(videoEl, 'playing', () => {
             log('info', 'Video playing');
             setLoading(false);
@@ -113,6 +125,94 @@ export function initializeHlsPlayer(ctx) {
             addTrackedListener(videoEl, 'resize', () => detectQualityHls('resize'));
         }
 
+        // <video> diagnostic events. Suppress events fired during the
+        // first 2s of mount — a stalled-while-loading is normal and
+        // would otherwise spam.
+        addTrackedListener(videoEl, 'stalled', () => {
+            if (sinceMount() > 2000) console.warn(`${tag} <video> stalled (no data) at t=${videoEl.currentTime.toFixed(1)}s`);
+        });
+        addTrackedListener(videoEl, 'waiting', () => {
+            if (sinceMount() > 2000) console.warn(`${tag} <video> waiting (buffering) at t=${videoEl.currentTime.toFixed(1)}s`);
+        });
+        addTrackedListener(videoEl, 'error', () => {
+            const err = videoEl.error;
+            const code = err?.code;
+            console.error(`${tag} <video> error code=${code} msg=${err?.message}`);
+            // Codes 3 (DECODE) and 4 (SRC_NOT_SUPPORTED, includes
+            // DEMUXER_ERROR_COULD_NOT_PARSE) are terminal for the
+            // current source — Chrome's media pipeline gives up and
+            // won't recover passively. The tile would otherwise sit
+            // on a black box forever, so flag the stream dead and let
+            // the multi-view auto-find a different candidate.
+            if ((code === 3 || code === 4) && !hasCalledOnStreamDeadRef.current) {
+                if (watchdogId) clearInterval(watchdogId);
+                watchdogId = null;
+                setError('Playback failed. Finding alternative…');
+                notifyStreamDead(`hls_video_error_${code}`);
+            }
+        });
+        addTrackedListener(videoEl, 'ended', () => {
+            console.warn(`${tag} <video> ended (live should not end)`);
+        });
+
+        // ────────────────────────────────────────────────────────────
+        // No-progress watchdog
+        // ────────────────────────────────────────────────────────────
+        // Catches the "playing event fired but currentTime never moves"
+        // case — this happens when the stream's bitstream is malformed
+        // or uses a codec the browser MSE/native-HLS path doesn't fully
+        // support, so the player attaches and reports "playing" but
+        // produces no frames. Neither the hls.js error path nor the
+        // <video> stalled/waiting/error events surface this — the
+        // stream looks alive from the player's perspective.
+        //
+        // The Channel 9 AU netball test surfaced exactly this:
+        // ffprobe verified the stream, ffmpeg ran for 27s, "Video
+        // playing" fired, but the user saw a black box and nothing
+        // ever recovered.
+        let lastObservedTime = 0;
+        let lastProgressAt = Date.now();
+        let watchdogId = null;
+        const STALL_TIMEOUT_MS = 30000;
+        const startWatchdog = () => {
+            if (watchdogId) return;
+            watchdogId = setInterval(() => {
+                try {
+                    const el = videoElementRef.current;
+                    if (!el || !el.parentElement) {
+                        clearInterval(watchdogId);
+                        watchdogId = null;
+                        return;
+                    }
+                    if (el.paused) {
+                        // user-paused or pre-play; reset the deadline
+                        lastProgressAt = Date.now();
+                        return;
+                    }
+                    const ct = el.currentTime || 0;
+                    if (ct > lastObservedTime + 0.1) {
+                        lastObservedTime = ct;
+                        lastProgressAt = Date.now();
+                        return;
+                    }
+                    const idleMs = Date.now() - lastProgressAt;
+                    if (idleMs >= STALL_TIMEOUT_MS) {
+                        console.error(`${tag} watchdog: no playback progress for ${Math.round(idleMs / 1000)}s — declaring dead`);
+                        clearInterval(watchdogId);
+                        watchdogId = null;
+                        if (!hasCalledOnStreamDeadRef.current) {
+                            setError('Stream not playing. Finding alternative…');
+                            notifyStreamDead('hls_no_progress');
+                        }
+                    }
+                } catch (e) {
+                    // videoEl was torn down underneath us — exit cleanly.
+                    if (watchdogId) clearInterval(watchdogId);
+                    watchdogId = null;
+                }
+            }, 5000);
+        };
+
         // ============================================================
         // Native HLS path (iOS Safari, macOS Safari)
         // ============================================================
@@ -123,7 +223,15 @@ export function initializeHlsPlayer(ctx) {
             log('info', 'Using native HLS (Safari)');
             videoEl.src = playlistUrl;
             videoEl.play().catch(() => {});
-            playerInstanceRef.current = { destroy: () => { videoEl.removeAttribute('src'); videoEl.load(); } };
+            startWatchdog();
+            playerInstanceRef.current = {
+                destroy: () => {
+                    if (watchdogId) clearInterval(watchdogId);
+                    watchdogId = null;
+                    videoEl.removeAttribute('src');
+                    videoEl.load();
+                }
+            };
             return;
         }
 
@@ -152,9 +260,15 @@ export function initializeHlsPlayer(ctx) {
             // long stall triggers a recovery seek instead of getting
             // stuck.
             liveMaxLatencyDurationCount: theatreMode ? 8 : 12,
-            // Drop the worker in theatre mode — 6 web workers (one per
-            // tile) compounded the memory pressure we hit before.
-            enableWorker: !theatreMode,
+            // Always run the demuxer in a Web Worker. Disabling it in
+            // multi-view (the previous "save memory" tradeoff) caused
+            // simultaneous DEMUXER_ERROR_COULD_NOT_PARSE failures: with
+            // 4-6 hls.js instances all transmuxing MPEG-TS → fMP4 on
+            // the main thread, they starved each other and produced
+            // malformed `appendBuffer` calls that Chrome rejected. The
+            // few extra MB per worker is cheap compared to "every
+            // tile dies at once".
+            enableWorker: true,
             lowLatencyMode: false,
             backBufferLength: theatreMode ? 10 : 30,
             // Modern Load Policy API. The previous fragLoadingMaxRetry /
@@ -199,6 +313,7 @@ export function initializeHlsPlayer(ctx) {
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
             videoEl.play().catch(() => {});
+            startWatchdog();
         });
 
         hls.on(Hls.Events.LEVEL_LOADED, () => {
@@ -206,21 +321,12 @@ export function initializeHlsPlayer(ctx) {
             setLoading(false);
         });
 
-        // Diagnostic logging for hls.js events. We bypass the IPTVPlayer
-        // `log()` helper here because it's gated by theatreMode (only
-        // "Video playing" gets through in multi-view), which is exactly
-        // when we MOST need visibility. console.warn / console.error
-        // are intercepted by utils/logger.js and relayed to the backend
-        // /api/logs/frontend, so they show up in the server log too.
-        const cid = getChannelId();
-        const tag = `[hls ${cid}]`;
         let lastNonFatalAt = 0;
-
         hls.on(Hls.Events.ERROR, (_event, data) => {
             const { type, details, fatal } = data;
             if (!fatal) {
-                // Throttle non-fatal warning logs to one per 2s per
-                // detail-type so a flapping fragment doesn't spam.
+                // Throttle non-fatal warning logs to one per 2s so a
+                // flapping fragment doesn't spam.
                 const now = Date.now();
                 if (now - lastNonFatalAt > 2000) {
                     lastNonFatalAt = now;
@@ -255,26 +361,14 @@ export function initializeHlsPlayer(ctx) {
             }
         });
 
-        // Video element diagnostics. These help distinguish "hls.js
-        // fired an error" from "decoder/MSE/<video> got stuck on its
-        // own". Suppress events fired during the first 2s of mount —
-        // a stalled-while-loading is normal.
-        const mountedAt = Date.now();
-        const sinceMount = () => Date.now() - mountedAt;
-        addTrackedListener(videoEl, 'stalled', () => {
-            if (sinceMount() > 2000) console.warn(`${tag} <video> stalled (no data) at t=${videoEl.currentTime.toFixed(1)}s`);
-        });
-        addTrackedListener(videoEl, 'waiting', () => {
-            if (sinceMount() > 2000) console.warn(`${tag} <video> waiting (buffering) at t=${videoEl.currentTime.toFixed(1)}s`);
-        });
-        addTrackedListener(videoEl, 'error', () => {
-            const err = videoEl.error;
-            console.error(`${tag} <video> error code=${err?.code} msg=${err?.message}`);
-        });
-        addTrackedListener(videoEl, 'ended', () => {
-            console.warn(`${tag} <video> ended (live should not end)`);
-        });
-
+        // Wrap hls.destroy so the watchdog stops cleanly when the
+        // player is torn down (channel switch, page unmount, etc.).
+        const originalDestroy = hls.destroy.bind(hls);
+        hls.destroy = () => {
+            if (watchdogId) clearInterval(watchdogId);
+            watchdogId = null;
+            originalDestroy();
+        };
         playerInstanceRef.current = hls;
     } catch (e) {
         log('error', 'Error initializing hls.js player', { error: e.message });
