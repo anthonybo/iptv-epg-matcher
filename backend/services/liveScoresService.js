@@ -253,14 +253,20 @@ function restartWithNewInterval() {
  */
 async function getLiveScores() {
   try {
-    // Guard against stale is_live flags. ESPN sometimes drops a game
-    // off its scoreboard (once it moves to FINAL) before our poller
-    // gets to update is_live, which leaves rows with is_live=TRUE AND
-    // status_type='STATUS_SECOND_HALF' hours after the game actually
-    // ended. This was the "ticker shows MLS games that finished
-    // yesterday" bug — the ticker was reading WHERE is_live=TRUE with
-    // no freshness check. We require event_end within 30 min of now
-    // AND status_type not already marked FINAL.
+    // Strict: only games actually in-play right now. is_live=TRUE is
+    // the source of truth — the score updater flips it based on
+    // ESPN's state field. Anti-stale guard: event_end >= NOW − 30 min
+    // so a forgotten is_live=TRUE from a game that ended hours ago
+    // can't linger. STATUS_FINAL gate trims the half-hour stale
+    // window for events ESPN has already moved to FINAL.
+    //
+    // Why not the wider "advertised-window OR is_live" predicate the
+    // top-bar route used to use? Because that pulled multi-day
+    // tournaments (PGA, LPGA, WTA, F1 weekends) into the ticker even
+    // between rounds — Round 2 finishes Friday night, Round 3 starts
+    // Saturday morning, but the 4-day window has the tournament
+    // showing as "live" the whole time. Top-bar predicate was
+    // tightened in the same change to match this strict version.
     const result = await postgresService.query(`
       SELECT
         event_id,

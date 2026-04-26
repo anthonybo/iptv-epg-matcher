@@ -29,6 +29,21 @@ function getColorClass(sportType) {
   return SPORT_COLORS[sportType] || DEFAULT_COLOR;
 }
 
+// HTML-escape user-controlled fields before injecting into innerHTML.
+// (event_name and team names come from ESPN, but defending against
+// future data sources is cheap insurance.)
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function isUnknownTeam(name) {
+  if (!name) return true;
+  const lower = String(name).toLowerCase().trim();
+  return lower === 'unknown' || lower === '';
+}
+
 // Render a single score item to HTML string (for DOM injection)
 function renderScoreItem(score, clickable = false) {
   const colorClass = getColorClass(score.sport_type);
@@ -37,16 +52,27 @@ function renderScoreItem(score, clickable = false) {
     ? '<span class="h-1.5 w-1.5 rounded-full bg-red-500"></span>'
     : '';
   const clockDisplay = score.game_clock
-    ? `<span class="text-slate-500" data-clock="true">${score.game_clock}</span>`
+    ? `<span class="text-slate-500" data-clock="true">${esc(score.game_clock)}</span>`
     : '';
 
+  // Solo-competitor sports (golf tournaments, tennis singles, MMA
+  // events, racing) have no home/away pair — ESPN returns multi-
+  // competitor competitions and our parser falls through to "Unknown"
+  // for both. Showing "Unknown - - Unknown" looks broken; render the
+  // event name + status instead.
+  const isSolo = isUnknownTeam(score.home_team) || isUnknownTeam(score.away_team);
+  const middle = isSolo
+    ? `<span class="text-slate-100 font-medium">${esc(score.event_name || score.league_name)}</span>
+       ${score.game_status ? `<span class="text-slate-500">·</span><span class="text-slate-300">${esc(score.game_status)}</span>` : ''}`
+    : `<span class="text-slate-200">${esc(score.away_team)}</span>
+       <span class="font-bold text-slate-100" data-score="true">${score.away_score ?? '-'} - ${score.home_score ?? '-'}</span>
+       <span class="text-slate-200">${esc(score.home_team)}</span>`;
+
   return `
-    <div class="flex-shrink-0 flex items-center gap-2 rounded border px-3 py-1.5 text-xs ${colorClass} ${clickableClass}" data-event-id="${score.event_id}">
+    <div class="flex-shrink-0 flex items-center gap-2 rounded border px-3 py-1.5 text-xs ${colorClass} ${clickableClass}" data-event-id="${esc(score.event_id)}">
       ${liveIndicator}
-      <span class="text-slate-400">${score.league_name}</span>
-      <span class="text-slate-200">${score.away_team}</span>
-      <span class="font-bold text-slate-100" data-score="true">${score.away_score ?? '-'} - ${score.home_score ?? '-'}</span>
-      <span class="text-slate-200">${score.home_team}</span>
+      <span class="text-slate-400">${esc(score.league_name)}</span>
+      ${middle}
       ${clockDisplay}
     </div>
   `;
