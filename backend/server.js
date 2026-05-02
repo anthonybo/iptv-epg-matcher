@@ -393,6 +393,8 @@ const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
 const userLocationsRoutes = require('./routes/userLocations');
 const liveScoresRoutes = require('./routes/liveScores');
+const trendingChannelsRoutes = require('./routes/trendingChannels');
+const trendingChannelsService = require('./services/trendingChannels');
 
 // In case settings.js is missing or has errors, provide a fallback
 if (!settingsRouter || typeof settingsRouter !== 'function') {
@@ -449,6 +451,8 @@ app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news
 app.use('/api/live-scores', liveScoresRoutes); // Live sports scores
+app.use('/api/trending', trendingChannelsRoutes); // Live trending TV channels (YT/Twitch/Reddit/Bsky composite)
+trendingChannelsService.startRefreshLoop();
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));

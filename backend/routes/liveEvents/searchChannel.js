@@ -43,7 +43,15 @@ router.post('/search-channel', async (req, res) => {
     searchOffset = 0,
     espnEventId = null,
     sportType: sportTypeHint = null,
-    leagueName: leagueNameHint = null
+    leagueName: leagueNameHint = null,
+    // 'event' (default) — assume the query may be a "Team A at Team B"
+    // event title and run the alias-aware matcher.
+    // 'brand' — the query is a TV-channel brand name (e.g. "ESPN",
+    // "Sky News"). Exclude event-pattern names (X vs Y, PPV, FINAL,
+    // date stamps) and rank by name proximity to the brand. Keeps
+    // trending/popular-channel picks from landing on stale per-event
+    // PPV channels.
+    mode = 'event'
   } = req.body;
 
   if (!query || typeof query !== 'string' || query.trim().length < 2) {
@@ -571,6 +579,50 @@ router.post('/search-channel', async (req, res) => {
           return res.end();
         }
         break;
+      }
+
+      // ─── Brand-mode filter ─────────────────────────────────────────
+      // When the caller is searching for a TV-channel brand name (e.g.
+      // "ESPN" picked from the trending list), strip out per-event PPV
+      // entries (`ESPN+ | NBA: Lakers vs Warriors`), date-stamped
+      // archived feeds, and other noise so we land on the linear/24-7
+      // channel rather than a stale event channel that's no longer live.
+      if (mode === 'brand' && channels.length > 0) {
+        const eventNoisePattern = /(\bvs?\.?\b|\b@\b|\bat\s+\b|\bppv\b|\bfinal\b|\bppr\b|\bplayoff\b|\bgame\s*\d|\b\d{1,2}[\.\/-]\d{1,2}\b|\b20\d{2}-\d{2}-\d{2}\b|\b\d+\s*-\s*\d+\b)/i;
+        const queryLower = String(searchQuery).toLowerCase().trim();
+        const beforeBrand = channels.length;
+        // Score: (a) starts-with brand wins, (b) exact word-match wins,
+        // (c) no event noise. Keep only positively-scored candidates.
+        channels = channels
+          .map((c) => {
+            const name = String(c.name || '');
+            const lower = name.toLowerCase();
+            if (eventNoisePattern.test(lower)) return null;
+            let score = 0;
+            const wordRe = new RegExp(`\\b${queryLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+            if (wordRe.test(lower)) score += 100;
+            if (lower.startsWith(queryLower)) score += 50;
+            // Penalise long names — linear feeds are typically short
+            // ("ESPN", "ESPN HD", "ESPN US"); event/regional ones are
+            // long ("ESPN+ FOOTBALL: SOMEWHERE STATE @ OTHER U").
+            if (name.length <= 12) score += 30;
+            else if (name.length <= 20) score += 15;
+            else if (name.length > 40) score -= 30;
+            // Light penalty for trailing decorations like (US), [HD], etc.
+            // Keep short adornments ("HD", "FHD", "1080p") but downrank
+            // region badges so the bare brand wins when present.
+            if (/\(.*\)|\[.*\]/.test(name)) score -= 5;
+            return score > 0 ? { ...c, _brandScore: score } : null;
+          })
+          .filter(Boolean)
+          .sort((a, b) => b._brandScore - a._brandScore);
+        if (beforeBrand !== channels.length) {
+          logger.info(`[Batch ${batchNum + 1}] Brand-mode filtered ${beforeBrand} → ${channels.length} (excluded event-pattern names)`);
+        }
+        if (channels.length === 0) {
+          currentDbOffset += BATCH_SIZE;
+          continue;
+        }
       }
 
       totalChannelsMatched += channels.length;

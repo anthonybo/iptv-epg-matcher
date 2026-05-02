@@ -8,7 +8,8 @@ import {
   MultiViewHeader,
   MultiViewGrid,
   SettingsModal,
-  BlacklistModal
+  BlacklistModal,
+  TrendingModal
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
@@ -33,6 +34,7 @@ const MultiViewPage = ({ sessionId }) => {
   // Settings + layout + misc local state (things that aren't owned by a hook).
   // ---------------------------------------------------------------------------
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showTrendingModal, setShowTrendingModal] = useState(false);
   const [autoFillSettings, setAutoFillSettings] = useState(() => {
     const saved = localStorage.getItem('multiview_autofill_settings');
     const defaults = {
@@ -121,7 +123,8 @@ const MultiViewPage = ({ sessionId }) => {
     searchQuery,
     setSearchQuery,
     isSearching,
-    handleSearchChannel
+    handleSearchChannel,
+    searchByName
   } = useStreamSearch({ streams, autoFillSettings });
 
   // Auto-fill: NDJSON streaming handler + progress state.
@@ -246,6 +249,7 @@ const MultiViewPage = ({ sessionId }) => {
           onRandomAnyChannel={findRandomAnyChannel}
           autoFillSettings={autoFillSettings}
           onShowSettings={() => setShowSettingsModal(true)}
+          onShowTrending={() => setShowTrendingModal(true)}
           onFindLocalNews={findLocalNews}
           searchingNews={searchingNews}
           layoutMode={layoutMode}
@@ -325,6 +329,18 @@ const MultiViewPage = ({ sessionId }) => {
         streams={streams}
         autoFillSettings={autoFillSettings}
         setAutoFillSettings={setAutoFillSettings}
+      />
+
+      <TrendingModal
+        isOpen={showTrendingModal}
+        onClose={() => setShowTrendingModal(false)}
+        onPick={(channel) =>
+          // Brand mode tells the backend to skip per-event/PPV channels
+          // (e.g. "ESPN+ | NBA: Lakers vs Warriors") and prefer the
+          // linear feed. Return the promise so the modal can show a
+          // per-row spinner and auto-close on success.
+          searchByName(channel.name, { mode: 'brand' })
+        }
       />
 
       {/* Live Scores Ticker */}

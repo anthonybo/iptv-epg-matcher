@@ -74,12 +74,16 @@ export function useStreamSearch({ streams, autoFillSettings }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
 
-  const handleSearchChannel = async (e) => {
-    e.preventDefault();
-
-    if (!searchQuery.trim() || searchQuery.trim().length < 2) {
+  /**
+   * Run the search-channel pipeline against an arbitrary query string —
+   * the form-submit handler and the Trending modal both go through this.
+   * Returns true on a successful add, false otherwise.
+   */
+  const runSearch = async (rawQuery, opts = {}) => {
+    const query = String(rawQuery || '').trim();
+    if (query.length < 2) {
       showToast('Enter at least 2 characters to search', 'error');
-      return;
+      return false;
     }
 
     setIsSearching(true);
@@ -93,8 +97,7 @@ export function useStreamSearch({ streams, autoFillSettings }) {
       const token = getToken();
       if (!token) {
         showToast('Authentication required', 'error');
-        setIsSearching(false);
-        return;
+        return false;
       }
 
       const response = await fetch('/api/live-events/search-channel', {
@@ -105,10 +108,11 @@ export function useStreamSearch({ streams, autoFillSettings }) {
           Accept: 'application/x-ndjson'
         },
         body: JSON.stringify({
-          query: searchQuery.trim(),
+          query,
           excludeSourceIds: currentSourceIds,
           excludeChannelIds: currentChannelIds,
-          minQuality: autoFillSettings.minQuality
+          minQuality: autoFillSettings.minQuality,
+          mode: opts.mode || 'event'
         })
       });
       const terminal = await consumeSearchNdjson(response);
@@ -118,21 +122,34 @@ export function useStreamSearch({ streams, autoFillSettings }) {
         if (success) {
           window.dispatchEvent(new Event('multiviewUpdate'));
           showToast(`Added "${terminal.channel.name}" to Multi-View`, 'success');
-          setSearchQuery('');
-          setShowSearchInput(false);
-        } else {
-          showToast('Failed to add channel to Multi-View', 'error');
+          return true;
         }
-      } else {
-        showToast(terminal?.message || terminal?.error || 'No working channel found', 'error');
+        showToast('Failed to add channel to Multi-View', 'error');
+        return false;
       }
+      showToast(terminal?.message || terminal?.error || 'No working channel found', 'error');
+      return false;
     } catch (error) {
       console.error('[Search] Error:', error);
       showToast('Search failed', 'error');
+      return false;
     } finally {
       setIsSearching(false);
     }
   };
+
+  const handleSearchChannel = async (e) => {
+    e.preventDefault();
+    const ok = await runSearch(searchQuery);
+    if (ok) {
+      setSearchQuery('');
+      setShowSearchInput(false);
+    }
+  };
+
+  // Programmatic search — used by Trending modal etc. Doesn't touch the
+  // input UI state, just runs the pipeline.
+  const searchByName = async (name, opts = {}) => runSearch(name, opts);
 
   return {
     showSearchInput,
@@ -140,6 +157,7 @@ export function useStreamSearch({ streams, autoFillSettings }) {
     searchQuery,
     setSearchQuery,
     isSearching,
-    handleSearchChannel
+    handleSearchChannel,
+    searchByName
   };
 }

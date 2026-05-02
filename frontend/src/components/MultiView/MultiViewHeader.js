@@ -30,6 +30,8 @@ const MultiViewHeader = ({
   // Local News
   onFindLocalNews,
   searchingNews,
+  // Trending
+  onShowTrending,
   // Layout
   layoutMode,
   showLayoutMenu,
@@ -107,6 +109,19 @@ const MultiViewHeader = ({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
             <span className="text-slate-400">{autoFillSettings.maxSlots}</span>
+          </button>
+
+          {/* Trending Button */}
+          <button
+            onClick={onShowTrending}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-700 bg-rose-900/20 px-3 py-1.5 text-xs font-semibold text-rose-300 transition hover:bg-rose-900/40"
+            title="Trending TV channels right now (live composite)"
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+            </span>
+            Trending
           </button>
 
           {/* Local News Button */}
