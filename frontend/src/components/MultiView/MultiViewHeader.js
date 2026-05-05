@@ -32,6 +32,11 @@ const MultiViewHeader = ({
   searchingNews,
   // Trending
   onShowTrending,
+  // All Games Today (debug/test entry point — exercises the ticker
+  // pipeline against any of today's events, live or finished)
+  onShowAllGames,
+  // Broadcaster Coverage (alias-table inspection / gap report)
+  onShowBroadcasterCoverage,
   // Layout
   layoutMode,
   showLayoutMenu,
@@ -122,6 +127,30 @@ const MultiViewHeader = ({
               <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
             </span>
             Trending
+          </button>
+
+          {/* All Games Today */}
+          <button
+            onClick={onShowAllGames}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-700 bg-emerald-900/20 px-3 py-1.5 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/40"
+            title="All games today (live, scheduled, and final) — click any to test the ticker pipeline"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            Games
+          </button>
+
+          {/* Broadcaster Coverage (debug) */}
+          <button
+            onClick={onShowBroadcasterCoverage}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-700 bg-cyan-900/20 px-3 py-1.5 text-xs font-semibold text-cyan-300 transition hover:bg-cyan-900/40"
+            title="Broadcaster alias coverage — see which ESPN broadcaster codes have aliases vs. gaps"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" />
+            </svg>
+            Coverage
           </button>
 
           {/* Local News Button */}

@@ -87,6 +87,14 @@ export function useStreamSearch({ streams, autoFillSettings }) {
     }
 
     setIsSearching(true);
+    if (opts.signal) {
+      console.log(`[Search] runSearch starting with cancel signal (query="${query}", aborted=${opts.signal.aborted})`);
+      opts.signal.addEventListener('abort', () => {
+        console.log(`[Search] AbortSignal fired for query="${query}"`);
+      }, { once: true });
+    } else {
+      console.log(`[Search] runSearch starting WITHOUT cancel signal (query="${query}")`);
+    }
 
     try {
       const currentSourceIds = autoFillSettings.avoidDuplicateSources
@@ -112,8 +120,21 @@ export function useStreamSearch({ streams, autoFillSettings }) {
           excludeSourceIds: currentSourceIds,
           excludeChannelIds: currentChannelIds,
           minQuality: autoFillSettings.minQuality,
-          mode: opts.mode || 'event'
-        })
+          mode: opts.mode || 'event',
+          // Optional alias expansion (Coverage modal's row Test
+          // button passes the row's full alias list). Backend OR's
+          // these into the SQL filter and the brand-mode scoring
+          // accepts a word-boundary match on ANY of them — so one
+          // click finds any channel from the broadcaster family
+          // even when the user's catalog uses a different alias
+          // name than the canonical primary.
+          aliases: Array.isArray(opts.aliases) ? opts.aliases : undefined
+        }),
+        // Plumb the caller's AbortController through so the modal's
+        // Cancel button can stop a slow ffprobe loop. Backend
+        // search-channel listens for req 'close' (clientGone) and
+        // breaks out of the batch + chunk loops within a tick.
+        signal: opts.signal
       });
       const terminal = await consumeSearchNdjson(response);
 
@@ -130,6 +151,14 @@ export function useStreamSearch({ streams, autoFillSettings }) {
       showToast(terminal?.message || terminal?.error || 'No working channel found', 'error');
       return false;
     } catch (error) {
+      // AbortError = user clicked Cancel; that's not a real failure
+      // and we don't want a confusing red toast for an intentional
+      // user action. The "Search cancelled" toast is friendlier and
+      // the per-row spinner clears via the finally block below.
+      if (error?.name === 'AbortError') {
+        showToast('Search cancelled', 'info');
+        return false;
+      }
       console.error('[Search] Error:', error);
       showToast('Search failed', 'error');
       return false;

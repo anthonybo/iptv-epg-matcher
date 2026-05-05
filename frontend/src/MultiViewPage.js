@@ -9,7 +9,9 @@ import {
   MultiViewGrid,
   SettingsModal,
   BlacklistModal,
-  TrendingModal
+  TrendingModal,
+  AllGamesModal,
+  BroadcasterCoverageModal
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
@@ -35,6 +37,8 @@ const MultiViewPage = ({ sessionId }) => {
   // ---------------------------------------------------------------------------
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showTrendingModal, setShowTrendingModal] = useState(false);
+  const [showAllGamesModal, setShowAllGamesModal] = useState(false);
+  const [showBroadcasterCoverageModal, setShowBroadcasterCoverageModal] = useState(false);
   const [autoFillSettings, setAutoFillSettings] = useState(() => {
     const saved = localStorage.getItem('multiview_autofill_settings');
     const defaults = {
@@ -251,6 +255,8 @@ const MultiViewPage = ({ sessionId }) => {
           autoFillSettings={autoFillSettings}
           onShowSettings={() => setShowSettingsModal(true)}
           onShowTrending={() => setShowTrendingModal(true)}
+          onShowAllGames={() => setShowAllGamesModal(true)}
+          onShowBroadcasterCoverage={() => setShowBroadcasterCoverageModal(true)}
           onFindLocalNews={findLocalNews}
           searchingNews={searchingNews}
           layoutMode={layoutMode}
@@ -342,6 +348,43 @@ const MultiViewPage = ({ sessionId }) => {
           // per-row spinner and auto-close on success.
           searchByName(channel.name, { mode: 'brand' })
         }
+      />
+
+      <BroadcasterCoverageModal
+        isOpen={showBroadcasterCoverageModal}
+        onClose={() => setShowBroadcasterCoverageModal(false)}
+        // Two call shapes from the modal:
+        //   row Test    → onTestCode(code, signal, aliases[])
+        //   alias chip  → onTestCode(alias, signal)        (3rd arg undefined)
+        // Both run brand-mode; the optional aliases array is the row's
+        // full expansion list so a single Test click covers every
+        // catalog naming variant of the family.
+        onTestCode={(code, signal, aliases) =>
+          searchByName(code, { mode: 'brand', signal, aliases })
+        }
+      />
+
+      <AllGamesModal
+        isOpen={showAllGamesModal}
+        onClose={() => setShowAllGamesModal(false)}
+        // Forward each pick straight into the ticker pipeline. The
+        // /today endpoint returns rows whose field names already
+        // match the score object handleTickerEventClick expects
+        // (event_id, event_name, sport_type, league_name, home_team,
+        // away_team), so no shape massaging is needed.
+        onPick={async (event, signal) => {
+          await handleTickerEventClick(event, { signal });
+          // Always close after the click — the user gets a toast for
+          // success/failure, and they can reopen to try another game.
+          return true;
+        }}
+        // Click on a broadcaster chip → brand-mode search for that
+        // channel directly (same pipeline as Coverage modal's Test
+        // button). Modal stays open so the user can try multiple
+        // chips if the first one isn't carried in their catalog.
+        // Signal flows from the chip's AbortController so Cancel
+        // works mid-search.
+        onPickBroadcaster={(code, signal) => searchByName(code, { mode: 'brand', signal })}
       />
 
       {/* Live Scores Ticker */}

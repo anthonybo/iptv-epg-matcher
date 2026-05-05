@@ -13,7 +13,8 @@ const { execFileAsync, httpAgent, httpsAgent } = require('../../utils/streamAgen
 const { extractSearchTerms, calculateRelevanceScore } = require('../../utils/channelScoring');
 const teamMatcher = require('../../utils/teamMatcher');
 const teamAliasesService = require('../../services/teamAliasesService');
-const { expandBroadcastersList, expandLeagueBroadcastersFallback } = require('../../utils/broadcasterAliases');
+const { expandBroadcastersList, expandLeagueBroadcastersFallback, expandBroadcaster, hasAlias } = require('../../utils/broadcasterAliases');
+const broadcasterStats = require('../../services/broadcasterMatchStats');
 const { findChannelsByEpg } = require('../../utils/epgSearch');
 const { lookupSoccerBroadcasters } = require('../../utils/liveSoccerTvEnricher');
 
@@ -51,7 +52,14 @@ router.post('/search-channel', async (req, res) => {
     // date stamps) and rank by name proximity to the brand. Keeps
     // trending/popular-channel picks from landing on stale per-event
     // PPV channels.
-    mode = 'event'
+    mode = 'event',
+    // Optional list of additional brand aliases to include in the SQL
+    // filter alongside `query` (e.g. ["MLB.TV","MLBTV","MLB NETWORK"]
+    // for a row Test of the MLB.TV broadcaster). Lets one click cover
+    // every name variant a user's catalog might use for a single
+    // broadcaster family. Brand-mode scoring iterates over the full
+    // list, not just the primary `query`. Ignored in 'event' mode.
+    aliases: rawAliases = []
   } = req.body;
 
   if (!query || typeof query !== 'string' || query.trim().length < 2) {
@@ -82,7 +90,21 @@ router.post('/search-channel', async (req, res) => {
   };
 
   let clientGone = false;
-  req.on('close', () => { clientGone = true; });
+  const abortCtl = new AbortController();
+  // Listen on BOTH req and res 'close' — the events fire at slightly
+  // different points in the lifecycle and which one wins depends on
+  // whether headers have been sent. Express's recommendation is to
+  // listen on res because it's reliable post-headers; we listen on
+  // both to be safe (also catches `req.aborted` for older Node).
+  const onClose = (origin) => {
+    if (clientGone) return;
+    clientGone = true;
+    logger.info(`[Find Alternative] Client disconnected (${origin}) — aborting in-flight ffprobes`);
+    if (!abortCtl.signal.aborted) abortCtl.abort();
+  };
+  req.on('close', () => onClose('req-close'));
+  req.on('aborted', () => onClose('req-aborted'));
+  res.on('close', () => onClose('res-close'));
 
   logger.info(`[Find Alternative] Received search request: query="${searchQuery}", offset=${startOffset}, minQuality=${minHeight}p`);
 
@@ -166,7 +188,59 @@ router.post('/search-channel', async (req, res) => {
         logger.info(`[Find Alternative] Broadcasters from LiveSoccerTV: ${tvs.join(', ')} → ${broadcasterTerms.length} search terms`);
       }
     }
-    const scoringContext = { sportType, leagueName, broadcasterTerms };
+    // `eventConfirmed` is true when the caller passed an espnEventId —
+    // i.e. the user clicked a specific game from the ticker, so ESPN
+    // told us authoritatively which broadcasters carry it. The team
+    // matcher uses this to weight broadcaster matches above
+    // team-vanity channels (e.g. "US : NHL VEGAS GOLDEN KNIGHTS")
+    // that share a team name but typically run highlights, not the
+    // live game.
+    const scoringContext = {
+      sportType,
+      leagueName,
+      broadcasterTerms,
+      eventConfirmed: Boolean(espnEventId)
+    };
+
+    // ── Stats tracking for evidence-based alias coverage ─────────
+    // Build a code → aliases map so when a search finishes we can
+    // attribute the winning channel's broadcasterMatched value back
+    // to the original ESPN code that introduced it. Only the raw
+    // ESPN-supplied codes are tracked (not league-fallback or
+    // LiveSoccerTV results) — those paths use looser inputs that
+    // wouldn't compare cleanly across runs.
+    const rawCodes = (broadcasts || []).filter(Boolean);
+    const termsForCode = {};
+    const aliasCountByCode = {};
+    for (const code of rawCodes) {
+      const expanded = expandBroadcaster(code) || [];
+      termsForCode[code] = expanded;
+      // alias_count = number of substrings the dict mapped this code
+      // into. Use `hasAlias` (dict membership) rather than comparing
+      // expanded vs. input — the dict legitimately holds entries like
+      // 'ESPN': ['ESPN'] where the value matches the input, and those
+      // should count as aliased not verbatim.
+      aliasCountByCode[code] = hasAlias(code) ? expanded.length : 0;
+    }
+    // Stays mutable through the search so terminal writes know what
+    // the winning channel matched on (or null if it failed / EPG-won).
+    let recordedOutcome = false;
+    const recordOutcome = ({ matchedTerm = null, searchFailed = false } = {}) => {
+      if (recordedOutcome) return;
+      recordedOutcome = true;
+      // Fire-and-forget; don't await — the response is already
+      // streaming and we don't want to block writeLine on a stats
+      // write. Errors are caught inside the helper.
+      broadcasterStats.recordSearch({
+        rawCodes,
+        sportType,
+        leagueName,
+        aliasCountByCode,
+        matchedTerm,
+        termsForCode,
+        searchFailed
+      });
+    };
 
     // Extract search terms using fuzzy matching logic (handles event names like "Temple Owls at Villanova Wildcats")
     const eventMatch = searchQuery.match(/^(.+?)\s+(?:at|vs\.?|@)\s+(.+?)$/i);
@@ -225,23 +299,36 @@ router.post('/search-channel', async (req, res) => {
 
     logger.info(`Searching for channel: "${searchQuery}" (excludedSources: ${excludeSourceIds.length}, excludedChannels: ${excludeChannelIds.length}, minQuality: ${minHeight}p)`);
 
+    // Caller-supplied alias expansion. Coverage modal's row Test button
+    // passes the row's full alias list (e.g. ["MLB.TV","MLBTV","MLB
+    // TV","MLB NETWORK","MLB NET"]) so a single click finds any channel
+    // from that broadcaster family — even when the user's catalog
+    // happens to use a different alias from the one we display first.
+    // Sanitised here: only keep non-empty strings ≥3 chars (matches the
+    // teamMatcher floor; shorter terms substring-match too aggressively).
+    const aliasesArr = Array.isArray(rawAliases)
+      ? rawAliases.filter((a) => typeof a === 'string' && a.trim().length >= 3).map((a) => a.trim())
+      : [];
+
     // Combine team-name terms with broadcaster aliases so the SQL filter
     // pulls both signals into the candidate pool. The relevance scorer
     // (which knows about broadcasters via the channel_name match plus
     // EPG confirmation) sorts the right one to the top.
-    const allSearchTerms = [...searchTerms, ...broadcasterTerms];
+    //
+    // Dedupe (case-insensitive) so an alias that's also in
+    // broadcasterTerms doesn't fire two parameter slots for the same
+    // ILIKE pattern.
+    const seenLower = new Set();
+    const allSearchTerms = [];
+    for (const term of [...searchTerms, ...broadcasterTerms, ...aliasesArr]) {
+      const key = String(term).toUpperCase();
+      if (!key || seenLower.has(key)) continue;
+      seenLower.add(key);
+      allSearchTerms.push(term);
+    }
     const channelConditions = allSearchTerms.map((_, i) => `c.name ILIKE $${i + 2}`).join(' OR ');
     const searchParams = allSearchTerms.map(term => `%${term}%`);
     let baseQueryParams = [userId, ...searchParams];
-
-    // Build scoring conditions for SQL
-    let scoringCase = null;
-    if (homeTeam && awayTeam) {
-      scoringCase = 'CASE ';
-      scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') AND LOWER(c.name) LIKE LOWER('%${awayTeam.replace(/'/g, "''")}%') THEN 3 `;
-      scoringCase += `WHEN LOWER(c.name) LIKE LOWER('%${homeTeam.replace(/'/g, "''")}%') THEN 2 `;
-      scoringCase += 'ELSE 1 END';
-    }
 
     // Build source exclusion clause
     let sourceExclusion = '';
@@ -286,7 +373,49 @@ router.post('/search-channel', async (req, res) => {
       blacklistConditions = blacklistPlaceholders.join(' AND ');
     }
 
-    const orderClause = scoringCase ? `${scoringCase} DESC, c.name` : 'c.name';
+    // SQL-side coarse priority sort. The JS scorer below is the final
+    // word on relevance, but without _some_ priority in the SQL, the
+    // batch-paginated candidate pool is just `ORDER BY c.name` —
+    // alphabetical — and ":ESPN+ N" / "  S013 | ..." event channels
+    // (leading punctuation/whitespace) fill the first 2000 rows
+    // before "Sportsnet 360" or "TSN" ever surfaces. The result: the
+    // user clicks an NHL ticker game, we test 2000 PPV/event channels
+    // for a hockey game they don't carry, find nothing, and exit.
+    //
+    // Use plain ILIKE (not LOWER(c.name) LIKE LOWER(...)) so the
+    // pg_trgm GIN index on c.name from migration 023 actually helps.
+    // The previous LOWER-wrapped CASE was function-based on both
+    // sides and forced sequential evaluation across the whole row set.
+    //
+    // Tier values are intentionally coarse — JS does the fine sort.
+    //   +30  full home team name in channel
+    //   +30  full away team name in channel
+    //   +20  any specific broadcaster alias in channel
+    // Sum desc, tie-break by name.
+    const escapeLike = (s) => String(s).replace(/[\\%_]/g, '\\$&');
+    const orderTerms = [];
+    const orderParams = [];
+    if (homeTeam) {
+      orderParams.push(`%${escapeLike(homeTeam)}%`);
+      orderTerms.push(`(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN 30 ELSE 0 END)`);
+    }
+    if (awayTeam) {
+      orderParams.push(`%${escapeLike(awayTeam)}%`);
+      orderTerms.push(`(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN 30 ELSE 0 END)`);
+    }
+    // One CASE per broadcaster alias so each contributes independently
+    // (a channel like "Sportsnet 360 HD" can satisfy both SPORTSNET and
+    // SN360 and pile up the score). Cap the contribution at 60 so a
+    // channel with five aliases doesn't outrank a dual-team match.
+    for (const term of broadcasterTerms) {
+      if (!term || String(term).length < 3) continue;
+      orderParams.push(`%${escapeLike(String(term))}%`);
+      orderTerms.push(`(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN 20 ELSE 0 END)`);
+    }
+    const orderClause = orderTerms.length > 0
+      ? `(${orderTerms.join(' + ')}) DESC, c.name`
+      : 'c.name';
+    baseQueryParams.push(...orderParams);
 
     // Helper function to test a single channel
     const testSingleChannel = async (channel, index) => {
@@ -311,7 +440,11 @@ router.post('/search-channel', async (req, res) => {
               },
               timeout: 5000,
               httpAgent,
-              httpsAgent
+              httpsAgent,
+              // Wired to the cancel signal so an in-flight Stalker
+              // create_link doesn't keep the request handler busy
+              // after the modal Cancel.
+              signal: abortCtl.signal
             });
 
             const linkData = createLinkResponse.data;
@@ -355,7 +488,14 @@ router.post('/search-channel', async (req, res) => {
 
         const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
           timeout: 5000,
-          maxBuffer: 1024 * 1024
+          maxBuffer: 1024 * 1024,
+          // Cancel-from-modal: abortCtl is wired to req 'close' above.
+          // When triggered, Node sends SIGTERM to the ffprobe child and
+          // execFileAsync rejects with AbortError — way faster than
+          // waiting for the 5s timeout to expire. The catch below
+          // turns the AbortError into a non-success result and the
+          // outer Promise.all unblocks immediately.
+          signal: abortCtl.signal
         });
 
         const probeData = JSON.parse(stdout);
@@ -373,10 +513,20 @@ router.post('/search-channel', async (req, res) => {
       }
     };
 
-    // Incremental batch processing
-    const BATCH_SIZE = 50;
+    // Incremental batch processing.
+    //
+    // BATCH_SIZE bumped from 50 → 200 alongside the trgm-index +
+    // ORDER-BY-name change above. SQL no longer pre-sorts candidates
+    // by team-match score, so a 50-row batch could miss the highest
+    // scorers (the JS scorer wins on relevance, but it can only score
+    // what we hand it). 200 gives the JS scorer a wide enough pool
+    // that the top survivors are reliably the right ones, and the
+    // trigram-indexed WHERE turns the SELECT itself into a sub-100ms
+    // operation either way. MAX_BATCHES halved to keep the safety
+    // ceiling at 1000 channels per search.
+    const BATCH_SIZE = 200;
     const PARALLEL_TESTS = 5;
-    const MAX_BATCHES = 20; // Safety limit: 20 batches = 1000 channels max
+    const MAX_BATCHES = 10; // Safety limit: 10 batches × 200 = 2000 channels max
     let currentDbOffset = startOffset;
     let totalChannelsTested = 0;
     let totalChannelsMatched = 0;
@@ -508,6 +658,11 @@ router.post('/search-channel', async (req, res) => {
                 epgProgram: channel._epgProgram
               }
             });
+            // EPG-first wins → no broadcaster term earned the match,
+            // so log as match_via_other (search succeeded, but not via
+            // any broadcaster code). Helps spot codes whose channels
+            // are *only* findable via EPG.
+            recordOutcome({ matchedTerm: null });
             return res.end();
           }
         }
@@ -574,8 +729,10 @@ router.post('/search-channel', async (req, res) => {
             error: 'No channels found',
             message: `No channels found matching "${searchQuery}"`,
             tested: 0,
-            matched: 0
+            matched: 0,
+            broadcastersAttempted: rawCodes
           });
+          recordOutcome({ searchFailed: true });
           return res.end();
         }
         break;
@@ -590,17 +747,36 @@ router.post('/search-channel', async (req, res) => {
       if (mode === 'brand' && channels.length > 0) {
         const eventNoisePattern = /(\bvs?\.?\b|\b@\b|\bat\s+\b|\bppv\b|\bfinal\b|\bppr\b|\bplayoff\b|\bgame\s*\d|\b\d{1,2}[\.\/-]\d{1,2}\b|\b20\d{2}-\d{2}-\d{2}\b|\b\d+\s*-\s*\d+\b)/i;
         const queryLower = String(searchQuery).toLowerCase().trim();
+        // The brand-set is the primary query plus any caller-supplied
+        // aliases — a channel matching ANY of these counts as an
+        // in-family hit. Without this, expanding aliases at the SQL
+        // layer (above) would pull MLB Network channels into the
+        // candidate pool, but this filter would still reject them
+        // because the wordRe only matched the primary query "MLB.TV".
+        const brandSetLower = Array.from(new Set(
+          [queryLower, ...aliasesArr.map((a) => a.toLowerCase().trim())].filter(Boolean)
+        ));
+        // Pre-compile the word-boundary regexes so the inner map loop
+        // doesn't recompile per channel. RegExp construction here is
+        // cheap but for 200-row batches × N aliases it adds up.
+        const aliasRes = brandSetLower.map((a) =>
+          new RegExp(`\\b${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+        );
         const beforeBrand = channels.length;
-        // Score: (a) starts-with brand wins, (b) exact word-match wins,
-        // (c) no event noise. Keep only positively-scored candidates.
+        // Score: (a) starts-with primary brand wins, (b) word-boundary
+        // match against ANY alias wins, (c) no event noise. Keep only
+        // positively-scored candidates.
         channels = channels
           .map((c) => {
             const name = String(c.name || '');
             const lower = name.toLowerCase();
             if (eventNoisePattern.test(lower)) return null;
             let score = 0;
-            const wordRe = new RegExp(`\\b${queryLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-            if (wordRe.test(lower)) score += 100;
+            const matched = aliasRes.some((re) => re.test(lower));
+            if (matched) score += 100;
+            // Starts-with bonus only against the primary query so the
+            // canonical brand still wins ties (e.g. "ESPN HD" beats
+            // "USA: ESPN" when the primary query is "ESPN").
             if (lower.startsWith(queryLower)) score += 50;
             // Penalise long names — linear feeds are typically short
             // ("ESPN", "ESPN HD", "ESPN US"); event/regional ones are
@@ -741,7 +917,18 @@ router.post('/search-channel', async (req, res) => {
         }
 
         if (batchNum === 0) {
-          const topChannels = channels.slice(0, 5).map(c => `${c.name.substring(0, 40)}: ${c.relevanceScore}`);
+          const topChannels = channels.slice(0, 5).map((c) => {
+            const d = c._matchDetails || {};
+            const breakdown = [
+              d.nameScore ? `name=${d.nameScore}` : null,
+              d.broadcasterBonus ? `bcast=${d.broadcasterBonus}(${d.broadcasterMatched || '?'})` : null,
+              d.programBonus ? `epg=${d.programBonus}` : null
+            ].filter(Boolean).join('+');
+            // Use full name (no truncation) so we can actually see why
+            // a channel matched when the matched substring is past the
+            // 40-char cutoff (e.g. "= ESPN" tail of a long PPV title).
+            return `"${c.name}" → ${c.relevanceScore} [${breakdown || 'no-breakdown'}]`;
+          });
           logger.info(`Top scoring channels: ${topChannels.join(' | ')}`);
         }
       }
@@ -832,6 +1019,13 @@ router.post('/search-channel', async (req, res) => {
               searchOffset: nextSearchOffset
             }
           });
+          // Attribute the match: did the winning channel earn its
+          // bonus from one of our broadcaster terms? If so, that
+          // broadcaster code gets credit; otherwise (team-name win,
+          // EPG win) it's match_via_other for every code.
+          recordOutcome({
+            matchedTerm: channel._matchDetails?.broadcasterMatched || null
+          });
           return res.end();
         }
 
@@ -891,14 +1085,21 @@ router.post('/search-channel', async (req, res) => {
       error: 'No working streams found',
       message: errorMessage,
       tested: totalChannelsTested,
-      matched: totalChannelsMatched
+      matched: totalChannelsMatched,
+      // Surface what ESPN told us was carrying this event so the
+      // user (and any future debugging) can see whether the broadcaster
+      // metadata even exists vs. it's an alias-coverage gap.
+      broadcastersAttempted: rawCodes
     });
+    recordOutcome({ searchFailed: true });
     return res.end();
 
   } catch (error) {
     logger.error('Search channel failed:', error);
     // Headers are already sent — stream the error rather than res.status().
     writeLine({ type: 'error', error: error.message });
+    // Don't record stats on uncaught errors — those aren't really
+    // alias coverage signal, just code bugs.
     if (!res.writableEnded) res.end();
   }
 });

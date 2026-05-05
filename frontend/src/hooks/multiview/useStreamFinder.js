@@ -290,7 +290,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
   // Searches for a working stream for that specific matchup and adds it,
   // tagging the channel with espnEventId/espnEventName so later features
   // (find-alternative, duplicate detection) know what game it represents.
-  const handleTickerEventClick = async (score) => {
+  const handleTickerEventClick = async (score, opts = {}) => {
     // Log bail conditions as console.warn so they relay to the backend
     // via utils/logger.js — otherwise "click did nothing" is impossible
     // to diagnose (the toasts are easy to miss, and the local log()
@@ -344,7 +344,12 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
           excludeChannelIds: currentChannelIds,
           minQuality: autoFillSettings.minQuality,
           espnEventId: score.event_id
-        })
+        }),
+        // Modal-driven Cancel button propagates an AbortSignal here.
+        // Backend search-channel listens for req 'close' and breaks
+        // out of the batch + chunk loops within a tick; the body
+        // reader below also throws AbortError which we catch.
+        signal: opts.signal
       });
 
       // search-channel streams NDJSON now (per-batch progress + a
@@ -407,16 +412,35 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
           showToast('Failed to add channel to Multi-View', 'error');
         }
       } else {
-        showToast(
+        // Include the raw ESPN broadcaster codes on failure so the user
+        // can see whether the issue is "no ESPN broadcaster data" vs.
+        // "broadcaster data exists but no IPTV channels matched". Both
+        // are actionable but diagnose differently.
+        const broadcasters = Array.isArray(terminal?.broadcastersAttempted)
+          ? terminal.broadcastersAttempted
+          : [];
+        const baseMsg =
           terminal?.message ||
-            terminal?.error ||
-            `No working stream found for ${score.away_team} vs ${score.home_team}`,
-          'error'
-        );
+          terminal?.error ||
+          `No working stream found for ${score.away_team} vs ${score.home_team}`;
+        const failMsg = broadcasters.length > 0
+          ? `${baseMsg} (ESPN says: ${broadcasters.join(', ')})`
+          : baseMsg;
+        if (broadcasters.length > 0) {
+          console.log(`${tag} ESPN broadcasters were: ${broadcasters.join(', ')}`);
+        }
+        showToast(failMsg, 'error');
       }
     } catch (error) {
-      console.error('[Ticker Event Click] Error:', error);
-      showToast('Failed to find stream for this game', 'error');
+      // AbortError = caller-initiated cancel (modal Cancel button) —
+      // not a real failure, surface as informational.
+      if (error?.name === 'AbortError') {
+        console.log(`${tag} cancelled by user`);
+        showToast('Search cancelled', 'info');
+      } else {
+        console.error('[Ticker Event Click] Error:', error);
+        showToast('Failed to find stream for this game', 'error');
+      }
     } finally {
       setSearchingStream(false);
     }

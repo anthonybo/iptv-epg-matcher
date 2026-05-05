@@ -358,24 +358,177 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
   // We use substring (case-insensitive) match here rather than the
   // word-boundary `wordContains` because broadcasters routinely have
   // non-word chars (BTN+, ESPN+, ACC Extra) that break \b regex.
+  //
+  // Two scoring tiers depending on how confident we are this
+  // broadcaster carries this specific game:
+  //
+  //   - context.eventConfirmed (ticker click, espnEventId set):
+  //     ESPN told us authoritatively which networks air this game.
+  //     A broadcaster match is the strongest signal we have when no
+  //     EPG hit confirms it — much stronger than a team-vanity
+  //     channel that just contains "VEGAS GOLDEN KNIGHTS" in its
+  //     name (those run highlights/recaps, not the live game). Bump
+  //     the bonus above the single-team-mascot tier (200 in the
+  //     scorer below) so Sportsnet 360 beats "US: NHL VEGAS GOLDEN
+  //     KNIGHTS" for an Anaheim @ Vegas ticker click.
+  //
+  //   - free-form text search: keep 120 — the user typed a query,
+  //     they're looking for a specific channel, and we shouldn't
+  //     hijack a partial-name match into a totally different
+  //     broadcaster that happens to share a substring.
   let broadcasterBonus = 0;
   let broadcasterMatched = null;
   const broadcasters = context.broadcasterTerms || [];
   if (broadcasters.length > 0 && channel.name) {
     const upperName = channel.name.toUpperCase();
+    // Sub-brand disambiguators: when the parent brand matches but the
+    // channel name is actually a different child brand, reject the
+    // match. Example: ESPN's data lists broadcaster "ESPN" for an NHL
+    // game; channel name `S013 | ... = ESPN SUR` token-matches "ESPN"
+    // but is actually ESPN South America (carries Latin sports, not
+    // North American NHL). The linear-ESPN match should fail there.
+    // Each entry maps a broadcaster TERM (whatever appears in the
+    // expanded broadcasterTerms array, NOT the ESPN broadcaster code)
+    // to a list of sub-brand strings that share the parent's prefix
+    // but are different broadcasters. If a denied child appears in
+    // the channel name AND wasn't asked for in this event's
+    // broadcasterTerms, the parent match is rejected.
+    //
+    // News/business/weather siblings are universally denied because
+    // they don't carry sports.
+    //
+    // Sports siblings that ESPN tracks separately (e.g. NBC SPORTS
+    // NETWORK = NBCSN, CBS SPORTS NETWORK) ARE denied so that an
+    // event marked "NBC" doesn't grab the channel that ESPN would
+    // have explicitly named "NBCSN" if it had wanted that. When ESPN
+    // does name the sub-brand, it's added to broadcasterTerms
+    // separately and the disambiguator's whitelist check passes.
+    const SUB_BRAND_DENY = {
+      ESPN: [
+        'ESPN+', 'ESPN3', 'ESPNU', 'ESPNEWS',
+        'ESPN DEPORTES', 'ESPN SUR', 'ESPN COL', 'ESPN BR',
+        'ESPN BRASIL', 'ESPN MX', 'ESPN MEXICO',
+        'ESPN INTL', 'ESPN INTERNATIONAL', 'ESPN EUR',
+        'ESPN PLAY', 'ESPN PLUS'
+      ],
+      // NBC linear → block news/business/weather/streaming siblings.
+      // NBC SPORTS (the brand) is a tricky one: in the US it's the
+      // umbrella for NBC's sports content and a channel called "NBC
+      // SPORTS HD" or "USA: NBC SPORTS" likely DOES carry the same
+      // simulcast. We DON'T deny "NBC SPORTS" because ESPN listing
+      // "NBC" for an NHL/NFL game often means the user can find the
+      // game on either the local NBC affiliate OR "NBC Sports".
+      NBC: [
+        'NBC NEWS', 'NBCNEWS', 'MSNBC', 'CNBC',
+        'NBC WEATHER', 'NBC LATINO', 'NBC HISPANO',
+        'NBC SPORTS NETWORK', 'NBCSN',
+        'TELEMUNDO'
+      ],
+      // CBS linear → news + 24/7 highlights ("CBS SPORTS HQ" tends to
+      // run pre/post-game shows, not the live game itself; CBS Sports
+      // Network is its own broadcaster ESPN tracks separately).
+      CBS: [
+        'CBS NEWS', 'CBSN',
+        'CBS WEATHER',
+        'CBS SPORTS HQ',
+        'CBS SPORTS NETWORK', 'CBSSN'
+      ],
+      // ABC linear → block news / kids / family. ABC carries NBA Finals
+      // and other major sports on the linear feed.
+      ABC: [
+        'ABC NEWS', 'ABCNEWS',
+        'ABC FAMILY', 'ABC KIDS'
+      ],
+      // FOX bare token (rarely in broadcasterTerms because the alias
+      // expansion converts ESPN's "FOX" → ['FOX SPORTS', 'FS1', ...])
+      // — defensive entry in case a future code path passes raw 'FOX'.
+      FOX: [
+        'FOX NEWS', 'FOXNEWS',
+        'FOX BUSINESS', 'FOXBUSINESS',
+        'FOX WEATHER',
+        'FOX DEPORTES',
+        'FOXTEL'
+      ],
+      // FOX Sports linear US → block the regional Latin American FOX
+      // SPORTS feeds (FOX SPORTS MX/AR/BR), which carry different
+      // games than US linear and are tracked separately by ESPN.
+      'FOX SPORTS': [
+        'FOX SPORTS MX', 'FOX SPORTS MEXICO',
+        'FOX SPORTS AR', 'FOX SPORTS ARGENTINA',
+        'FOX SPORTS BR', 'FOX SPORTS BRASIL',
+        'FOX SPORTS COL', 'FOX SPORTS COLOMBIA',
+        'FOX SPORTS PREMIUM',
+        'FOX SPORTS RACING'
+      ],
+      // Sky Sports (UK/IE) → block all the non-sports Sky-prefixed
+      // channels. Sky has dozens of channels sharing the "Sky" brand
+      // (Sky News, Sky Movies, Sky Atlantic, etc.) and each is a
+      // distinct service. Worth catching aggressively because Sky
+      // Sports is the dominant Premier League broadcaster.
+      'SKY SPORTS': [
+        'SKY NEWS', 'SKY MOVIES', 'SKY CINEMA', 'SKY ATLANTIC',
+        'SKY ARTS', 'SKY ONE', 'SKY KIDS', 'SKY DOCUMENTARIES',
+        'SKY HISTORY', 'SKY NATURE', 'SKY MAX', 'SKY WITNESS',
+        'SKY COMEDY', 'SKY CRIME', 'SKY MIX', 'SKY SHOWCASE',
+        'SKY SCI-FI', 'SKY REPLAY', 'SKY GLASS'
+      ],
+      // BBC linear → news/parliament/radio/world. The channels that
+      // carry BBC sports content are BBC One, BBC Two, BBC Scotland,
+      // BBC iPlayer — those don't have "NEWS"/"WORLD"/etc. in the
+      // name, so they pass.
+      BBC: [
+        'BBC NEWS', 'BBC WORLD', 'BBC PARLIAMENT',
+        'BBC RADIO', 'BBC ARABIC', 'BBC PERSIAN'
+      ],
+      // TNT US (Turner) — block the multi-region TNT variants ESPN
+      // tracks separately. TNT Sports Argentina is a totally different
+      // broadcaster from US TNT (which carries NBA + NHL).
+      TNT: [
+        'TNT SPORTS ARGENTINA', 'TNT SPORTS BRASIL',
+        'TNT SPORTS UK',  // UK TNT Sports is different from US TNT
+        'TNT NOVELAS', 'TNT SERIES'
+      ],
+      // Generic Sportsnet ("SPORTSNET" matches the family) is fine for
+      // any Sportsnet channel — no disambiguation needed because the
+      // ESPN broadcaster code SN is itself the family-level signal.
+    };
     for (const term of broadcasters) {
       if (!term) continue;
       const upperTerm = String(term).toUpperCase();
-      if (upperTerm.length < 2) continue;
-      if (upperName.includes(upperTerm)) {
-        // 120 puts it just above the 100 minScore threshold the
-        // search-channel route uses for two-team queries — enough to
-        // get tested, not so high that it beats real team-name
-        // matches when both exist.
-        broadcasterBonus = 120;
-        broadcasterMatched = upperTerm;
-        break;
+      // 3-char minimum: 2-char broadcaster codes ("SN", "FS", etc.)
+      // wrongly substring-match unrelated channels (DISNEY, GENESIS).
+      // Aliases for short codes are mapped to longer canonical names
+      // in broadcasterAliases.js.
+      if (upperTerm.length < 3) continue;
+      // Token-boundary match. Plain substring `includes` would let
+      // ESPN match ":ESPN+ 107" (PPV event channels), ESPN3, ESPNU,
+      // ESPNEWS — and the search-channel route would then ffprobe
+      // every one of those for the live game, blowing past the batch
+      // budget on dead PPV streams. Require the term to be flanked
+      // by string boundaries OR by a non-alphanumeric, non-`+`
+      // character so "ESPN" in "ESPN HD" / "USA | ESPN" matches but
+      // "ESPN" in "ESPN+ 107" / "ESPN3" / "ESPNU" doesn't. Aliases
+      // that themselves contain `+` (`ESPN+`, `B1G+`) still match
+      // verbatim because the term is the full literal.
+      const escapedTerm = upperTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const tokenRe = new RegExp(`(?:^|[^A-Z0-9+])${escapedTerm}(?:[^A-Z0-9+]|$)`);
+      if (!tokenRe.test(upperName)) continue;
+      // Sub-brand disambiguation: if the channel name contains a
+      // distinct child of this parent brand AND that child isn't the
+      // broadcaster the caller asked about, this channel is the wrong
+      // outlet (think: ESPN matched on "= ESPN SUR" — that's the
+      // South American feed, not linear ESPN).
+      const denylist = SUB_BRAND_DENY[upperTerm] || [];
+      if (denylist.length > 0) {
+        const broadcastersUpper = broadcasters.map((b) => String(b).toUpperCase());
+        const hijackedByChild = denylist.some((child) =>
+          upperName.includes(child) && !broadcastersUpper.some((b) => b === child || b.includes(child))
+        );
+        if (hijackedByChild) continue;
       }
+      broadcasterBonus = context.eventConfirmed ? 250 : 120;
+      broadcasterMatched = upperTerm;
+      break;
     }
   }
 

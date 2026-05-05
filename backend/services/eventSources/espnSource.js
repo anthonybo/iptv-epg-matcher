@@ -306,4 +306,7 @@ module.exports = {
     fetchEvents,
     SPORTS_TO_FETCH,
     getSportDisplayName,
+    // Exported for the historical-backfill script (scripts/backfill-espn-broadcasts.js)
+    // so it can reuse the same normalisation as the cron-driven path.
+    normaliseEvent,
 };

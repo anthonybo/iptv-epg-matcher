@@ -590,7 +590,24 @@ export function useFindAlternative({
     console.log(
       `[Find Alternative] Search exhausted for "${searchName}", will reset offset on next attempt`
     );
-    const failMsg = terminal.message || terminal.error || 'No alternative channel found';
+    // Surface broadcastersAttempted (raw ESPN codes) when the backend
+    // includes it on a failure — lets the user immediately see whether
+    // the issue is "ESPN had no broadcaster data for this event" vs.
+    // "we have data but no IPTV channels in catalog match those
+    // broadcasters". Both are actionable, but they're very different
+    // problems.
+    const broadcasters = Array.isArray(terminal.broadcastersAttempted)
+      ? terminal.broadcastersAttempted
+      : [];
+    const baseMsg = terminal.message || terminal.error || 'No alternative channel found';
+    const failMsg = broadcasters.length > 0
+      ? `${baseMsg} (ESPN says: ${broadcasters.join(', ')})`
+      : baseMsg;
+    if (broadcasters.length > 0) {
+      console.log(
+        `[Find Alternative] Search exhausted; ESPN broadcasters were: ${broadcasters.join(', ')}`
+      );
+    }
     // Emit the terminal message so the error modal updates from the
     // last "Tested N of M..." progress tick to the real outcome.
     // Otherwise the modal appears stuck at whatever the last progress
