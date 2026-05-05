@@ -145,6 +145,7 @@ const MultiViewPage = ({ sessionId }) => {
     streams,
     setStreams,
     setStreamQualities,
+    mutedStreams,
     autoFillSettings
   });
 

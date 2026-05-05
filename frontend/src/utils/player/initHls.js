@@ -73,6 +73,15 @@ export function initializeHlsPlayer(ctx) {
     }
 
     try {
+        // Sentinel log so we can verify HMR loaded the patched module.
+        // The recoverMediaError-on-first-error path was added in this
+        // build; if every new player instance prints this line, the
+        // browser is running the current code. Uses console.log
+        // directly because the `log` helper is gated off in
+        // theatreMode (multiview) — see IPTVPlayer.js:137. Remove
+        // once stable.
+        console.log(`[hls ${getChannelId()}] initHls v2 (recoverMediaError-first) loaded`);
+
         while (containerRef.current.firstChild) {
             containerRef.current.removeChild(containerRef.current.firstChild);
         }
@@ -111,6 +120,15 @@ export function initializeHlsPlayer(ctx) {
         const mountedAt = Date.now();
         const sinceMount = () => Date.now() - mountedAt;
 
+        // Recovery state — declared BEFORE the <video> listeners so the
+        // listener closures can reference these without hitting a TDZ
+        // ReferenceError if an event fires synchronously during setup.
+        // `hlsRef.current` is null on the Safari (native HLS) path —
+        // assigned below for the hls.js path.
+        const hlsRef = { current: null };
+        let lastMediaRecoveryAt = 0;
+        let mediaRecoveryAttempts = 0;
+
         addTrackedListener(videoEl, 'playing', () => {
             log('info', 'Video playing');
             setLoading(false);
@@ -118,6 +136,12 @@ export function initializeHlsPlayer(ctx) {
             setRecoveryStatus(null);
             isInitializingRef.current = false;
             hasCalledOnStreamDeadRef.current = false;
+            // Successful playback proves the previous recovery (if any)
+            // worked — reset the burst counter so the next isolated
+            // demuxer error gets the full retry budget instead of
+            // inheriting whatever count was at the time of the last
+            // error.
+            mediaRecoveryAttempts = 0;
             if (onStreamPlaying) onStreamPlaying();
             detectQualityHls('playing');
         });
@@ -141,14 +165,50 @@ export function initializeHlsPlayer(ctx) {
             // Codes 3 (DECODE) and 4 (SRC_NOT_SUPPORTED, includes
             // DEMUXER_ERROR_COULD_NOT_PARSE) are terminal for the
             // current source — Chrome's media pipeline gives up and
-            // won't recover passively. The tile would otherwise sit
-            // on a black box forever, so flag the stream dead and let
-            // the multi-view auto-find a different candidate.
+            // won't recover passively. Before declaring the stream
+            // dead we give hls.js one shot at recoverMediaError(),
+            // which swaps the demuxer + reattaches MSE buffers and
+            // rescues a lot of "first segment was a glitch" cases
+            // that previously triggered an immediate find-alternative
+            // swap. Only escalate to notifyStreamDead if recovery has
+            // already been tried within the last 15s (i.e. the
+            // recovered stream errored AGAIN — the upstream is
+            // genuinely broken).
             if ((code === 3 || code === 4) && !hasCalledOnStreamDeadRef.current) {
+                const now = Date.now();
+                // If the last attempt was >30s ago, that counts as
+                // "stream actually recovered" — reset the burst counter.
+                if (lastMediaRecoveryAt > 0 && now - lastMediaRecoveryAt > 30000) {
+                    mediaRecoveryAttempts = 0;
+                }
+                console.log(`${tag} error-recovery diag: hlsRef.current=${hlsRef.current ? 'set' : 'NULL'} attempts=${mediaRecoveryAttempts} streamDead=${hasCalledOnStreamDeadRef.current}`);
+                if (hlsRef.current && mediaRecoveryAttempts < 2) {
+                    mediaRecoveryAttempts += 1;
+                    lastMediaRecoveryAt = now;
+                    setRecoveryStatus(`Recovering decoder (attempt ${mediaRecoveryAttempts}/2)…`);
+                    try {
+                        if (mediaRecoveryAttempts === 1) {
+                            hlsRef.current.recoverMediaError();
+                            console.log(`${tag} attempted recoverMediaError() after <video> error code=${code}`);
+                        } else {
+                            // Second attempt: hls.js docs recommend
+                            // swapping the audio codec then retrying
+                            // recoverMediaError — handles the case
+                            // where the demux error is in the audio
+                            // pipeline (AAC ↔ AC-3 transitions etc.).
+                            try { hlsRef.current.swapAudioCodec(); } catch (_) {}
+                            hlsRef.current.recoverMediaError();
+                            console.log(`${tag} attempted swapAudioCodec()+recoverMediaError() after second <video> error code=${code}`);
+                        }
+                        return;
+                    } catch (recoverErr) {
+                        console.warn(`${tag} recovery attempt ${mediaRecoveryAttempts} threw — escalating`, recoverErr);
+                    }
+                }
                 if (watchdogId) clearInterval(watchdogId);
                 watchdogId = null;
                 setError('Playback failed. Finding alternative…');
-                notifyStreamDead(`hls_video_error_${code}`);
+                notifyStreamDead(`hls_video_error_${code}_after_${mediaRecoveryAttempts}_recoveries`);
             }
         });
         addTrackedListener(videoEl, 'ended', () => {
@@ -219,8 +279,16 @@ export function initializeHlsPlayer(ctx) {
         // Safari's <video> can play .m3u8 directly — and its native
         // implementation handles live-edge tracking + recovery itself.
         // hls.js explicitly recommends *not* attaching on Safari.
-        if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-            log('info', 'Using native HLS (Safari)');
+        //
+        // GOTCHA: `canPlayType('application/vnd.apple.mpegurl')` returns
+        // truthy on Chrome iOS (WebKit) AND on some Chromium builds
+        // that have partial HLS support. If we take the native path
+        // there, we lose hls.js's recoverMediaError() handle — which
+        // is exactly what we need to fix the DEMUXER swap-loop. Force
+        // hls.js whenever it's supported, falling back to native HLS
+        // only when MSE is unavailable.
+        if (!Hls.isSupported() && videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+            console.log(`${tag} taking NATIVE HLS path (no MSE) — recoverMediaError unavailable`);
             videoEl.src = playlistUrl;
             videoEl.play().catch(() => {});
             startWatchdog();
@@ -236,7 +304,7 @@ export function initializeHlsPlayer(ctx) {
         }
 
         if (!Hls.isSupported()) {
-            log('error', 'Neither native HLS nor MSE-based hls.js available');
+            console.warn(`${tag} Neither native HLS nor MSE-based hls.js available`);
             setError('Your browser does not support HLS playback');
             setLoading(false);
             return;
@@ -245,6 +313,7 @@ export function initializeHlsPlayer(ctx) {
         // ============================================================
         // hls.js path (Chrome/Firefox/Edge/etc.)
         // ============================================================
+        console.log(`${tag} taking HLS.JS path — recoverMediaError available`);
         const hls = new Hls({
             // Per hls.js docs: liveSyncDurationCount default is 3.
             //   "Decreasing this value is likely to cause playback
@@ -303,6 +372,10 @@ export function initializeHlsPlayer(ctx) {
                 }
             }
         });
+
+        // Expose to the <video> error handler (registered earlier so its
+        // closure can't reference `hls` directly).
+        hlsRef.current = hls;
 
         hls.attachMedia(videoEl);
 

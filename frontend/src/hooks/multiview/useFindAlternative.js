@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { showToast } from '../../components/Toast';
-import { addToMultiview, removeFromMultiview } from '../../utils/multiviewManager';
+import { addToMultiview, removeFromMultiview, updateMutedState } from '../../utils/multiviewManager';
+import { blacklistChannel, getBlacklistedChannelIds } from '../../utils/streamBlacklist';
 
 function getToken() {
   return (
@@ -104,6 +105,11 @@ export function useFindAlternative({
   streams,
   setStreams,
   setStreamQualities,
+  // Read-only view of which slots are currently muted, keyed by
+  // `${sourceId}_${id}_${refreshKey||''}`. Used by swapStream to
+  // propagate the dead slot's mute state to its replacement so the
+  // user's chosen audio doesn't silently mute on every auto-find.
+  mutedStreams,
   autoFillSettings
 }) {
   const [findingAlternativeFor, setFindingAlternativeFor] = useState(() => new Set());
@@ -126,6 +132,58 @@ export function useFindAlternative({
     pauseMs: 30000, // If the window cap is hit, pause auto-finds for 30s
     isPaused: false // Emergency pause
   });
+
+  // Per-chain swap counter — keyed by the search query so every
+  // "Reelz"/"ESPN"/etc. chain accumulates its own count regardless of
+  // which sourceId/channelId is currently in the slot. If the same
+  // chain auto-swaps three times within 60s with no successful
+  // playback in between, we stop trying — provider is clearly broken
+  // for that brand right now and continuing the cycle just makes the
+  // UI thrash. Reset when the user manually triggers a search or when
+  // a stream survives long enough to be considered "settled".
+  const SWAP_CHAIN_TTL_MS = 60000;
+  const SWAP_CHAIN_MAX = 3;
+  const swapChainRef = useRef(new Map()); // chainKey → { startedAt, count }
+
+  const chainKeyForStream = (stream) => {
+    const raw = stream.searchQuery || stream.espnEventName || stream.name || '';
+    return String(raw).toLowerCase().trim();
+  };
+
+  // Returns true when this chain has not yet exceeded the rapid-swap
+  // budget. Stale chains (older than the TTL) are reset on access so a
+  // long-running tile that finally hiccups gets the full budget again.
+  const allowChainSwap = (stream) => {
+    const key = chainKeyForStream(stream);
+    if (!key) return true;
+    const now = Date.now();
+    const entry = swapChainRef.current.get(key);
+    if (!entry || now - entry.startedAt > SWAP_CHAIN_TTL_MS) {
+      swapChainRef.current.set(key, { startedAt: now, count: 1 });
+      console.log(`[Find Alternative] Chain "${key}" started (count=1/${SWAP_CHAIN_MAX})`);
+      return true;
+    }
+    entry.count += 1;
+    console.log(
+      `[Find Alternative] Chain "${key}" count=${entry.count}/${SWAP_CHAIN_MAX} (started ${Math.round((now - entry.startedAt) / 1000)}s ago)`
+    );
+    if (entry.count > SWAP_CHAIN_MAX) {
+      console.warn(
+        `[Find Alternative] Chain "${key}" tripped circuit breaker after ${entry.count - 1} rapid swaps in ${Math.round((now - entry.startedAt) / 1000)}s`
+      );
+      return false;
+    }
+    return true;
+  };
+
+  // Called when a stream successfully plays for long enough to count as
+  // "settled" (currently driven by the 30s reset in handleFindAlternative
+  // — extending it requires a play-event signal we don't yet plumb in).
+  const resetChain = (stream) => {
+    const key = chainKeyForStream(stream);
+    if (!key) return;
+    swapChainRef.current.delete(key);
+  };
 
   const markSearching = (key) => {
     setFindingAlternativeFor((prev) => {
@@ -238,6 +296,15 @@ export function useFindAlternative({
   // "Adelaide" or "Lions" somewhere in its name. Propagate the
   // identity onto the replacement so the chain stays anchored.
   const swapStream = async (deadStream, newChannel) => {
+    // Capture the dead slot's CURRENT mute state (from the live Set,
+    // not deadStream.muted which is the stale persisted-at-load value)
+    // so we can replicate it on the replacement. The default muted
+    // policy in useMultiViewStreams treats new streams as muted unless
+    // the backend row says muted=false, so without this carryover the
+    // user's chosen audio gets silently re-muted on every auto-find.
+    const deadKey = `${deadStream.sourceId}_${deadStream.id}_${deadStream._refreshKey || ''}`;
+    const wasMuted = mutedStreams ? mutedStreams.has(deadKey) : true;
+
     const removeSuccess = await removeFromMultiview(deadStream.id, deadStream.sourceId);
     if (removeSuccess) {
       setStreams((prevStreams) =>
@@ -257,11 +324,31 @@ export function useFindAlternative({
       espnEventName: newChannel.espnEventName ?? deadStream.espnEventName ?? null,
       searchQuery:   newChannel.searchQuery   ?? deadStream.searchQuery   ?? null,
     };
-    return addToMultiview(enriched);
+    const addSuccess = await addToMultiview(enriched);
+    // Persist the carried-over mute state BEFORE the multiviewUpdate
+    // event reloads streams from the backend — otherwise the reload
+    // sees the row's default muted=true and re-mutes the slot.
+    if (addSuccess && enriched.id && enriched.sourceId) {
+      try {
+        await updateMutedState(enriched.id, enriched.sourceId, wasMuted);
+      } catch (e) {
+        console.warn('[Find Alternative] Failed to carry over mute state', e);
+      }
+    }
+    return addSuccess;
   };
 
   const handleFindAlternative = async (stream, isAutomatic = false) => {
     const streamKey = streamKeyOf(stream);
+
+    // The current stream is being declared dead — blacklist it so the
+    // backend search-channel endpoint won't return it again for the
+    // next few minutes. (Manual clicks blacklist too: if the user hit
+    // "find alternative" they don't want to land on the same dead
+    // stream they just left.)
+    if (stream.id) {
+      blacklistChannel(stream.sourceId, stream.id);
+    }
 
     // Rate limit automatic (onStreamDead) calls — manual clicks skip this.
     // When rate-limited, still escalate to find-different-game so the
@@ -273,6 +360,26 @@ export function useFindAlternative({
         streamKey,
         'Auto-recovery paused (too many recent failures) — switching to a different live game...'
       );
+      await handleFindDifferentGame(stream);
+      return;
+    }
+
+    // Per-chain circuit breaker — applies to BOTH automatic and manual
+    // calls. Manual panic-clicks are exactly the situation we want to
+    // catch: the user is hammering the button on a brand whose streams
+    // are all broken right now, and continuing to spin up new search +
+    // ffmpeg workers per click just makes the UI thrash. After 3 rapid
+    // swaps in 60s, we redirect to find-different-game (which is one
+    // cheap request, not a search loop) and surface a clear toast so
+    // the user understands their clicks are being deferred. Earlier
+    // versions reset the chain on manual clicks; that defeated the
+    // breaker entirely whenever a frustrated user took over.
+    if (!allowChainSwap(stream)) {
+      emitSearchProgress(
+        streamKey,
+        `Multiple "${chainKeyForStream(stream)}" streams failed in quick succession — switching to a different live game...`
+      );
+      showToast('Stream chain unstable — finding a different game', 'error');
       await handleFindDifferentGame(stream);
       return;
     }
@@ -308,7 +415,18 @@ export function useFindAlternative({
         .filter((id) => id && !excludeSourceIds.includes(id));
       excludeSourceIds = [...excludeSourceIds, ...otherSourceIds];
 
-      const excludeChannelIds = stream.id ? [stream.id] : [];
+      // Merge the dead-stream blacklist so the backend doesn't return a
+      // channel we already know is broken. Use a Set to dedupe against
+      // the current stream id, which we add explicitly above.
+      const blacklistedIds = getBlacklistedChannelIds();
+      const excludeChannelIds = Array.from(
+        new Set([...(stream.id ? [stream.id] : []), ...blacklistedIds])
+      );
+      if (blacklistedIds.length > 0) {
+        console.log(
+          `[Find Alternative] Excluding ${blacklistedIds.length} blacklisted channel(s) from search`
+        );
+      }
 
       const token = getToken();
       if (!token) {
