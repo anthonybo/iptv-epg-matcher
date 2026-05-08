@@ -20,11 +20,15 @@ import { detectVideoQuality } from '../videoQuality';
  *     running, each enabled buffer/worker compounds — empirically this
  *     is what kept memory usable in multi-view.
  *   - In resilient-proxy mode we intentionally do NOT react to `waiting`,
- *     `stalled`, or `ended` on the <video>. The backend is already
- *     running its own reconnect loop; calling player.unload() from the
- *     client aborts the in-flight backend fetch and resets its retry
- *     counter. The health-check guard in IPTVPlayer still promotes a
- *     truly-dead stream via MAX_STALE_TIME_MS.
+ *     `stalled`, `ended`, mpegts ERROR, or mpegts LOADING_COMPLETE. The
+ *     backend is already running its own reconnect loop; calling
+ *     player.unload() from the client aborts the in-flight backend
+ *     fetch and resets its retry counter. Worse, the unload+load
+ *     sequence spawns a SECOND backend ffmpeg pipe while the first is
+ *     still alive, and the doubled-up fetches race into a false
+ *     stream-dead within seconds. The health-check guard in
+ *     useStreamRecovery still promotes a truly-dead stream via
+ *     MAX_STALE_TIME_MS (45s frozen currentTime).
  *   - On stream ERROR with a "Maximum call stack size exceeded" or
  *     "Exception" detail we skip recovery entirely — these are internal
  *     corruption that will loop forever if we keep retrying.
@@ -102,6 +106,11 @@ export function initializeMpegtsPlayerInstance(ctx) {
     isRecoveringRef,
     hasCalledOnStreamDeadRef,
     streamUnstableRef,
+    retryCountRef,
+    freshStartCountRef,
+    totalRecoveryAttemptsRef,
+    softRecoveryCountRef,
+    recoveryTimestampsRef,
     setError,
     setLoading,
     setRecoveryStatus,
@@ -263,18 +272,27 @@ export function initializeMpegtsPlayerInstance(ctx) {
         errorContext = `Media error (${errorDetail})`;
       }
 
-      // Resilient proxy mode: try a soft recovery (mpegts unload/load —
-      // equivalent to a page refresh, kicks a fresh fetch which spawns
-      // a new backend ffmpeg pipe) before declaring the stream dead.
-      // The original "give up immediately" path was assuming the
-      // backend would only surface an error after exhausting its own
-      // retries, but in practice TS continuity gaps from upstream
-      // ffmpeg reconnects and transient frontend network blips fire
-      // ERROR/LOADING_COMPLETE while the backend is still happily
-      // streaming — that's why a manual page refresh "fixes" it. Soft
-      // recovery automates the refresh; attemptSoftRecovery itself
-      // escalates to notifyStreamDead after MAX_SOFT_RECOVERIES failed
-      // attempts, so we don't loop forever on a truly dead source.
+      // Resilient proxy mode: the backend is already running its own
+      // reconnect loop (ffmpeg + the resilient stream wrapper). Calling
+      // attemptSoftRecovery here aborts the in-flight backend fetch and
+      // spawns a SECOND ffmpeg pipe — directly observed in logs as two
+      // FFMPEG ids active for the same channel ~6s apart, with the
+      // first one's "Client disconnected" landing in the same second
+      // as the new auto-find request fires. The doubled-up fetches
+      // race and the player ends up declaring a healthy stream dead.
+      //
+      // For the same reasons the file already early-returns on
+      // <video> waiting/stalled/ended in resilient mode, route ERROR
+      // and LOADING_COMPLETE the same way: do nothing here, and let
+      // the health-check guard in useStreamRecovery promote a truly
+      // dead stream via MAX_STALE_TIME_MS (45s of frozen currentTime).
+      // The 'corrupted' fast-path above still fires for unrecoverable
+      // crashes — only the network/media transient cascade is silenced.
+      if (shouldUseResilientProxy) {
+        log('info', `mpegts ${errorContext} — backend handles reconnect in resilient mode, not soft-recovering`);
+        return;
+      }
+
       attemptSoftRecovery(errorContext);
     });
 
@@ -288,11 +306,19 @@ export function initializeMpegtsPlayerInstance(ctx) {
         return;
       }
 
-      // Same reasoning as the ERROR handler — let soft recovery try a
-      // refresh before giving up. mpegts.js often fires LOADING_COMPLETE
-      // for transient EOF on the backend response (e.g. when ffmpeg's
-      // upstream socket cycles and our io-controller sees the response
-      // close briefly) even though the backend is fine.
+      // Same reasoning as the ERROR handler — see the comment above.
+      // mpegts.js fires LOADING_COMPLETE for transient EOFs on the
+      // backend response (e.g. when ffmpeg's upstream socket cycles
+      // and our io-controller sees the response close briefly) even
+      // though the backend is fine. In resilient mode the client
+      // shouldn't react: triggering player.unload()/load() spawns a
+      // second concurrent ffmpeg pipe and the doubled-up fetches
+      // cascade into a false stream-dead within seconds. Health-check
+      // (MAX_STALE_TIME_MS) handles a truly-dead stream.
+      if (shouldUseResilientProxy) {
+        log('info', 'Stream loading complete — backend handles reconnect in resilient mode');
+        return;
+      }
       attemptSoftRecovery('Stream ended (loading complete)');
     });
 
@@ -318,14 +344,41 @@ export function initializeMpegtsPlayerInstance(ctx) {
         recoveryTimeoutRef.current = null;
       }
 
-      // Don't reset retry counters on every `playing` — a stream that
-      // briefly plays then dies would loop forever. attemptRecovery()
-      // resets them after 30s of sustained playback instead.
+      // Reset every recovery counter on `playing`. The previous behaviour
+      // only reset hasCalledOnStreamDeadRef, leaving retry/timestamp/soft
+      // counters intact — so a stream that hiccuped twice during startup
+      // and then played fine still entered subsequent failures with the
+      // chronic-unstable budget half-spent. A handful of transient blips
+      // past that point would trip isStreamChronicallyUnstable() and
+      // promote the slot to dead, which is exactly the "channels load in
+      // fine then automatically get replaced" symptom.
       lastPlayingTimeRef.current = Date.now();
       lastKnownCurrentTimeRef.current = videoEl.currentTime;
       clearRecoveryState();
       isInitializingRef.current = false;
       hasCalledOnStreamDeadRef.current = false;
+      if (retryCountRef) retryCountRef.current = 0;
+      if (freshStartCountRef) freshStartCountRef.current = 0;
+      if (totalRecoveryAttemptsRef) totalRecoveryAttemptsRef.current = 0;
+      if (softRecoveryCountRef) softRecoveryCountRef.current = 0;
+      if (recoveryTimestampsRef) recoveryTimestampsRef.current = [];
+      if (streamUnstableRef) streamUnstableRef.current = false;
+
+      // Notify the multi-view chain breaker that this slot reached a
+      // healthy state — useFindAlternative listens and resets the
+      // shared per-chain swap counter so a future failure on this slot
+      // doesn't carry over the previous stream's budget.
+      try {
+        window.dispatchEvent(new CustomEvent('iptv:streamPlaying', {
+          detail: {
+            channelId: getChannelId(),
+            sourceId: selectedChannel?.sourceId,
+            searchQuery: selectedChannel?.searchQuery || null,
+            espnEventName: selectedChannel?.espnEventName || null,
+            name: selectedChannel?.name || null
+          }
+        }));
+      } catch (_) { /* CustomEvent unsupported, ignore */ }
 
       if (onStreamPlaying) onStreamPlaying();
 

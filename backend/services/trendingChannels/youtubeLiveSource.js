@@ -30,6 +30,13 @@ const BASE = 'https://www.googleapis.com/youtube/v3';
 const liveVideoCache = new Map();
 const SEARCH_TTL_MS = 5 * 60 * 1000;
 
+// Last-tick map of channel.id → { title, videoId } for the live broadcast
+// currently airing. Re-populated each fetchSignals call. Read-only from
+// the orchestrator via getSnippets() so the response can describe what's
+// literally on the channel right now ("LIVE: Israel-Hamas briefing")
+// rather than just "BBC News".
+let lastSnippets = new Map();
+
 function enabled() {
   return Boolean(API_KEY);
 }
@@ -62,9 +69,13 @@ async function findLiveVideoId(channelId) {
 }
 
 async function fetchConcurrentViewers(videoIds) {
-  if (videoIds.length === 0) return new Map();
-  const out = new Map();
-  // videos.list accepts up to 50 ids per call
+  if (videoIds.length === 0) return { viewers: new Map(), titles: new Map() };
+  const viewers = new Map();
+  const titles = new Map();
+  // videos.list accepts up to 50 ids per call. Adding `snippet` to the
+  // part list keeps the call at 1 quota unit but returns the live
+  // broadcast's current title — high-value as a "what's on right now"
+  // string for the trending UI.
   for (let i = 0; i < videoIds.length; i += 50) {
     const batch = videoIds.slice(i, i + 50);
     try {
@@ -72,19 +83,21 @@ async function fetchConcurrentViewers(videoIds) {
         params: {
           key: API_KEY,
           id: batch.join(','),
-          part: 'liveStreamingDetails',
+          part: 'liveStreamingDetails,snippet',
         },
         timeout: 8000,
       });
       for (const item of resp.data?.items || []) {
         const v = item.liveStreamingDetails?.concurrentViewers;
-        if (v != null) out.set(item.id, parseInt(v, 10) || 0);
+        if (v != null) viewers.set(item.id, parseInt(v, 10) || 0);
+        const t = item.snippet?.title;
+        if (t) titles.set(item.id, t);
       }
     } catch (e) {
       logger.debug(`[YouTubeLive] videos.list batch failed: ${e.message}`);
     }
   }
-  return out;
+  return { viewers, titles };
 }
 
 /**
@@ -108,20 +121,31 @@ async function fetchSignals(channels) {
     })
   );
 
-  const viewersByVideo = await fetchConcurrentViewers(videoIds);
+  const { viewers: viewersByVideo, titles: titlesByVideo } = await fetchConcurrentViewers(videoIds);
   const out = new Map();
+  const snippets = new Map();
   for (const [vid, viewers] of viewersByVideo) {
     const channelId = idByVideo.get(vid);
     if (channelId) out.set(channelId, viewers);
   }
+  for (const [vid, title] of titlesByVideo) {
+    const channelId = idByVideo.get(vid);
+    if (channelId) snippets.set(channelId, { title, videoId: vid });
+  }
+  lastSnippets = snippets;
   if (out.size > 0) {
     logger.info(`[YouTubeLive] ${out.size} channels with concurrent viewers`);
   }
   return out;
 }
 
+function getSnippets() {
+  return lastSnippets;
+}
+
 module.exports = {
   name: 'youtube',
   enabled,
   fetchSignals,
+  getSnippets,
 };

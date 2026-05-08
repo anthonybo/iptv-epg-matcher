@@ -28,6 +28,13 @@ const CATEGORY_NAMES = ['Sports', 'News & Politics', 'Talk Shows & Podcasts', 'J
 
 let tokenCache = { token: null, exp: 0 };
 
+// Per-channel "what's on the top restream right now" snippet —
+// repopulated each fetchSignals call. Read by the orchestrator via
+// getSnippets() so the trending response can describe what's literally
+// being broadcast (e.g. "🔴 Cowboys vs Eagles SNF") instead of just the
+// channel name.
+let lastSnippets = new Map();
+
 function enabled() {
   return Boolean(CLIENT_ID && CLIENT_SECRET);
 }
@@ -122,22 +129,41 @@ async function fetchSignals(channels) {
   }
 
   const sums = new Map();
+  // For each matched channel keep the single highest-viewer stream's
+  // title — that's the most representative "what's on" line. Lower-rank
+  // restreams are usually low-quality clones of the same content.
+  const topByChannel = new Map(); // chId → { title, userName, viewers }
   for (const s of streams) {
     const title = `${s.title || ''} ${s.user_name || ''}`;
     for (const { id, re } of matchers) {
       if (re.test(title)) {
         sums.set(id, (sums.get(id) || 0) + (s.viewer_count || 0));
+        const prev = topByChannel.get(id);
+        const viewers = s.viewer_count || 0;
+        if (!prev || viewers > prev.viewers) {
+          topByChannel.set(id, {
+            title: s.title || '',
+            userName: s.user_name || '',
+            viewers,
+          });
+        }
       }
     }
   }
+  lastSnippets = topByChannel;
   if (sums.size > 0) {
     logger.info(`[TwitchLive] ${sums.size} channels with restream viewers (from ${streams.length} streams scanned)`);
   }
   return sums;
 }
 
+function getSnippets() {
+  return lastSnippets;
+}
+
 module.exports = {
   name: 'twitch',
   enabled,
   fetchSignals,
+  getSnippets,
 };

@@ -341,12 +341,12 @@ const MultiViewPage = ({ sessionId }) => {
       <TrendingModal
         isOpen={showTrendingModal}
         onClose={() => setShowTrendingModal(false)}
-        onPick={(channel) =>
+        onPick={(channel, signal) =>
           // Brand mode tells the backend to skip per-event/PPV channels
           // (e.g. "ESPN+ | NBA: Lakers vs Warriors") and prefer the
-          // linear feed. Return the promise so the modal can show a
-          // per-row spinner and auto-close on success.
-          searchByName(channel.name, { mode: 'brand' })
+          // linear feed. Forward the signal so the modal's Cancel
+          // button can abort an in-flight search.
+          searchByName(channel.name, { mode: 'brand', signal })
         }
       />
 

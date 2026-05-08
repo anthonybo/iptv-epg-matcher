@@ -45,6 +45,78 @@ function formatRelative(iso) {
   return `${Math.round(ms / 3_600_000)}h ago`;
 }
 
+// Pick the single best "why is this channel trending right now" line
+// from the merged signals. Each entry below describes what a particular
+// source can tell us:
+//
+//   youtube  — title of the live broadcast currently airing on the
+//              channel's official 24/7 YouTube feed (closest match for
+//              "what's literally on TV right now")
+//   twitch   — title of the highest-viewer pirate restream that matched
+//              the channel (best for "sports event being watched right
+//              now" since restreams ride finals/breaking news)
+//   reddit   — the single thread driving the comment-velocity signal,
+//              either DIRECTLY (thread title mentions the channel) or
+//              INDIRECTLY (busiest thread in a sport/news sub that
+//              attributes a fraction of its volume to this channel —
+//              e.g. r/nfl megathread → ESPN). This is the most useful
+//              answer to "why ESPN #1": it surfaces the actual topic.
+//   bluesky  — most recent post on the firehose mentioning the channel
+//              by handle. Quotes the post text itself.
+//
+// Priority ordering matches the user's expressed need: they want to
+// see "what game / story is being talked about" — Reddit + Bluesky give
+// concrete topics; YouTube/Twitch give "what's on the screen" which
+// is often related but less specific. We prefer the topic-y ones.
+// Format a number compactly: 12345 → "12.3k". Used for upvotes / comments.
+function compact(n) {
+  if (!n && n !== 0) return null;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+// Build a meta string like "1.2k comments · 8.5k upvotes · 2h" out of
+// engagement numbers. Returns null when none of the stats are
+// meaningful — a thread with <50 comments isn't actually "trending"
+// enough to be worth advertising the count.
+function buildRedditMeta(r) {
+  const parts = [];
+  if (r.comments != null && r.comments >= 50) parts.push(`${compact(r.comments)} comments`);
+  if (r.score != null && r.score >= 100) parts.push(`${compact(r.score)} upvotes`);
+  if (r.ageHours != null && r.ageHours >= 0 && r.ageHours <= 48) {
+    parts.push(r.ageHours === 0 ? '<1h ago' : `${r.ageHours}h ago`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function describeChannel(c) {
+  const r = c.snippets?.reddit;
+  if (r?.title) {
+    const sub = r.subreddit ? `r/${r.subreddit}` : '';
+    const tag = r.attribution === 'indirect' ? `${sub} hot:` : sub ? `${sub}:` : '';
+    return {
+      kind: 'reddit',
+      tag,
+      text: r.title,
+      meta: buildRedditMeta(r),
+    };
+  }
+  const yt = c.snippets?.youtube?.title;
+  if (yt) return { kind: 'youtube', tag: 'LIVE NOW:', text: yt, meta: null };
+  const tw = c.snippets?.twitch;
+  if (tw?.title) {
+    const viewers = tw.viewers ? `${compact(tw.viewers)} viewers` : null;
+    return { kind: 'twitch', tag: 'TOP RESTREAM:', text: tw.title, meta: viewers };
+  }
+  const bs = c.snippets?.bluesky?.text;
+  if (bs) {
+    const trimmed = bs.length > 140 ? `${bs.slice(0, 140).trim()}…` : bs;
+    return { kind: 'bluesky', tag: 'BLUESKY:', text: trimmed, meta: null };
+  }
+  return null;
+}
+
 function SignalBadge({ name, raw }) {
   const palette = {
     youtube: 'bg-red-900/40 text-red-200 border-red-800',
@@ -75,12 +147,14 @@ function SignalBadge({ name, raw }) {
 const TrendingModal = ({ isOpen, onClose, onPick }) => {
   const [region, setRegion] = useState('');
   const [category, setCategory] = useState('');
-  // The id of the channel whose Add button has been clicked but whose
-  // /search-channel pipeline hasn't finished yet. Drives the per-row
-  // spinner — without it, clicking Add looks like nothing happened
-  // because finding a working stream can take 10+ seconds (ffprobe on
-  // candidate channels).
-  const [addingId, setAddingId] = useState(null);
+  // The channel whose Add button has been clicked but whose
+  // /search-channel pipeline hasn't finished yet. Stored as
+  // { id, controller } so Cancel can abort the in-flight fetch — the
+  // backend search-channel route listens for req 'close' and stops
+  // its ffprobe loop within a tick. Without Cancel, a user who
+  // clicks ESPN and realises mid-search that they meant something
+  // else has to wait the full search out (often 10+ seconds).
+  const [adding, setAdding] = useState(null); // { id, controller } | null
   const { channels, generatedAt, sourcesActive, sourcesEnabled, stale, loading, error, refresh } =
     useTrendingChannels({
       enabled: isOpen,
@@ -90,15 +164,23 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
     });
 
   const handlePick = useCallback(async (channel) => {
-    if (addingId) return; // ignore double-clicks while one is in flight
-    setAddingId(channel.id);
+    if (adding) return; // ignore double-clicks while one is in flight
+    const controller = new AbortController();
+    setAdding({ id: channel.id, controller });
     try {
-      const ok = await Promise.resolve(onPick && onPick(channel));
+      const ok = await Promise.resolve(onPick && onPick(channel, controller.signal));
       if (ok) onClose();
     } finally {
-      setAddingId(null);
+      setAdding(null);
     }
-  }, [addingId, onPick, onClose]);
+  }, [adding, onPick, onClose]);
+
+  const handleCancel = useCallback(() => {
+    if (adding?.controller) {
+      console.log(`[Trending] Cancel clicked for "${adding.id}"`);
+      adding.controller.abort();
+    }
+  }, [adding]);
 
   const sourceChips = useMemo(() => {
     const enabled = new Set(sourcesEnabled);
@@ -232,7 +314,19 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
                 <div className="text-xs text-amber-200/90 leading-relaxed">
                   <div className="font-semibold text-amber-100">Limited signal — only {sourcesEnabled.length} of 4 sources are enabled</div>
                   <div className="mt-1">
-                    Add <code className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-100 font-mono text-[11px]">{missingPaidSources.join('</code>, <code className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-100 font-mono text-[11px]">')}</code> to <code className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-100 font-mono text-[11px]">backend/.env</code> and restart to unlock {!sourcesEnabled.includes('youtube') && 'YouTube concurrent-viewer counts'}{!sourcesEnabled.includes('youtube') && !sourcesEnabled.includes('twitch') && ' and '}{!sourcesEnabled.includes('twitch') && 'Twitch restream viewer counts'}.
+                    Add{' '}
+                    {missingPaidSources.map((s, i) => (
+                      <React.Fragment key={s}>
+                        {i > 0 && <span>, </span>}
+                        <code className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-100 font-mono text-[11px]">{s}</code>
+                      </React.Fragment>
+                    ))}
+                    {' '}to{' '}
+                    <code className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-100 font-mono text-[11px]">backend/.env</code>
+                    {' '}and restart to unlock{' '}
+                    {!sourcesEnabled.includes('youtube') && 'YouTube concurrent-viewer counts'}
+                    {!sourcesEnabled.includes('youtube') && !sourcesEnabled.includes('twitch') && ' and '}
+                    {!sourcesEnabled.includes('twitch') && 'Twitch restream viewer counts'}.
                   </div>
                   <div className="mt-1 text-amber-400/70">
                     Without them, ranking leans on Bluesky firehose mentions + Reddit comment velocity — which skew toward whatever's being talked about (often news/politics).
@@ -286,6 +380,29 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
                         <span className="text-[10px] text-slate-500">· {c.category}</span>
                       )}
                     </div>
+                    {(() => {
+                      const d = describeChannel(c);
+                      if (!d) return null;
+                      const palette = {
+                        reddit: { text: 'text-orange-200/90', tag: 'text-orange-400' },
+                        youtube: { text: 'text-rose-200/90', tag: 'text-rose-400' },
+                        twitch: { text: 'text-purple-200/90', tag: 'text-purple-400' },
+                        bluesky: { text: 'text-sky-200/90', tag: 'text-sky-400' },
+                      }[d.kind] || { text: 'text-slate-300', tag: 'text-slate-400' };
+                      return (
+                        <div className={`mt-0.5 text-[11px] leading-snug ${palette.text} truncate`} title={`${d.tag ? d.tag + ' ' : ''}${d.text}${d.meta ? ' · ' + d.meta : ''}`}>
+                          {d.tag && (
+                            <span className={`text-[9px] font-bold uppercase tracking-wider mr-1 ${palette.tag}`}>
+                              {d.tag}
+                            </span>
+                          )}
+                          <span>{d.text}</span>
+                          {d.meta && (
+                            <span className="text-slate-500 ml-1.5">· {d.meta}</span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <div className="mt-1 flex flex-wrap items-center gap-1">
                       {Object.entries(c.signals || {}).map(([name, sig]) => (
                         <SignalBadge key={name} name={name} raw={sig?.raw} />
@@ -293,34 +410,34 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => handlePick(c)}
-                    disabled={Boolean(addingId)}
-                    className={`flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
-                      addingId === c.id
-                        ? 'border-indigo-500 bg-indigo-900/60 text-indigo-100 cursor-wait'
-                        : addingId
+                  {adding?.id === c.id ? (
+                    <button
+                      onClick={handleCancel}
+                      title="Cancel this search"
+                      className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-700 bg-rose-900/40 text-rose-200 hover:bg-rose-900/60 transition"
+                    >
+                      <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Cancel
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handlePick(c)}
+                      disabled={Boolean(adding)}
+                      className={`flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition ${
+                        adding
                           ? 'border-slate-700 bg-slate-800/40 text-slate-500 cursor-not-allowed'
                           : 'border-indigo-700 bg-indigo-900/30 text-indigo-200 hover:bg-indigo-900/60 opacity-90 group-hover:opacity-100'
-                    }`}
-                  >
-                    {addingId === c.id ? (
-                      <>
-                        <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        Finding…
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                        Add
-                      </>
-                    )}
-                  </button>
+                      }`}
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Add
+                    </button>
+                  )}
                 </li>
               ))}
             </ol>

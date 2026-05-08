@@ -373,6 +373,43 @@ router.post('/search-channel', async (req, res) => {
       blacklistConditions = blacklistPlaceholders.join(' AND ');
     }
 
+    // ── Layer 1: SQL pre-filter for brand-mode (Tuliprox-style) ──
+    //
+    // Aggregator IPTV catalogs include thousands of per-event PPV
+    // channels named with conventions like:
+    //
+    //   "  S004 | 05/05 ARSENAL VS ATLÉTICO MADRID = ESPN SUR"
+    //   " :ESPN+  285"
+    //   " :Nbc Sports  06"
+    //
+    // For a brand-mode search ("ESPN", "Sportsnet", "MLB.TV"), these
+    // are pure noise — the user wants the linear feed, not a per-game
+    // stream. They're rejected by JS scoring downstream, but they fill
+    // the candidate pool first (1.13M-row catalog, leading-whitespace +
+    // colon names sort to the top). We've measured "Brand-mode filtered
+    // 200 → 0" across all 10 batches before reaching real candidates.
+    //
+    // Drop them at the SQL layer for brand mode ONLY. Event mode
+    // (ticker click, find-alternative) keeps these channels in scope
+    // because a "S### | DATE TEAMS = ESPN SUR" channel may actually
+    // be the live broadcast of the matching ticker event today.
+    //
+    // Patterns excluded:
+    //   ^[[:space:]]*[:|]                         — leading colon/pipe (PPV bucket)
+    //   ^[[:space:]]*[Ss][0-9]+[[:space:]]*\\|    — "S### | …" aggregator channels
+    //   [0-9]{1,2}/[0-9]{1,2}                     — date stamps (05/05)
+    //   \\yvs\\y                                  — "vs" matchup separator
+    //
+    // Postgres regex flavour: \\y is the word-boundary anchor (~\\b
+    // in PCRE). Wrapped !~* (case-insensitive negative regex match).
+    // The trgm GIN index drives the upstream ILIKE filter, so this
+    // regex runs only on the matched subset — typically a few thousand
+    // rows even on the 1.13M-row table.
+    let brandModeNoiseExclusion = '';
+    if (mode === 'brand') {
+      brandModeNoiseExclusion = `AND c.name !~* '^[[:space:]]*[:|]|^[[:space:]]*[Ss][0-9]+[[:space:]]*\\||[0-9]{1,2}/[0-9]{1,2}|\\yvs\\y'`;
+    }
+
     // SQL-side coarse priority sort. The JS scorer below is the final
     // word on relevance, but without _some_ priority in the SQL, the
     // batch-paginated candidate pool is just `ORDER BY c.name` —
@@ -713,6 +750,7 @@ router.post('/search-channel', async (req, res) => {
           AND (${channelConditions})
           ${sourceExclusion}
           ${channelExclusion}
+          ${brandModeNoiseExclusion}
           AND ${blacklistConditions}
         ORDER BY ${orderClause}
         LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
@@ -745,50 +783,93 @@ router.post('/search-channel', async (req, res) => {
       // archived feeds, and other noise so we land on the linear/24-7
       // channel rather than a stale event channel that's no longer live.
       if (mode === 'brand' && channels.length > 0) {
-        const eventNoisePattern = /(\bvs?\.?\b|\b@\b|\bat\s+\b|\bppv\b|\bfinal\b|\bppr\b|\bplayoff\b|\bgame\s*\d|\b\d{1,2}[\.\/-]\d{1,2}\b|\b20\d{2}-\d{2}-\d{2}\b|\b\d+\s*-\s*\d+\b)/i;
+        // Token-set scoring (Layer 2, Stream-Mapparr-style).
+        //
+        // Reference algorithm:
+        //   github.com/PiratesIRC/Stream-Mapparr — tokenize each name
+        //   into a set of words, drop noise tokens, then check the
+        //   query's tokens are all present in the channel's tokens.
+        //   Naturally handles PPV vs linear ("ESPN" ≠ "ESPN+", "ESPN"
+        //   ≠ "ESPN3") because tokens compare as full strings, not
+        //   substrings — no fragile word-boundary regex required.
+        //
+        // Normalisation:
+        //   - lowercase
+        //   - strip [...] and (...) decorations
+        //   - strip quality / region markers (HD, FHD, 4K, 1080p, …)
+        //   - split on whitespace + IPTV separators (: | = / \)
+        //   - drop tokens shorter than 2 chars (kills "a", "&", etc.)
+        const NOISE_TOKEN_RE = /\b(hd|fhd|sd|uhd|4k|8k|1080p?|720p?|480p?|h265|hevc|raw|alt|alternate|alternative|backup)\b/g;
+        const tokenize = (s) => {
+          const norm = String(s || '')
+            .toLowerCase()
+            .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+            .replace(NOISE_TOKEN_RE, ' ');
+          return new Set(
+            norm
+              .split(/[\s:|=\\/]+/)
+              .map((t) => t.trim())
+              .filter((t) => t.length >= 2)
+          );
+        };
+
         const queryLower = String(searchQuery).toLowerCase().trim();
-        // The brand-set is the primary query plus any caller-supplied
-        // aliases — a channel matching ANY of these counts as an
-        // in-family hit. Without this, expanding aliases at the SQL
-        // layer (above) would pull MLB Network channels into the
-        // candidate pool, but this filter would still reject them
-        // because the wordRe only matched the primary query "MLB.TV".
+        const queryTokens = tokenize(searchQuery);
+        // Each alias as its own token-set — a channel is a match if
+        // ANY alias's full token-set is a subset of the channel's
+        // tokens. Without alias support, we use just the primary
+        // query (single token-set).
+        const aliasTokenSets = aliasesArr.length > 0
+          ? aliasesArr.map((a) => tokenize(a))
+          : [];
+        // The brand "set" used for explanatory logging only — actual
+        // matching uses the per-alias subset check below.
         const brandSetLower = Array.from(new Set(
           [queryLower, ...aliasesArr.map((a) => a.toLowerCase().trim())].filter(Boolean)
         ));
-        // Pre-compile the word-boundary regexes so the inner map loop
-        // doesn't recompile per channel. RegExp construction here is
-        // cheap but for 200-row batches × N aliases it adds up.
-        const aliasRes = brandSetLower.map((a) =>
-          new RegExp(`\\b${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-        );
         const beforeBrand = channels.length;
-        // Score: (a) starts-with primary brand wins, (b) word-boundary
-        // match against ANY alias wins, (c) no event noise. Keep only
-        // positively-scored candidates.
+        // Token-subset gate (Stream-Mapparr style). A channel matches
+        // when EITHER the primary query's tokens are all present in
+        // the channel's tokens, OR (when caller passed `aliases`) any
+        // alias's full token-set is a subset of the channel's tokens.
+        //
+        // Why subset, not regex word-boundary?
+        //   - "espn"  ⊂ {usa, espn, hd}            → "USA: ESPN HD" matches
+        //   - "espn"  ⊄ {espn+, 285, vs, liverpool} → ":ESPN+ 285…" rejected
+        //   - "espn"  ⊄ {espn3}                     → "ESPN3" rejected
+        //   - "espn+" ⊂ {espn+, 285}               → ":ESPN+ 285" matches
+        //
+        // Token equality is full-string, so "ESPN" ≠ "ESPN+" without
+        // any need for fragile [^a-z0-9+] regex acrobatics.
+        const isSubsetOf = (subset, superset) => {
+          for (const t of subset) if (!superset.has(t)) return false;
+          return true;
+        };
         channels = channels
           .map((c) => {
             const name = String(c.name || '');
             const lower = name.toLowerCase();
-            if (eventNoisePattern.test(lower)) return null;
-            let score = 0;
-            const matched = aliasRes.some((re) => re.test(lower));
-            if (matched) score += 100;
-            // Starts-with bonus only against the primary query so the
-            // canonical brand still wins ties (e.g. "ESPN HD" beats
-            // "USA: ESPN" when the primary query is "ESPN").
+            const channelTokens = tokenize(name);
+            const matchedPrimary = queryTokens.size > 0 && isSubsetOf(queryTokens, channelTokens);
+            const matchedAlias =
+              !matchedPrimary &&
+              aliasTokenSets.length > 0 &&
+              aliasTokenSets.some((set) => set.size > 0 && isSubsetOf(set, channelTokens));
+            if (!matchedPrimary && !matchedAlias) return null;
+            let score = 100;
+            // Tie-breaker bonuses (only apply once a token-subset
+            // match has been established):
+            //   +50 starts-with primary query — canonical brand wins
+            //   +30 short name (≤12)         — linear feeds are short
+            //   +15 medium name (≤20)
+            //   −30 long name (>40)          — event/region variants
+            //    −5 trailing parens/brackets — region badges
             if (lower.startsWith(queryLower)) score += 50;
-            // Penalise long names — linear feeds are typically short
-            // ("ESPN", "ESPN HD", "ESPN US"); event/regional ones are
-            // long ("ESPN+ FOOTBALL: SOMEWHERE STATE @ OTHER U").
             if (name.length <= 12) score += 30;
             else if (name.length <= 20) score += 15;
             else if (name.length > 40) score -= 30;
-            // Light penalty for trailing decorations like (US), [HD], etc.
-            // Keep short adornments ("HD", "FHD", "1080p") but downrank
-            // region badges so the bare brand wins when present.
             if (/\(.*\)|\[.*\]/.test(name)) score -= 5;
-            return score > 0 ? { ...c, _brandScore: score } : null;
+            return { ...c, _brandScore: score };
           })
           .filter(Boolean)
           .sort((a, b) => b._brandScore - a._brandScore);

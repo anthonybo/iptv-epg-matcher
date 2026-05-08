@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { showToast } from '../../components/Toast';
 import { addToMultiview, removeFromMultiview, updateMutedState } from '../../utils/multiviewManager';
 import { blacklistChannel, getBlacklistedChannelIds } from '../../utils/streamBlacklist';
@@ -177,13 +177,38 @@ export function useFindAlternative({
   };
 
   // Called when a stream successfully plays for long enough to count as
-  // "settled" (currently driven by the 30s reset in handleFindAlternative
-  // — extending it requires a play-event signal we don't yet plumb in).
+  // "settled". Wired to the `iptv:streamPlaying` window event dispatched
+  // from initMpegts/initHls — see the listener below. Without this,
+  // every successful swap inherited the previous stream's chain count,
+  // and a healthy replacement that hiccuped once after playback would
+  // immediately tip the chain into "find different game" territory.
   const resetChain = (stream) => {
     const key = chainKeyForStream(stream);
     if (!key) return;
-    swapChainRef.current.delete(key);
+    if (swapChainRef.current.has(key)) {
+      console.log(`[Find Alternative] Chain "${key}" reset — stream reached playing state`);
+      swapChainRef.current.delete(key);
+    }
   };
+
+  // Listen for the `playing` event dispatched by the player initializers
+  // and reset the chain counter for whichever chain key matches. The
+  // event detail carries the same fields chainKeyForStream consults so
+  // we can resolve the key without consulting streams[].
+  useEffect(() => {
+    const onPlaying = (e) => {
+      const d = e?.detail || {};
+      const raw = d.searchQuery || d.espnEventName || d.name || '';
+      const key = String(raw).toLowerCase().trim();
+      if (!key) return;
+      if (swapChainRef.current.has(key)) {
+        console.log(`[Find Alternative] Chain "${key}" reset — stream reached playing state`);
+        swapChainRef.current.delete(key);
+      }
+    };
+    window.addEventListener('iptv:streamPlaying', onPlaying);
+    return () => window.removeEventListener('iptv:streamPlaying', onPlaying);
+  }, []);
 
   const markSearching = (key) => {
     setFindingAlternativeFor((prev) => {

@@ -81,7 +81,27 @@ let lastSnapshot = {
   ranked: [],
   byId: new Map(),
   sourcesActive: [],
+  // sourcesEnabled needs to seed from the source modules' enabled()
+  // declarations even before the first refresh runs, otherwise the UI
+  // briefly shows "0 of 4 sources are enabled" right after a backend
+  // restart while the first refresh is in flight (which can take 20s+
+  // because of Reddit's request spacing). Seed it from the sources
+  // themselves so the UI knows what's configured even with no data.
+  sourcesEnabled: [],
 };
+
+// Compute sourcesEnabled from the source modules. Used as a seed so the
+// UI doesn't flicker "0 sources" right after backend restart.
+function computeEnabledSources() {
+  const out = [];
+  for (const s of [youtubeSource, twitchSource, redditSource, blueskySource]) {
+    try {
+      if (s.enabled && s.enabled()) out.push(s.name);
+    } catch (_) { /* ignore */ }
+  }
+  return out;
+}
+lastSnapshot.sourcesEnabled = computeEnabledSources();
 
 let inflightPromise = null;
 let refreshTimer = null;
@@ -131,12 +151,34 @@ async function gather() {
     }
   }
 
+  // Pull the per-source "what's on right now" snippets (currently
+  // YouTube live video titles + Twitch top-restream titles). Each source
+  // exposes getSnippets() returning Map<channelId, snippet-object>;
+  // missing => empty map. We merge them per channel onto the ranked
+  // entry so the modal can show a one-liner describing the live
+  // broadcast under each channel name.
+  const snippetsBySource = {};
+  for (const { source } of sources) {
+    if (typeof source.getSnippets === 'function') {
+      try {
+        snippetsBySource[source.name] = source.getSnippets() || new Map();
+      } catch (_) {
+        snippetsBySource[source.name] = new Map();
+      }
+    }
+  }
+
   const byId = new Map(channels.map((c) => [c.id, c]));
   const ranked = Array.from(composite.entries())
     .filter(([, score]) => score > 0)
     .sort((a, b) => b[1] - a[1])
     .map(([id, score]) => {
       const ch = byId.get(id) || { id };
+      const snippets = {};
+      for (const [name, m] of Object.entries(snippetsBySource)) {
+        const s = m.get(id);
+        if (s) snippets[name] = s;
+      }
       return {
         id,
         name: ch.name,
@@ -144,6 +186,7 @@ async function gather() {
         category: ch.category,
         score: Number(score.toFixed(4)),
         signals: perSource.get(id) || {},
+        snippets,
       };
     });
 

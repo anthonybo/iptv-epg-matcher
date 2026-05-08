@@ -33,6 +33,13 @@ const DECAY_LAMBDA = Math.LN2 / HALF_LIFE_MS;
 // channel.id → { score, lastTs }
 const scoreState = new Map();
 
+// channel.id → array of recent matched posts (oldest first), each
+// { text, ts }. Capped per channel — reading getSnippets() picks the
+// most recent. This gives the trending UI a real "what people are
+// posting about <channel> right now" excerpt rather than just a count.
+const RECENT_POSTS_PER_CHANNEL = 8;
+const recentPosts = new Map();
+
 let ws = null;
 let backoffMs = 1000;
 let started = false;
@@ -57,10 +64,16 @@ function decayedScore(state, now) {
   return state.score * Math.exp(-DECAY_LAMBDA * dt);
 }
 
-function applyMention(channelId, now) {
+function applyMention(channelId, now, postText) {
   const prev = scoreState.get(channelId);
   const decayed = decayedScore(prev, now);
   scoreState.set(channelId, { score: decayed + 1, lastTs: now });
+  if (postText) {
+    let buf = recentPosts.get(channelId);
+    if (!buf) { buf = []; recentPosts.set(channelId, buf); }
+    buf.push({ text: postText, ts: now });
+    if (buf.length > RECENT_POSTS_PER_CHANNEL) buf.shift();
+  }
 }
 
 function handleMessage(raw) {
@@ -77,7 +90,7 @@ function handleMessage(raw) {
   const now = Date.now();
   for (const m of matchers) {
     if (m.needles.some((n) => lower.includes(n))) {
-      applyMention(m.id, now);
+      applyMention(m.id, now, text);
     }
   }
 }
@@ -144,8 +157,23 @@ async function fetchSignals(channels) {
   return out;
 }
 
+function getSnippets() {
+  // Map<channelId, { text, ts }> — most recent matched post per channel
+  // (single excerpt; the rolling buffer is for future "scroll through
+  // mentions" UX, but the modal just shows the freshest one today).
+  const out = new Map();
+  for (const [id, buf] of recentPosts) {
+    if (!buf || buf.length === 0) continue;
+    const latest = buf[buf.length - 1];
+    if (!latest?.text) continue;
+    out.set(id, { text: latest.text, ts: latest.ts });
+  }
+  return out;
+}
+
 module.exports = {
   name: 'bluesky',
   enabled: () => Boolean(WebSocketCtor),
   fetchSignals,
+  getSnippets,
 };

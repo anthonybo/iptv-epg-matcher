@@ -142,6 +142,23 @@ export function initializeHlsPlayer(ctx) {
             // inheriting whatever count was at the time of the last
             // error.
             mediaRecoveryAttempts = 0;
+
+            // Notify the multi-view chain breaker that this slot is
+            // healthy so a future failure doesn't carry the previous
+            // stream's chain count. See useFindAlternative for the
+            // listener side.
+            try {
+                window.dispatchEvent(new CustomEvent('iptv:streamPlaying', {
+                    detail: {
+                        channelId: getChannelId(),
+                        sourceId: selectedChannel?.sourceId,
+                        searchQuery: selectedChannel?.searchQuery || null,
+                        espnEventName: selectedChannel?.espnEventName || null,
+                        name: selectedChannel?.name || null
+                    }
+                }));
+            } catch (_) { /* ignore */ }
+
             if (onStreamPlaying) onStreamPlaying();
             detectQualityHls('playing');
         });

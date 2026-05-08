@@ -352,6 +352,15 @@ const IPTVPlayer = ({
     isRecoveringRef: recovery.isRecoveringRef,
     hasCalledOnStreamDeadRef: recovery.hasCalledOnStreamDeadRef,
     streamUnstableRef: recovery.streamUnstableRef,
+    // Recovery counters cleared on `playing` so a stream that briefly
+    // hiccuped during startup, then played, gets a fresh budget — without
+    // this, every transient blip past the first counts toward the
+    // chronic-unstable cap and a healthy stream gets swapped out.
+    retryCountRef: recovery.retryCountRef,
+    freshStartCountRef: recovery.freshStartCountRef,
+    totalRecoveryAttemptsRef: recovery.totalRecoveryAttemptsRef,
+    softRecoveryCountRef: recovery.softRecoveryCountRef,
+    recoveryTimestampsRef: recovery.recoveryTimestampsRef,
     setError,
     setLoading,
     setRecoveryStatus,
