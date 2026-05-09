@@ -56,7 +56,19 @@ const BROADCASTER_ALIASES = {
   'NFL Network': ['NFL NETWORK', 'NFLN'],
   'NBA TV': ['NBA TV', 'NBATV'],
   'NHL Network': ['NHL NETWORK', 'NHLN'],
-  'MLB Network': ['MLB NETWORK', 'MLBN'],
+  // MLB NETWORK and MLB.TV are DIFFERENT products. MLB Network is a
+  // 24/7 linear cable channel (highlights, MLB Tonight, occasional
+  // out-of-market games). MLB.TV is a streaming app that carries
+  // every live regular-season game. Conflating them makes the matcher
+  // surface MLB Network as a candidate for any MLB game when in
+  // reality the live broadcast is on the team's RSN — see the
+  // 2026-05-08 Dodgers/Braves search log where MLB.TV was an ESPN
+  // broadcaster code, the alias bag included MLB NETWORK, and every
+  // "CA MLB Network" channel scored +250 broadcaster bonus and beat
+  // out Spectrum Sportsnet LA Dodgers (the actual live broadcaster).
+  // 'MLB Net' is a real ESPN abbreviation; live-events.broadcasts
+  // sometimes returns that for MLB Network — keep it on this entry.
+  'MLB Network': ['MLB NETWORK', 'MLBN', 'MLB NET'],
   'MLB.TV': ['MLB.TV', 'MLBTV'],
   'NFL+': ['NFL+', 'NFL PLUS'],
 
@@ -108,18 +120,22 @@ const BROADCASTER_ALIASES = {
   // ESPN's MLB feeds frequently appear as "<Team>.TV" (Padres.TV,
   // Angels.TV, Reds.TV, etc. — verified in live_events). Most IPTV
   // catalogs don't carry team-specific .TV streams as distinct
-  // channels; the team game flows through the team's RSN, MLB.TV
-  // app, or a generic MLB Network. We map each team-.TV to:
+  // channels; the team game flows through the team's RSN or the
+  // MLB.TV streaming app. We map each team-.TV to:
   //   1. The literal "<Team>.TV" / "<Team> TV" string (catches IPTV
   //      catalogs that DO carry the per-team feed)
-  //   2. MLB.TV / MLB NETWORK as fallback substrings
+  //   2. MLB.TV as a fallback (the streaming-app catch-all)
+  //
+  // We do NOT chain MLB NETWORK in here. MLB Network is a different
+  // linear cable channel that does not generally carry the live
+  // regular-season game; including it as a fallback alias caused the
+  // matcher to surface MLB NETWORK above each team's actual RSN for
+  // every MLB game.
   //
   // Below: all 30 MLB clubs. Each entry is a no-op for catalogs that
   // don't carry these streams; for those that do, the explicit name
   // beats a verbatim passthrough.
-  // ESPN also returns "MLB Net" as an abbreviation — reverse lookup
-  // will route it to this entry's MLB NETWORK alias.
-  'MLB.TV':           ['MLB.TV', 'MLBTV', 'MLB TV', 'MLB NETWORK', 'MLB NET'],
+  'MLB.TV':           ['MLB.TV', 'MLBTV', 'MLB TV'],
   'Angels.TV':        ['ANGELS.TV', 'ANGELS TV',          'MLB.TV'],
   'Astros.TV':        ['ASTROS.TV', 'ASTROS TV',          'MLB.TV'],
   'Athletics.TV':     ['ATHLETICS.TV', 'ATHLETICS TV',    'MLB.TV'],

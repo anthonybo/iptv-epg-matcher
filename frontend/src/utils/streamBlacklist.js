@@ -12,10 +12,75 @@
  * recently so the next find-alternative request can exclude them at the
  * backend level. Entries auto-expire after the TTL — a transient
  * upstream blip shouldn't blacklist a channel forever.
+ *
+ * Why 60 minutes (was 5)?
+ *   The earlier 5-min TTL was tuned for occasional blips. In practice,
+ *   when the user pins to a brand whose streams are mostly broken right
+ *   now, the find-alt loop cycles through 4–5 dead channels in the
+ *   first minute, settles on one that limps along, then 6+ minutes
+ *   later that one dies too. By then the original 4–5 dead entries have
+ *   expired and find-alt picks them again — exactly the loop the log
+ *   from 2026-05-08 21:04 captured (xtream_53345 retried 7 minutes
+ *   after it first died). 60 minutes is long enough that a session of
+ *   cycling through reelz-style channels never hits the same dead one
+ *   twice; transient blips that resolve in <1h still recover via
+ *   user-triggered manual searches that bypass the blacklist.
+ *
+ * Why sessionStorage?
+ *   In-memory only meant a tab refresh wiped the dead-channel list and
+ *   the auto-find loop started picking already-tried-and-failed
+ *   channels from scratch. sessionStorage survives refresh but doesn't
+ *   leak across browser windows, which is the right scope: each tab is
+ *   one multi-view session.
  */
 
-const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const blacklist = new Map(); // key → expiresAt
+const DEFAULT_TTL_MS = 60 * 60 * 1000; // 60 minutes
+const STORAGE_KEY = 'iptv_stream_blacklist_v1';
+
+// Hot in-memory mirror of the persisted blob. Reads stay O(1); writes
+// flush back to sessionStorage. Loaded once at module init.
+let blacklist = new Map(); // key → expiresAt
+
+const supportsSessionStorage = (() => {
+  try {
+    if (typeof window === 'undefined' || !window.sessionStorage) return false;
+    const t = '__iptv_bl_test__';
+    window.sessionStorage.setItem(t, t);
+    window.sessionStorage.removeItem(t);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function load() {
+  if (!supportsSessionStorage) return;
+  try {
+    const raw = window.sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+    const now = Date.now();
+    for (const [k, exp] of Object.entries(parsed)) {
+      if (typeof exp === 'number' && exp > now) blacklist.set(k, exp);
+    }
+  } catch {
+    // Corrupt blob — drop silently.
+  }
+}
+
+function persist() {
+  if (!supportsSessionStorage) return;
+  try {
+    const obj = {};
+    for (const [k, v] of blacklist.entries()) obj[k] = v;
+    window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+  } catch {
+    // Quota / serialization issues — non-fatal, in-memory copy still works.
+  }
+}
+
+load();
 
 function key(sourceId, channelId) {
   return `${sourceId ?? ''}::${channelId ?? ''}`;
@@ -23,14 +88,20 @@ function key(sourceId, channelId) {
 
 function pruneExpired() {
   const now = Date.now();
+  let mutated = false;
   for (const [k, exp] of blacklist.entries()) {
-    if (now > exp) blacklist.delete(k);
+    if (now > exp) {
+      blacklist.delete(k);
+      mutated = true;
+    }
   }
+  if (mutated) persist();
 }
 
 export function blacklistChannel(sourceId, channelId, ttlMs = DEFAULT_TTL_MS) {
   if (!channelId) return;
   blacklist.set(key(sourceId, channelId), Date.now() + ttlMs);
+  persist();
 }
 
 export function isBlacklisted(sourceId, channelId) {
@@ -40,6 +111,7 @@ export function isBlacklisted(sourceId, channelId) {
   if (!exp) return false;
   if (Date.now() > exp) {
     blacklist.delete(k);
+    persist();
     return false;
   }
   return true;
@@ -60,4 +132,5 @@ export function getBlacklistedChannelIds() {
 
 export function clearBlacklist() {
   blacklist.clear();
+  persist();
 }

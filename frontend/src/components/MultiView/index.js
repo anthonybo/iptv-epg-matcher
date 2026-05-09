@@ -8,3 +8,4 @@ export { default as BlacklistModal } from './BlacklistModal';
 export { default as TrendingModal } from './TrendingModal';
 export { default as AllGamesModal } from './AllGamesModal';
 export { default as BroadcasterCoverageModal } from './BroadcasterCoverageModal';
+export { default as ChannelPickerModal } from './ChannelPickerModal';

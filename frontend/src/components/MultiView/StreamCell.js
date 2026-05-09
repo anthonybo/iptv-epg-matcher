@@ -346,6 +346,7 @@ const StreamCellInner = memo(({
   onRefresh,
   onFindAlternative,
   onFindDifferentGame,
+  onAlternateSources,
   onStreamDead,
   onBlacklist,
   onRemove,
@@ -444,6 +445,22 @@ const StreamCellInner = memo(({
                   </svg>
                 )}
               </button>
+              {/* Alternate Sources Button — open the picker for this
+                  channel's name across all the user's sources. Lets
+                  the user manually swap to a different source carrying
+                  the same channel without burning the auto-find chain. */}
+              {onAlternateSources && (
+                <button
+                  onClick={onAlternateSources}
+                  className="p-0.5 rounded hover:bg-emerald-500/20 text-slate-400 hover:text-emerald-400 transition-colors"
+                  title="Switch source — pick from other channels with this name"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 16l3 3m0 0l3-3m-3 3V11" />
+                  </svg>
+                </button>
+              )}
               {/* Find Different Game Button */}
               {onFindDifferentGame && (
                 <button
@@ -525,6 +542,7 @@ export const SortableStreamCell = ({
   onRefresh,
   onFindAlternative,
   onFindDifferentGame,
+  onAlternateSources,
   onStreamDead,
   onBlacklist,
   onRemove,
@@ -566,6 +584,7 @@ export const SortableStreamCell = ({
         onRefresh={onRefresh}
         onFindAlternative={onFindAlternative}
         onFindDifferentGame={onFindDifferentGame}
+        onAlternateSources={onAlternateSources}
         onStreamDead={onStreamDead}
         onBlacklist={onBlacklist}
         onRemove={onRemove}

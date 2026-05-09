@@ -102,8 +102,31 @@ function spawnFfmpeg({ key, dir, streamUrl, channel }) {
         '-fflags', '+genpts+igndts+discardcorrupt',
         '-err_detect', 'ignore_err',
         '-i', streamUrl,
-        // Stream copy — no transcoding. Matches Threadfin / NodeCast TV / xTeVe.
-        '-c', 'copy',
+        // Video passthrough — no transcoding cost, every IPTV upstream
+        // we've seen ships H.264/HEVC which the browser MSE handles
+        // natively.
+        '-c:v', 'copy',
+        // Audio: transcode to AAC stereo. Most US sports RSNs (Spectrum
+        // Sportsnet LA, FanDuel Sports, BSN, MSG, NESN, etc.) carry
+        // AC-3 5.1 surround. Browser MSE only decodes AAC over HLS, so
+        // a -c copy passthrough produced FATAL mediaError/
+        // bufferAddCodecError on every Dodgers/Lakers/Yankees-style
+        // channel — see 2026-05-08 21:51 log where xtream_55086
+        // (Spectrum Sportsnet LA) flooded the player with hundreds of
+        // codec errors per second until the no-progress watchdog
+        // killed it 30s later. Audio transcoding burns ~5-10% of one
+        // CPU core per stream, which is well under our budget on a
+        // 4-tile multiview, and re-enables the entire RSN tier of
+        // channels.
+        //   -ac 2  — downmix to stereo (most viewers don't have
+        //            5.1 setups in a browser anyway)
+        //   -b:a   — 160k is the sweet spot for AAC sports audio
+        //   -ar    — 48k matches the source so libavfilter doesn't
+        //            insert a resampler
+        '-c:a', 'aac',
+        '-b:a', '160k',
+        '-ac', '2',
+        '-ar', '48000',
         '-copyts',
         '-muxdelay', '0',
         '-f', 'hls',

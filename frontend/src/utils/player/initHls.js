@@ -202,7 +202,7 @@ export function initializeHlsPlayer(ctx) {
                 if (hlsRef.current && mediaRecoveryAttempts < 2) {
                     mediaRecoveryAttempts += 1;
                     lastMediaRecoveryAt = now;
-                    setRecoveryStatus(`Recovering decoder (attempt ${mediaRecoveryAttempts}/2)…`);
+                    setRecoveryStatus(`Stream glitched — reloading (${mediaRecoveryAttempts}/2)…`);
                     try {
                         if (mediaRecoveryAttempts === 1) {
                             hlsRef.current.recoverMediaError();
@@ -412,6 +412,32 @@ export function initializeHlsPlayer(ctx) {
         });
 
         let lastNonFatalAt = 0;
+        // Bounded retry counters for FATAL networkError. Without these
+        // the case below silently looped: if the upstream produced
+        // 503 on every manifest fetch (which happens when our backend
+        // ffmpeg gets EOF mid-stream and writes nothing further), the
+        // hls.js NETWORK_ERROR branch just kept calling startLoad()
+        // forever and the player sat in "Reconnecting…" with no
+        // escalation. Two windows so we can be patient with single
+        // segment hiccups but quick to declare death on a manifest
+        // that's persistently 5xx-ing.
+        let manifestFailures = 0;
+        let firstManifestFailureAt = 0;
+        let segmentFailures = 0;
+        let firstSegmentFailureAt = 0;
+        let mediaFailures = 0;
+        let firstMediaFailureAt = 0;
+        const MANIFEST_FAIL_WINDOW_MS = 12000;
+        const MANIFEST_FAIL_LIMIT = 3;
+        const SEGMENT_FAIL_WINDOW_MS = 25000;
+        const SEGMENT_FAIL_LIMIT = 5;
+        // Tighter window for media errors. When MSE rejects a codec it
+        // bursts dozens of events per second, so the window is short
+        // and the limit deliberately low — recoverMediaError() either
+        // works on the first 1-2 attempts or it never will.
+        const MEDIA_FAIL_WINDOW_MS = 4000;
+        const MEDIA_FAIL_LIMIT = 4;
+
         hls.on(Hls.Events.ERROR, (_event, data) => {
             const { type, details, fatal } = data;
             if (!fatal) {
@@ -435,20 +461,96 @@ export function initializeHlsPlayer(ctx) {
                 response: data.response?.code
             });
             switch (type) {
-                case Hls.ErrorTypes.NETWORK_ERROR:
-                    setRecoveryStatus('Reconnecting…');
+                case Hls.ErrorTypes.NETWORK_ERROR: {
+                    const now = Date.now();
+                    // hls.js details strings are stable per-event-type
+                    // (manifestLoadError, levelLoadError,
+                    // fragLoadError, etc.). The two we care about:
+                    //   * manifest/level — the playlist itself is
+                    //     unreachable. If this 5xx-loops, the stream
+                    //     is dead, no amount of retry helps.
+                    //   * frag — a single segment failed; retries
+                    //     usually recover when the encoder catches up.
+                    const isManifest = /manifest|level/i.test(String(details || ''));
+                    if (isManifest) {
+                        if (!firstManifestFailureAt || now - firstManifestFailureAt > MANIFEST_FAIL_WINDOW_MS) {
+                            firstManifestFailureAt = now;
+                            manifestFailures = 0;
+                        }
+                        manifestFailures += 1;
+                        if (manifestFailures >= MANIFEST_FAIL_LIMIT) {
+                            console.error(`${tag} manifest failed ${manifestFailures}× in ${(now - firstManifestFailureAt) / 1000}s — declaring dead`);
+                            setError('Stream unavailable. Finding alternative…');
+                            notifyStreamDead(`hls_fatal_manifest_${manifestFailures}_failures`);
+                            try { hls.destroy(); } catch (_) {}
+                            break;
+                        }
+                        setRecoveryStatus(`Reconnecting (${manifestFailures}/${MANIFEST_FAIL_LIMIT})…`);
+                    } else {
+                        if (!firstSegmentFailureAt || now - firstSegmentFailureAt > SEGMENT_FAIL_WINDOW_MS) {
+                            firstSegmentFailureAt = now;
+                            segmentFailures = 0;
+                        }
+                        segmentFailures += 1;
+                        if (segmentFailures >= SEGMENT_FAIL_LIMIT) {
+                            console.error(`${tag} segment failed ${segmentFailures}× in ${(now - firstSegmentFailureAt) / 1000}s — declaring dead`);
+                            setError('Stream unavailable. Finding alternative…');
+                            notifyStreamDead(`hls_fatal_segment_${segmentFailures}_failures`);
+                            try { hls.destroy(); } catch (_) {}
+                            break;
+                        }
+                        setRecoveryStatus(`Reconnecting (${segmentFailures}/${SEGMENT_FAIL_LIMIT})…`);
+                    }
                     try { hls.startLoad(); } catch (_) {}
                     break;
-                case Hls.ErrorTypes.MEDIA_ERROR:
-                    setRecoveryStatus('Recovering decoder…');
+                }
+                case Hls.ErrorTypes.MEDIA_ERROR: {
+                    // Same windowed-retry guard as the network branch,
+                    // for the same reason: hls.js can fire fatal
+                    // mediaError 50+ times in a single second when MSE
+                    // rejects a codec (e.g. AC-3 audio in an
+                    // un-transcoded HLS). The default
+                    // recoverMediaError() loop NEVER escalates and we
+                    // had to wait 30s for the no-progress watchdog —
+                    // see 2026-05-08 21:51 log where Spectrum Sportsnet
+                    // LA flooded with bufferAddCodecError. Bound it so
+                    // the dead-channel handler kicks in within seconds.
+                    const now = Date.now();
+                    if (!firstMediaFailureAt || now - firstMediaFailureAt > MEDIA_FAIL_WINDOW_MS) {
+                        firstMediaFailureAt = now;
+                        mediaFailures = 0;
+                    }
+                    mediaFailures += 1;
+                    if (mediaFailures >= MEDIA_FAIL_LIMIT) {
+                        console.error(`${tag} media error ${mediaFailures}× in ${(now - firstMediaFailureAt) / 1000}s — declaring dead (likely codec mismatch)`);
+                        setError('Stream codec unsupported. Finding alternative…');
+                        notifyStreamDead(`hls_fatal_media_${details}_${mediaFailures}`);
+                        try { hls.destroy(); } catch (_) {}
+                        break;
+                    }
+                    setRecoveryStatus(`Stream glitched — reloading (${mediaFailures}/${MEDIA_FAIL_LIMIT})…`);
                     try { hls.recoverMediaError(); } catch (_) {}
                     break;
+                }
                 default:
                     setError('Stream unavailable. Finding alternative…');
                     notifyStreamDead(`hls_fatal_${type}`);
                     try { hls.destroy(); } catch (_) {}
                     break;
             }
+        });
+
+        // Reset fatal-error counters once a fragment lands, so a tile
+        // that recovered after a transient blip gets the full retry
+        // budget the next time it hiccups (instead of inheriting the
+        // last incident's count and dying on a single later miss).
+        hls.on(Hls.Events.FRAG_LOADED, () => {
+            manifestFailures = 0;
+            firstManifestFailureAt = 0;
+            segmentFailures = 0;
+            firstSegmentFailureAt = 0;
+            mediaFailures = 0;
+            firstMediaFailureAt = 0;
         });
 
         // Wrap hls.destroy so the watchdog stops cleanly when the

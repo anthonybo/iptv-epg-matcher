@@ -560,23 +560,34 @@ export function useFindAlternative({
     if (!replaced && isAutomatic) {
       // Auto-escalate to a different live game — but ONLY when this
       // slot was a "find me anything" auto-fill, not a specific event
-      // the user picked from the ticker. If the user clicked
-      // "Adelaide Crows at Brisbane Lions" and we couldn't find a
-      // working AFL channel, silently swapping them to "24/7 First
-      // Wives Club" because that's the next thing find-different-game
-      // happened to return is the wrong UX — it looks like the app
-      // randomly reassigned their tile to garbage.
+      // the user picked from the ticker OR a specific channel brand
+      // they searched for in the header.
       //
-      // espnEventId is set by ticker clicks (handleTickerEventClick)
-      // and propagated across swaps by swapStream. When it's present,
-      // the user explicitly wanted this event; respect that and stop
-      // the chain instead of cascading.
+      // Two anchors block escalation:
+      //   espnEventId  — set by ticker clicks (handleTickerEventClick).
+      //                  User wanted THIS GAME.
+      //   searchQuery  — set by header-search picks. User wanted THIS
+      //                  CHANNEL BRAND ("reelz", "espn", etc.). Without
+      //                  this guard, an exhausted reelz alt-search
+      //                  silently swapped the slot to a random sport
+      //                  channel, which is exactly the "ticker games
+      //                  swapped to junk" pattern f9bff6f tried to
+      //                  fix for ESPN-event streams but never extended
+      //                  to brand picks.
       if (stream.espnEventId) {
         emitSearchProgress(
           streamKey,
           `Couldn't find a working channel for ${stream.espnEventName || 'this game'}. Try another game from the ticker.`
         );
         showToast('No working stream for that game right now', 'error');
+        return;
+      }
+      if (stream.searchQuery) {
+        emitSearchProgress(
+          streamKey,
+          `No more working "${stream.searchQuery}" channels right now. Try the alternate-sources picker, or pick a different channel.`
+        );
+        showToast(`No working "${stream.searchQuery}" alternatives right now`, 'error');
         return;
       }
       emitSearchProgress(

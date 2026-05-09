@@ -34,6 +34,7 @@ const MultiViewGrid = ({
   onRefresh,
   onFindAlternative,
   onFindDifferentGame,
+  onAlternateSources,
   onBlacklist,
   onRemove,
   onQualityDetected
@@ -152,6 +153,7 @@ const MultiViewGrid = ({
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
                   onFindAlternative={() => onFindAlternative(stream, false)}
                   onFindDifferentGame={() => onFindDifferentGame(stream)}
+                  onAlternateSources={onAlternateSources ? () => onAlternateSources(stream) : null}
                   onStreamDead={() => onFindAlternative(stream, true)}
                   onBlacklist={() => onBlacklist(stream.name)}
                   onRemove={() => onRemove(stream.id, stream.sourceId)}

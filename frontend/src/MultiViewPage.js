@@ -11,7 +11,8 @@ import {
   BlacklistModal,
   TrendingModal,
   AllGamesModal,
-  BroadcasterCoverageModal
+  BroadcasterCoverageModal,
+  ChannelPickerModal
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
@@ -23,6 +24,7 @@ import { useFindAlternative } from './hooks/multiview/useFindAlternative';
 import { useMultiViewStreams } from './hooks/multiview/useMultiViewStreams';
 import { useStreamFinder } from './hooks/multiview/useStreamFinder';
 import { useStreamSearch } from './hooks/multiview/useStreamSearch';
+import { useChannelPicker } from './hooks/multiview/useChannelPicker';
 
 /**
  * MultiViewPage - Display multiple streams in an auto-layout grid
@@ -120,14 +122,19 @@ const MultiViewPage = ({ sessionId }) => {
     handleTickerEventClick
   } = useStreamFinder({ streams, autoFillSettings, setShowSettingsModal });
 
-  // Header search input (type-to-add-channel).
+  // Header search input (type-to-add-channel). The default submit path
+  // runs through the picker now (see handlePickerSearchSubmit below)
+  // so generic queries like "reelz" surface ALL matching channels
+  // instead of auto-adding whichever ffprobe-validates first. The
+  // hook's own handleSearchChannel is unused for the header form but
+  // searchByName stays bound for Trending / All-Games / Coverage which
+  // intentionally want the auto-find pipeline.
   const {
     showSearchInput,
     setShowSearchInput,
     searchQuery,
     setSearchQuery,
     isSearching,
-    handleSearchChannel,
     searchByName
   } = useStreamSearch({ streams, autoFillSettings });
 
@@ -151,6 +158,19 @@ const MultiViewPage = ({ sessionId }) => {
     setStreamQualities,
     mutedStreams,
     autoFillSettings
+  });
+
+  // Manual channel picker — header-search disambiguation + per-tile
+  // "alternate sources" button. Reuses one modal for both flows.
+  const {
+    pickerState,
+    openForQuery: openPickerForQuery,
+    openForStream: openPickerForStream
+  } = useChannelPicker({
+    streams,
+    setStreams,
+    setStreamQualities,
+    mutedStreams
   });
 
 
@@ -186,6 +206,19 @@ const MultiViewPage = ({ sessionId }) => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showSportDropdown, showLayoutMenu]);
+
+  // Header search submit — open the picker. Closing the search input
+  // happens inside the submit handler so the user gets the modal even
+  // if the picker fetch is slow (the input chrome doesn't matter once
+  // the modal is up).
+  const handlePickerSearchSubmit = useCallback((e) => {
+    e?.preventDefault?.();
+    const q = String(searchQuery || '').trim();
+    if (q.length < 2) return;
+    openPickerForQuery(q);
+    setSearchQuery('');
+    setShowSearchInput(false);
+  }, [searchQuery, openPickerForQuery, setSearchQuery, setShowSearchInput]);
 
   // Drag and drop handlers
   const handleDragStart = useCallback((event) => {
@@ -240,7 +273,7 @@ const MultiViewPage = ({ sessionId }) => {
           searchQuery={searchQuery}
           setSearchQuery={setSearchQuery}
           isSearching={isSearching}
-          onSearchChannel={handleSearchChannel}
+          onSearchChannel={handlePickerSearchSubmit}
           showSportDropdown={showSportDropdown}
           searchingStream={searchingStream}
           autoFillProgress={autoFillProgress}
@@ -305,6 +338,7 @@ const MultiViewPage = ({ sessionId }) => {
           onRefresh={refreshStream}
           onFindAlternative={handleFindAlternative}
           onFindDifferentGame={handleFindDifferentGame}
+          onAlternateSources={openPickerForStream}
           onBlacklist={addToBlacklist}
           onRemove={removeStream}
           onQualityDetected={onQualityDetected}
@@ -386,6 +420,9 @@ const MultiViewPage = ({ sessionId }) => {
         // works mid-search.
         onPickBroadcaster={(code, signal) => searchByName(code, { mode: 'brand', signal })}
       />
+
+      {/* Channel Picker (header search disambiguation + per-tile alt sources) */}
+      <ChannelPickerModal {...pickerState} />
 
       {/* Live Scores Ticker */}
       {autoFillSettings.showLiveScoresTicker && (

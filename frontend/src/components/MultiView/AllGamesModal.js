@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 
 /**
  * All-Games-Today modal.
@@ -139,6 +139,11 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
   const [picking, setPicking] = useState(null); // { id, controller, kind: 'event' | 'broadcaster' } | null
   const [statusFilter, setStatusFilter] = useState('all'); // all | live | scheduled | final
   const [sportFilter, setSportFilter] = useState('all');
+  // Free-form search across team / league / sport / broadcaster.
+  // Cleared every time the modal reopens so a stale query from a
+  // previous session doesn't hide today's events.
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInputRef = useRef(null);
   const today = localDateString();
 
   useEffect(() => { ensureFontsLoaded(); }, []);
@@ -172,6 +177,17 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
     if (isOpen) fetchEvents();
   }, [isOpen, fetchEvents]);
 
+  // Reset the query + auto-focus the search box when the modal opens.
+  // Without the reset the previous session's filter would silently
+  // hide today's events. The 60ms delay lets the modal finish mounting
+  // before the focus call so it doesn't get stolen by a sibling.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    setSearchQuery('');
+    const t = setTimeout(() => searchInputRef.current?.focus(), 60);
+    return () => clearTimeout(t);
+  }, [isOpen]);
+
   // Sport list for the filter chips, derived from the loaded events so
   // the user only sees options that exist today.
   const sportOptions = useMemo(() => {
@@ -180,12 +196,31 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
   }, [events]);
 
   const filteredEvents = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    // Tokenise the query so "lakers warriors" matches an event with
+    // both names anywhere in the searchable text — order-independent.
+    // Each token must hit somewhere; an unmatched token rejects.
+    const tokens = q ? q.split(/\s+/).filter(Boolean) : [];
     return events.filter((e) => {
       if (sportFilter !== 'all' && e.sport_type !== sportFilter) return false;
-      if (statusFilter === 'all') return true;
-      return statusKindOf(e) === statusFilter;
+      if (statusFilter !== 'all' && statusKindOf(e) !== statusFilter) return false;
+      if (tokens.length === 0) return true;
+      // Concatenate every searchable field once per row — cheaper than
+      // per-token-per-field iteration on 200+ events.
+      const haystack = [
+        e.away_team,
+        e.home_team,
+        e.league_name,
+        e.sport_type,
+        e.event_name,
+        ...(Array.isArray(e.broadcasts) ? e.broadcasts : [])
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return tokens.every((t) => haystack.includes(t));
     });
-  }, [events, statusFilter, sportFilter]);
+  }, [events, statusFilter, sportFilter, searchQuery]);
 
   // Counts for the status filter pills — show "Live (3) Scheduled (12)
   // Final (8)" so the user knows whether scrolling is worth it.
@@ -337,8 +372,102 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
             </button>
           </div>
 
+          {/* Search input — broadcaster console style, scanline-toned
+              chrome that matches the modal's CRT aesthetic. Tokenised
+              query so "lakers warriors" works the same as
+              "warriors lakers". */}
+          <div className="mt-4">
+            <div
+              className="relative flex items-center"
+              style={{
+                background: searchQuery ? 'rgba(56,189,248,0.06)' : 'rgba(255,255,255,0.025)',
+                border: `1px solid ${searchQuery ? 'rgba(56,189,248,0.45)' : '#1f2632'}`,
+                borderRadius: '2px',
+                transition: 'background 120ms, border-color 120ms',
+                boxShadow: searchQuery ? '0 0 0 3px rgba(56,189,248,0.06)' : 'none'
+              }}
+            >
+              <span
+                className="pl-3 pr-2 select-none"
+                style={{
+                  fontFamily: FONT_DISPLAY,
+                  fontSize: '11px',
+                  letterSpacing: '0.22em',
+                  color: searchQuery ? '#7dd3fc' : '#475569',
+                  borderRight: '1px solid #1f2632',
+                  alignSelf: 'stretch',
+                  display: 'flex',
+                  alignItems: 'center'
+                }}
+              >
+                ▸ FIND
+              </span>
+              <svg
+                className="ml-3 flex-shrink-0"
+                style={{ width: 14, height: 14, color: searchQuery ? '#7dd3fc' : '#64748b' }}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(ev) => setSearchQuery(ev.target.value)}
+                onKeyDown={(ev) => { if (ev.key === 'Escape' && searchQuery) { ev.stopPropagation(); setSearchQuery(''); } }}
+                placeholder="Team, league, sport, or broadcaster…"
+                spellCheck={false}
+                autoComplete="off"
+                className="flex-1 bg-transparent px-3 py-2.5 outline-none"
+                style={{
+                  fontFamily: FONT_BODY,
+                  fontSize: '13px',
+                  color: '#f1f5f9',
+                  letterSpacing: '0.01em'
+                }}
+              />
+              {searchQuery && (
+                <>
+                  <span
+                    className="px-2 select-none"
+                    style={{
+                      fontFamily: FONT_MONO,
+                      fontSize: '10px',
+                      color: '#7dd3fc',
+                      letterSpacing: '0.05em'
+                    }}
+                  >
+                    {filteredEvents.length}/{events.length}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => { setSearchQuery(''); searchInputRef.current?.focus(); }}
+                    title="Clear search (Esc)"
+                    aria-label="Clear search"
+                    className="mr-2 flex items-center justify-center w-6 h-6 transition"
+                    style={{
+                      background: 'rgba(255,255,255,0.04)',
+                      border: '1px solid #2a3340',
+                      borderRadius: '2px',
+                      color: '#94a3b8'
+                    }}
+                    onMouseEnter={(ev) => { ev.currentTarget.style.background = 'rgba(239,68,68,0.18)'; ev.currentTarget.style.color = '#fca5a5'; }}
+                    onMouseLeave={(ev) => { ev.currentTarget.style.background = 'rgba(255,255,255,0.04)'; ev.currentTarget.style.color = '#94a3b8'; }}
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
           {/* Status filter row — chunky scoreboard pills */}
-          <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             {[
               { id: 'all',       label: 'ALL',       count: counts.all,       color: '#cbd5e1' },
               { id: 'live',      label: 'LIVE',      count: counts.live,      color: '#ef4444' },
