@@ -59,6 +59,7 @@ const IPTVPlayer = ({
   showDebug: externalShowDebug,
   onQualityDetected,
   muted = false,
+  volume = 1, // 0..1 — per-tile audio level, applied alongside `muted`
   useResilientProxy = null, // null = auto (true in theatre mode, false otherwise)
   skipRecovery = false, // When true, skip retry logic (for auto-test mode)
   onStreamPlaying = null, // Callback when stream starts playing successfully
@@ -179,6 +180,15 @@ const IPTVPlayer = ({
       videoElementRef.current.muted = muted;
     }
   }, [muted, videoElementKey]);
+
+  // Sync the per-tile volume (0..1) onto the underlying <video> element.
+  // Clamp defensively — bad inputs would throw on assignment.
+  useEffect(() => {
+    if (videoElementRef.current) {
+      const v = Math.max(0, Math.min(1, Number(volume)));
+      if (Number.isFinite(v)) videoElementRef.current.volume = v;
+    }
+  }, [volume, videoElementKey]);
 
   // Initialize component
   useEffect(() => {
@@ -568,6 +578,7 @@ export default memo(IPTVPlayer, (prevProps, nextProps) => {
     prevProps.selectedChannel?._refreshKey === nextProps.selectedChannel?._refreshKey &&
     prevProps.playbackMethod === nextProps.playbackMethod &&
     prevProps.theatreMode === nextProps.theatreMode &&
-    prevProps.muted === nextProps.muted
+    prevProps.muted === nextProps.muted &&
+    prevProps.volume === nextProps.volume
   );
 });

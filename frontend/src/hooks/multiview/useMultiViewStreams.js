@@ -21,12 +21,34 @@ import {
  * <MultiViewHeader>, and sibling hooks (useFindAlternative needs
  * setStreams + setStreamQualities to swap a dead stream).
  */
+// localStorage key for per-(source, channel) volume. Keyed by the
+// stable identity (sourceId_channelId) so refreshes/reloads preserve
+// the level the user set.
+const VOLUME_STORE_KEY = 'multiview_stream_volumes_v1';
+const loadStoredVolumes = () => {
+  try {
+    const raw = localStorage.getItem(VOLUME_STORE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch { return {}; }
+};
+
 export function useMultiViewStreams() {
   const [streams, setStreams] = useState([]);
   const [mutedStreams, setMutedStreams] = useState(new Set());
+  const [streamVolumes, setStreamVolumes] = useState(loadStoredVolumes);
   const [streamQualities, setStreamQualities] = useState({});
   const [loadingStreams, setLoadingStreams] = useState(true);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Persist volume changes to localStorage. Throttling here would be
+  // pointless — the user moves a slider at human speed and the writes
+  // are cheap.
+  useEffect(() => {
+    try { localStorage.setItem(VOLUME_STORE_KEY, JSON.stringify(streamVolumes)); }
+    catch { /* private browsing, full storage — non-fatal */ }
+  }, [streamVolumes]);
 
   // Load streams from API on mount and subscribe to the `multiviewUpdate`
   // window event so sibling features (auto-fill, find-alternative,
@@ -247,10 +269,38 @@ export function useMultiViewStreams() {
     setStreamQualities((prev) => ({ ...prev, [streamId]: quality }));
   }, []);
 
+  // setStreamVolume(streamKey, volume) — clamps to [0..1] and persists.
+  // If volume goes above zero from a muted state, auto-unmute (standard
+  // video-player UX). Callers pass the streamKey-without-refresh form
+  // (`${sourceId}_${id}`) so volume survives refresh+re-add cycles.
+  const setStreamVolume = useCallback((streamKey, volume) => {
+    const v = Math.max(0, Math.min(1, Number(volume)));
+    if (!Number.isFinite(v)) return;
+    setStreamVolumes((prev) => ({ ...prev, [streamKey]: v }));
+    if (v > 0) {
+      // Auto-unmute: matches the unique-key behavior used by toggleMute,
+      // which keys by streamKey-with-refresh. We unmute every key whose
+      // prefix matches this stable key.
+      setMutedStreams((prev) => {
+        let changed = false;
+        const next = new Set(prev);
+        for (const key of prev) {
+          if (key === streamKey || key.startsWith(`${streamKey}_`)) {
+            next.delete(key);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }
+  }, []);
+
   return {
     streams,
     setStreams,
     mutedStreams,
+    streamVolumes,
+    setStreamVolume,
     streamQualities,
     setStreamQualities,
     loadingStreams,

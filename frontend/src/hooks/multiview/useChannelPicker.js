@@ -114,6 +114,25 @@ export function useChannelPicker({
   }, []);
 
   /**
+   * Open the picker with no query — used by the rail's "Open picker"
+   * icon. Lands on the Favorites tab when there are saved favorites
+   * (per the modal's default-tab heuristic) and otherwise shows the
+   * generic empty Results state. No fetch, no toast.
+   */
+  const openEmpty = useCallback(() => {
+    setMode('add');
+    setSwapTarget(null);
+    setCurrentChannelId(null);
+    setCurrentSourceId(null);
+    setTitle('Pick a channel');
+    setSubtitle('Browse favorites or type to search');
+    setCandidates([]);
+    setError(null);
+    setLoading(false);
+    setIsOpen(true);
+  }, []);
+
+  /**
    * Header search → "show me everything called 'reelz', let me pick".
    * Excludes channels already in the grid so the picker only shows
    * options that would actually add a new tile (avoids the
@@ -312,6 +331,7 @@ export function useChannelPicker({
     },
     openForQuery,
     openForStream,
+    openEmpty,
     closePicker: close
   };
 }

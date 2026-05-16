@@ -22,6 +22,7 @@ const MultiViewGrid = ({
   layout,
   layoutMode,
   mutedStreams,
+  streamVolumes,
   streamQualities,
   findingAlternativeFor,
   activeId,
@@ -32,6 +33,7 @@ const MultiViewGrid = ({
   onDragStart,
   onDragEnd,
   onToggleMute,
+  onVolumeChange,
   onRefresh,
   onFindAlternative,
   onFindDifferentGame,
@@ -148,11 +150,13 @@ const MultiViewGrid = ({
                   sessionId={sessionId}
                   isTheatreMode={isTheatreMode}
                   isMuted={mutedStreams.has(streamKey)}
+                  volume={streamVolumes?.[`${stream.sourceId}_${stream.id}`] ?? 1}
                   quality={streamQualities[streamKey]}
                   isFindingAlternative={findingAlternativeFor && findingAlternativeFor.has && findingAlternativeFor.has(streamKey)}
                   isFavorited={isFavorited ? isFavorited(stream.sourceId, stream.id) : false}
                   playerType={playerType}
                   onToggleMute={() => onToggleMute(streamKey)}
+                  onVolumeChange={onVolumeChange ? (v) => onVolumeChange(`${stream.sourceId}_${stream.id}`, v) : null}
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
                   onFindAlternative={() => onFindAlternative(stream, false)}
                   onFindDifferentGame={() => onFindDifferentGame(stream)}
