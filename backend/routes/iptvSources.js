@@ -368,6 +368,40 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
     const sourceId = parseInt(req.params.sourceId);
     const refreshStartTime = Date.now();
 
+    // Track client disconnects so a Cancel button on the frontend can
+    // short-circuit work that's still queued. We can't interrupt an
+    // in-flight `INSERT` mid-statement from here (Postgres owns that),
+    // but we CAN skip subsequent batches by checking the flag and
+    // bailing early. We listen on multiple sources because Vite's
+    // dev proxy isn't reliable about propagating the close — req
+    // 'close' alone wasn't firing in practice, so we layer res
+    // 'close', req 'aborted', and a polling fallback on req.destroyed
+    // / res.destroyed in case the events don't fire at all.
+    let clientGone = false;
+    const markClientGone = (source) => {
+        if (clientGone) return;
+        clientGone = true;
+        logger.info(`[REFRESH] Source ${sourceId}: client disconnect detected via ${source} — will short-circuit remaining work`);
+    };
+    req.on('close',   () => markClientGone('req.close'));
+    req.on('aborted', () => markClientGone('req.aborted'));
+    res.on('close',   () => markClientGone('res.close'));
+    // Polling fallback — fires every 500ms while the request is in
+    // flight and checks if either end of the socket has been
+    // destroyed. Required because http-proxy-middleware (what Vite
+    // uses) doesn't always propagate the client's TCP close as a
+    // synthetic 'close' event on the proxied request, but the
+    // underlying socket DOES get destroyed.
+    const closeWatcher = setInterval(() => {
+        if (clientGone) return;
+        if (req.destroyed || res.destroyed || res.writableEnded) {
+            markClientGone(req.destroyed ? 'req.destroyed' : res.destroyed ? 'res.destroyed' : 'res.writableEnded');
+        }
+    }, 500);
+    const stopCloseWatcher = () => clearInterval(closeWatcher);
+    res.on('finish', stopCloseWatcher);
+    res.on('close',  stopCloseWatcher);
+
     try {
         const userId = req.user.id;
 
@@ -387,32 +421,15 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             });
         }
 
-        // Delete cache file BEFORE refreshing to ensure fresh data
-        const path = require('path');
-        const fs = require('fs');
-        const cacheDir = path.join(process.cwd(), 'cache');
-
-        let cacheKey;
-        if (source.type === 'xtream' && source.url && source.username && source.password) {
-            cacheKey = `${source.url}:${source.username}:${source.password}`.replace(/[\/\\:]/g, '_');
-        } else if (source.type === 'stalker' && source.url && (source.mac_address || source.mac)) {
-            const macAddress = source.mac_address || source.mac;
-            cacheKey = `${source.url}:${macAddress}`.replace(/[\/\\:]/g, '_');
-        }
-
-        if (cacheKey) {
-            const cacheFile = path.join(cacheDir, `${cacheKey}_channels.json`);
-            if (fs.existsSync(cacheFile)) {
-                try {
-                    fs.unlinkSync(cacheFile);
-                    logger.info(`Deleted cache file before refresh: ${cacheFile}`);
-                } catch (cacheError) {
-                    logger.warn(`Failed to delete cache file before refresh: ${cacheError.message}`);
-                }
-            } else {
-                logger.info(`No cache file to delete: ${cacheFile}`);
-            }
-        }
+        // NOTE: we intentionally do NOT delete the cache file before
+        // fetching anymore. The previous behaviour ("delete cache so
+        // we always get fresh data") was self-defeating when the
+        // upstream is rate-limited: we'd blow away the only data we
+        // had, then fail the fetch, leaving the row in an error
+        // state. loadXtreamEPG now uses `forceRefresh: true` to skip
+        // the cache on the way IN, and falls back to the cache file
+        // on the way OUT when the upstream returns 403/429. Old
+        // cache contents are overwritten on a successful fetch.
 
         // Check source type and validate credentials
         logger.info(`[REFRESH DEBUG] Source type: ${source.type}`);
@@ -476,15 +493,37 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             );
 
             if (!channelsResult.success || !channelsResult.channels) {
-                throw new Error('Failed to fetch channels from Xtream API');
+                // Preserve loadXtreamEPG's detailed error verbatim so
+                // the outer catch can pattern-match for "403" /
+                // "Forbidden" / "429" and route the rate-limit case
+                // to the soft-fail path. The previous generic
+                // re-throw ("Failed to fetch channels from Xtream
+                // API") hid those keywords and caused every 403
+                // refresh to land in the hard-error branch + bump
+                // failure_count → red dot.
+                throw new Error(
+                    channelsResult.error || 'Failed to fetch channels from Xtream API'
+                );
             }
 
-            // 2. Fetch fresh account info
-            accountInfo = await epgService.fetchXtreamAccountInfo(
-                source.url,
-                source.username,
-                source.password
-            );
+            // 2. Fetch fresh account info — only when we got fresh
+            // channel data, not when we fell back to the cache.
+            // Calling player_api.php right after a 403 just hits the
+            // same rate-limit wall and turns a clean cache fallback
+            // into another failure.
+            if (channelsResult.staleFallback) {
+                logger.warn(
+                    `[REFRESH] Source ${sourceId}: upstream rate-limited, used cached channels (${channelsResult.channels.length}). ` +
+                    `Skipping account-info fetch.`
+                );
+                accountInfo = {}; // leave existing account fields untouched downstream
+            } else {
+                accountInfo = await epgService.fetchXtreamAccountInfo(
+                    source.url,
+                    source.username,
+                    source.password
+                );
+            }
         } else if (source.type === 'stalker') {
             // 1. Fetch fresh channels from Stalker portal
             const stalkerService = require('../services/stalkerService');
@@ -532,6 +571,46 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             sourceInfo.password = source.password;
         } else if (source.type === 'stalker') {
             sourceInfo.mac_address = source.mac_address;
+        }
+
+        // Stale-fallback path: the upstream provider rate-limited us
+        // and loadXtreamEPG returned cached channels. The DB already
+        // has these channels (the cache was written when they were
+        // first fetched). Skip the DB writes — re-inserting unchanged
+        // data is wasted work and would briefly empty the channels
+        // table for this source under the existing DELETE+INSERT
+        // pattern. Stamp the source as rate_limited so the UI can
+        // show "Provider throttling, try again in a few minutes"
+        // instead of a red error dot.
+        if (channelsResult && channelsResult.staleFallback) {
+            const refreshDuration = Date.now() - refreshStartTime;
+            await iptvDatabaseService.pool.query(`
+                UPDATE iptv_sources
+                SET last_refresh_status = 'rate_limited',
+                    last_refresh_error = $1,
+                    last_refresh_attempt = CURRENT_TIMESTAMP,
+                    last_refresh_duration_ms = $2
+                WHERE id = $3
+            `, [
+                `Provider rate-limited (${channelsResult.rateLimitedError || '403'}). Using cached channels.`,
+                refreshDuration,
+                sourceId,
+            ]);
+
+            const updatedSourcesRL = await iptvDatabaseService.getUserSources(userId, null);
+            const refreshedSourceRL = updatedSourcesRL.find(s => s.id === parseInt(sourceId));
+
+            logger.info(
+                `[REFRESH] Source ${sourceId}: marked rate_limited, kept ${channelsResult.channels.length} cached channels`
+            );
+
+            return res.json({
+                success: true,
+                rateLimited: true,
+                message: 'Provider is rate-limiting; using cached channels. Try refreshing again in a few minutes.',
+                channelCount: channelsResult.channels.length,
+                source: refreshedSourceRL,
+            });
         }
 
         await iptvDatabaseService.saveSource(sourceInfo);
@@ -585,7 +664,30 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             logger.warn(`Filtered out ${filteredCount} channels with null/empty names`);
         }
 
-        await iptvDatabaseService.saveChannels(sourceId, dbChannels);
+        // Cancel check + cancel-aware saveChannels. The 100-batch INSERT
+        // loop for 50k+ channels takes 10-15 min thanks to the pg_trgm
+        // GIN index, so:
+        //   1. If cancel arrives BEFORE we get here, skip the whole
+        //      thing — existing channels stay intact in the DB.
+        //   2. If cancel arrives MID-loop, saveChannels polls
+        //      `isCancelled()` between batches and returns early
+        //      ({ cancelled: true, saved: N }). The remaining batches
+        //      never fire. We can't tear down an in-flight INSERT
+        //      statement (Postgres owns that), but the next batch is
+        //      typically 2-5 seconds away.
+        if (clientGone) {
+            logger.info(`[REFRESH] Source ${sourceId}: cancelled by client before saveChannels — leaving existing data intact`);
+            return;
+        }
+        const saveResult = await iptvDatabaseService.saveChannels(
+            sourceId,
+            dbChannels,
+            { isCancelled: () => clientGone },
+        );
+        if (saveResult && saveResult.cancelled) {
+            logger.info(`[REFRESH] Source ${sourceId}: cancelled mid-saveChannels after ${saveResult.saved}/${dbChannels.length}`);
+            return;
+        }
         logger.info(`Saved ${dbChannels.length} channels for source ${sourceId}`);
 
         // Lookup server location if not already set
@@ -629,7 +731,45 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
     } catch (error) {
         logger.error(`Error refreshing source data: ${error.message}`);
 
-        // Update refresh status to error and increment failure count
+        // Treat 403/429/Forbidden as a transient upstream rate-limit,
+        // NOT a real account/credential failure:
+        //   - mark last_refresh_status = 'rate_limited' (not 'error')
+        //   - do NOT bump failure_count (the >=3 rule drives the red dot;
+        //     a Cloudflare bot wall shouldn't mark a perfectly valid
+        //     account as failed)
+        //   - leave existing channels in the DB untouched (we never
+        //     reached the saveChannels step, so they're already intact)
+        //   - return HTTP 200 with rateLimited:true so the frontend can
+        //     surface a softer "wait a few minutes" message instead of
+        //     a red error toast
+        // Bulk-added providers behind Cloudflare regularly hit this
+        // burst-throttle window; without this branch the row goes red
+        // permanently even though the underlying data is fine.
+        const looksRateLimited = /403|429|forbidden|rate.?limit/i.test(error.message || '');
+        if (looksRateLimited) {
+            const refreshDuration = Date.now() - refreshStartTime;
+            try {
+                await iptvDatabaseService.pool.query(`
+                    UPDATE iptv_sources
+                    SET last_refresh_status = 'rate_limited',
+                        last_refresh_error = $1,
+                        last_refresh_attempt = CURRENT_TIMESTAMP,
+                        last_refresh_duration_ms = $2
+                    WHERE id = $3
+                `, [error.message, refreshDuration, sourceId]);
+            } catch (updateErr) {
+                logger.warn(`Failed to write rate_limited status: ${updateErr.message}`);
+            }
+
+            return res.json({
+                success: true,
+                rateLimited: true,
+                message: 'Provider is currently rate-limiting us (Cloudflare). Existing channels are unchanged. Try again in a few minutes.',
+                originalError: error.message,
+            });
+        }
+
+        // Other errors: real failure, bump the counter.
         await updateRefreshStatusError(sourceId, error.message, refreshStartTime);
 
         res.status(500).json({

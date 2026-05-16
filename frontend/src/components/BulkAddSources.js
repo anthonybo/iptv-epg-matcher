@@ -148,7 +148,7 @@ const submitEntry = async (entry) => {
   return sessionId;
 };
 
-const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
+const BulkAddSources = ({ onSourceCompleted, onAllDone, onBulkProgressChange }) => {
   const [rawText, setRawText] = useState('');
   const [defaultPortal, setDefaultPortal] = useState('');
   const [parsed, setParsed] = useState(null);
@@ -192,6 +192,43 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone }) => {
       if (onAllDone) onAllDone({ done: doneCount, failed: failedCount, total: entryStates.length });
     }
   }, [allTerminal, doneCount, failedCount, entryStates.length, onAllDone]);
+
+  // Bridge bulk-add state into the parent's background-loadings tracker so:
+  //   1) the floating progress bubble at the bottom-right of the app
+  //      appears while a bulk-add is in flight,
+  //   2) the parent keeps the modal mounted (under the
+  //      `backgroundLoadings.size > 0` condition) when the user clicks X,
+  //   3) closing the modal therefore doesn't kill in-flight EventSources
+  //      OR drop the queue — the loop keeps pumping the remaining queued
+  //      sources because BulkAddSources stays alive.
+  // Without this, closing the modal mid-bulk silently discarded the queue
+  // (only the 2 in-flight sources finished; the other 34 evaporated).
+  //
+  // The callback is stashed in a ref so the effect's dep array only
+  // contains the actual data values. Including the callback prop
+  // directly caused an infinite render loop: parent passes a fresh
+  // arrow on every render → effect re-fires → effect calls back into
+  // parent → parent re-renders → new arrow → loop. Reading via ref
+  // makes the effect insensitive to callback identity changes.
+  const onBulkProgressChangeRef = useRef(onBulkProgressChange);
+  useEffect(() => {
+    onBulkProgressChangeRef.current = onBulkProgressChange;
+  }, [onBulkProgressChange]);
+
+  useEffect(() => {
+    const cb = onBulkProgressChangeRef.current;
+    if (!cb) return;
+    const isActive = phase === 'running' && entryStates.length > 0;
+    cb({
+      isActive,
+      phase,
+      total: entryStates.length,
+      done: doneCount,
+      failed: failedCount,
+      loading: activeCount,
+      queued: waitingCount,
+    });
+  }, [phase, entryStates.length, doneCount, failedCount, activeCount, waitingCount]);
 
   const updateEntry = (idx, patch) => {
     setEntryStates((prev) => {

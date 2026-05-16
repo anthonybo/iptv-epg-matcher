@@ -197,15 +197,20 @@ module.exports = {
         }
     },
 
-    // Parameter order wrapper for saveChannels
-    // SQLite: saveChannels(sourceId, channels)
-    // PostgreSQL: saveChannels(channels, sourceId)
-    saveChannels: async (sourceId, channels) => {
+    // Parameter order wrapper for saveChannels.
+    //   SQLite:     saveChannels(sourceId, channels)
+    //   PostgreSQL: saveChannels(channels, sourceId, options)
+    // The third options arg carries `isCancelled` — a predicate the
+    // PostgreSQL impl polls between batches so a Cancel click on the
+    // frontend can interrupt the 100-batch INSERT loop without waiting
+    // for all 50k channels to land. SQLite isn't used in production
+    // but is wired the same way for parity (silently ignored if the
+    // underlying function doesn't accept the options arg).
+    saveChannels: async (sourceId, channels, options) => {
         if (USE_POSTGRES) {
-            // Swap parameter order for PostgreSQL
-            return db.saveChannels ? await db.saveChannels(channels, sourceId) : Promise.resolve();
+            return db.saveChannels ? await db.saveChannels(channels, sourceId, options) : Promise.resolve();
         } else {
-            return db.saveChannels ? await db.saveChannels(sourceId, channels) : Promise.resolve();
+            return db.saveChannels ? await db.saveChannels(sourceId, channels, options) : Promise.resolve();
         }
     },
 

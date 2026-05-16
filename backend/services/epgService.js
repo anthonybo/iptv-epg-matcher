@@ -6,6 +6,68 @@ const sax = require('sax');
 const logger = require('../utils/logger');
 const fetch = require('node-fetch');
 const { fetchURL } = require('../utils/fetchUtils');
+
+// Browser User-Agent for outbound Xtream API requests. Many IPTV
+// providers sit behind Cloudflare, which gates non-browser User-Agent
+// strings (returns 403/503/captcha for anything matching a known bot
+// pattern). The bulk-add path (m3uService.loadXtreamM3U) uses this
+// same UA and consistently gets through; the refresh path's old
+// 'EPG-Matcher/1.0' UA was Cloudflare-bait and turned otherwise-fine
+// providers like cf.cloudserver4kpremium.org into 500-error machines.
+const XTREAM_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const XTREAM_API_HEADERS = {
+    'User-Agent': XTREAM_BROWSER_UA,
+    'Accept': 'application/json, */*',
+};
+const XTREAM_M3U_HEADERS = {
+    'User-Agent': XTREAM_BROWSER_UA,
+    'Accept': '*/*',
+};
+
+// Parse a chunk of M3U content into the channel shape that
+// loadXtreamEPG returns from the JSON path. Used by the JSON→M3U
+// fallback below. Returns [] on parse failure (caller handles the
+// "no channels" case as a hard error).
+function parseXtreamM3UToChannels(m3uContent) {
+    if (!m3uContent || !m3uContent.includes('#EXTM3U')) return [];
+    const lines = m3uContent.split(/\r?\n/);
+    const out = [];
+    let pending = null;
+    for (const raw of lines) {
+        const line = raw.trim();
+        if (line.startsWith('#EXTINF')) {
+            const tvgId   = (line.match(/tvg-id="([^"]*)"/i) || [, ''])[1];
+            const tvgLogo = (line.match(/tvg-logo="([^"]*)"/i) || [, ''])[1];
+            const group   = (line.match(/group-title="([^"]*)"/i) || [, 'Uncategorized'])[1];
+            const name    = (line.match(/,(.+)$/) || [, 'Unknown'])[1].trim();
+            pending = { tvgId, tvgLogo, group, name };
+        } else if (pending && line && !line.startsWith('#')) {
+            // Stream id is the last numeric path segment
+            // ( /live/user/pass/12345.ts  or  /user/pass/12345 ).
+            const idMatch = line.match(/\/(\d+)(?:\.[a-z0-9]+)?$/i);
+            const streamId = idMatch ? idMatch[1] : null;
+            if (streamId) {
+                out.push({
+                    id: `xtream_${streamId}`,
+                    name: pending.name,
+                    logo: pending.tvgLogo || null,
+                    group: pending.group || 'Uncategorized',
+                    url: line,
+                    epgChannelId: pending.tvgId || null,
+                    streamType: 'live',
+                    added: new Date().toISOString(),
+                    categoryId: 0,
+                    customSid: null,
+                    tvArchive: 0,
+                    directSource: null,
+                    tvArchiveDuration: 0,
+                });
+            }
+            pending = null;
+        }
+    }
+    return out;
+}
 const cacheService = require('../services/cacheService');
 const { 
   getEpgSourceCachePath,
@@ -1629,16 +1691,28 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
         onProgress: mergedOptions.onProgress ? 'Function defined' : 'No function',
         password: '********' // Don't log the actual password
     })}`);
-    
+
+    // Hoisted outside the try block so the catch handler can read it
+    // for the cache-fallback path. `const`/`let` declared inside try
+    // are block-scoped and become a ReferenceError in catch.
+    const normalizedUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    // Cache file pattern MUST match the one bulk-add writes (see
+    // detailedProgressService.js + m3uService cache key
+    // `${url}:${username}:${password}`.replace(/[\/\\:]/g, '_')).
+    // Before this fix, loadXtreamEPG used a base64-encoded sourceId
+    // for the cache filename, which meant the file bulk-add wrote
+    // (`http___cf.cloud..._Lisa1_123456_channels.json`) and the file
+    // loadXtreamEPG looked for (`xtream_<base64>_channels.json`) were
+    // different paths — so the rate-limit cache fallback could never
+    // actually find the cached channels and refreshes failed even
+    // though we had perfectly good data on disk.
+    const cacheKey = `${baseUrl}:${username}:${password}`.replace(/[\/\\:]/g, '_');
+    const cacheFile = path.join(__dirname, '../cache', `${cacheKey}_channels.json`);
+    // Keep `sourceId` available for any internal callers — derived
+    // here from the same base so it stays unique per credential set.
+    const sourceId = `xtream_${cacheKey}`;
+
     try {
-        // Normalize the base URL to ensure it has a trailing slash
-        const normalizedUrl = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-        
-        // Create a unique identifier for this Xtream source for caching
-        const sourceId = `xtream_${Buffer.from(`${normalizedUrl}_${username}_${password}`).toString('base64')}`;
-        
-        // Check for existing cache
-        const cacheFile = path.join(__dirname, '../cache', `${sourceId.replace(/[\/\\?%*:|"<>]/g, '_')}_channels.json`);
         
         if (!mergedOptions.forceRefresh && fs.existsSync(cacheFile)) {
             try {
@@ -1705,9 +1779,7 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
         try {
             const categoriesResponse = await fetch(categoriesUrl, {
                 method: 'GET',
-                headers: {
-                    'User-Agent': 'EPG-Matcher/1.0'
-                },
+                headers: XTREAM_API_HEADERS,
                 timeout: 30000
             });
 
@@ -1725,40 +1797,55 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
             logger.warn(`Could not fetch categories: ${categoryError.message}, channels will use Uncategorized`);
         }
 
-        // Fetch channels from Xtream API
+        // Fetch channels from Xtream API. Try the JSON `player_api.php`
+        // endpoint first; if that fails for any reason — non-OK
+        // status, non-array body, Cloudflare 403, network error —
+        // fall back to the `get.php?type=m3u_plus` endpoint and parse
+        // the M3U content. This mirrors what bulk-add does
+        // (m3uService.loadXtreamM3U) and is the asymmetry that was
+        // making freshly-added Cloudflare-fronted providers fail
+        // every subsequent refresh.
         const apiUrl = `${normalizedUrl}player_api.php?username=${username}&password=${password}&action=get_live_streams`;
-        logger.info(`Fetching channels from Xtream API: ${apiUrl}`);
-        
-        const response = await fetch(apiUrl, {
-            method: 'GET',
-            headers: {
-                'User-Agent': 'EPG-Matcher/1.0'
-            },
-            timeout: 30000 // 30 second timeout
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error ${response.status}: ${response.statusText}`);
-        }
-        
-        // Parse JSON response
-        const channelsData = await response.json();
-        
-        if (!Array.isArray(channelsData)) {
-            throw new Error('Invalid response format from Xtream API, expected array');
-        }
-        
-        mergedOptions.onProgress({
-            stage: 'processing',
-            percent: 50,
-            message: `Processing ${channelsData.length} channels from Xtream API`,
-            details: {
-                rawChannelCount: channelsData.length
+        logger.info(`Fetching channels from Xtream JSON API: ${apiUrl}`);
+
+        let channelsData = null;
+        let jsonFailureReason = null;
+        try {
+            const response = await fetch(apiUrl, {
+                method: 'GET',
+                headers: XTREAM_API_HEADERS,
+                timeout: 30000
+            });
+
+            if (!response.ok) {
+                jsonFailureReason = `HTTP error ${response.status}: ${response.statusText}`;
+            } else {
+                const parsed = await response.json();
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    channelsData = parsed;
+                } else if (Array.isArray(parsed)) {
+                    jsonFailureReason = 'JSON API returned an empty array';
+                } else {
+                    jsonFailureReason = 'JSON API returned a non-array body';
+                }
             }
-        });
-        
-        // Process channel data into our format, using categoryMap to get category names
-        const channels = channelsData.map(channel => {
+        } catch (jsonErr) {
+            jsonFailureReason = jsonErr.message || 'JSON API request threw';
+        }
+
+        // M3U fallback path. Many Cloudflare-fronted providers gate
+        // /player_api.php specifically but leave /get.php?type=m3u_plus
+        // alone. The bulk-add path already relies on this.
+        let channels;
+        if (channelsData) {
+            mergedOptions.onProgress({
+                stage: 'processing',
+                percent: 50,
+                message: `Processing ${channelsData.length} channels from Xtream JSON API`,
+                details: { rawChannelCount: channelsData.length }
+            });
+
+            channels = channelsData.map(channel => {
             const categoryName = categoryMap[channel.category_id] || channel.category_name || 'Uncategorized';
             // Build stream URL with .ts extension for live streams (some providers require it)
             const streamUrl = `${normalizedUrl}${channel.stream_type}/${username}/${password}/${channel.stream_id}${channel.stream_type === 'live' ? '.ts' : ''}`;
@@ -1777,8 +1864,52 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
                 directSource: channel.direct_source || null,
                 tvArchiveDuration: channel.tv_archive_duration || 0
             };
-        });
-        
+            });
+        } else {
+            // JSON API didn't yield channels — fall back to the M3U
+            // endpoint that bulk-add uses successfully.
+            logger.warn(`Xtream JSON API failed (${jsonFailureReason}); falling back to M3U endpoint`);
+            const m3uUrl = `${normalizedUrl}get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`;
+            mergedOptions.onProgress({
+                stage: 'fallback',
+                percent: 30,
+                message: 'Xtream JSON API unavailable, falling back to M3U endpoint',
+                details: { reason: jsonFailureReason }
+            });
+
+            let m3uContent;
+            try {
+                const m3uResponse = await fetch(m3uUrl, {
+                    method: 'GET',
+                    headers: XTREAM_M3U_HEADERS,
+                    timeout: 60000
+                });
+                if (!m3uResponse.ok) {
+                    throw new Error(`HTTP error ${m3uResponse.status}: ${m3uResponse.statusText}`);
+                }
+                m3uContent = await m3uResponse.text();
+            } catch (m3uErr) {
+                // Surface BOTH failures so the row's error column
+                // makes the actual root cause discoverable.
+                throw new Error(
+                    `Failed to fetch channels from Xtream: JSON API "${jsonFailureReason}" and M3U fallback "${m3uErr.message}"`
+                );
+            }
+
+            channels = parseXtreamM3UToChannels(m3uContent);
+            if (channels.length === 0) {
+                throw new Error(`Xtream M3U fallback returned no channels (content length: ${m3uContent ? m3uContent.length : 0})`);
+            }
+            logger.info(`Loaded ${channels.length} channels from Xtream M3U fallback`);
+
+            mergedOptions.onProgress({
+                stage: 'processing',
+                percent: 50,
+                message: `Processing ${channels.length} channels from Xtream M3U fallback`,
+                details: { rawChannelCount: channels.length, viaM3U: true }
+            });
+        }
+
         // Apply channel limit if specified
         let filteredChannels = channels;
         if (mergedOptions.maxChannelsToProcess > 0 && channels.length > mergedOptions.maxChannelsToProcess) {
@@ -1836,7 +1967,51 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
         };
     } catch (error) {
         logger.error(`Error loading Xtream EPG: ${error.message}`);
-        
+
+        // Cache fallback. When the upstream provider is rate-limited
+        // (e.g. Cloudflare 403 after a burst of bulk-add requests)
+        // and we have a previously-saved cache file, return that
+        // data instead of failing the refresh outright. The data is
+        // still useful — it was fetched moments ago. The caller gets
+        // `staleFallback: true` so it can update DB status accordingly
+        // (e.g. mark the source as "rate-limited" rather than
+        // "failed", and skip re-inserting channels we already have).
+        const looksRateLimited = /403|429|forbidden/i.test(error.message || '');
+        if (looksRateLimited && fs.existsSync(cacheFile)) {
+            try {
+                const cacheStats = fs.statSync(cacheFile);
+                const cachedData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+                if (Array.isArray(cachedData) && cachedData.length > 0) {
+                    logger.warn(
+                        `Xtream upstream rate-limited; falling back to cache (${cachedData.length} channels, ` +
+                        `${Math.round((Date.now() - cacheStats.mtimeMs) / 60000)}m old): ${cacheFile}`
+                    );
+                    mergedOptions.onProgress({
+                        stage: 'cache-fallback',
+                        percent: 100,
+                        message: `Provider rate-limited — using cached ${cachedData.length} channels`,
+                        details: {
+                            channelCount: cachedData.length,
+                            fromCache: true,
+                            staleFallback: true,
+                            originalError: error.message
+                        }
+                    });
+                    return {
+                        url: `${normalizedUrl}`,
+                        channels: cachedData,
+                        lastUpdated: new Date(cacheStats.mtimeMs).toISOString(),
+                        fromCache: true,
+                        staleFallback: true,
+                        rateLimitedError: error.message,
+                        success: true
+                    };
+                }
+            } catch (cacheReadError) {
+                logger.warn(`Cache fallback read failed: ${cacheReadError.message}`);
+            }
+        }
+
         mergedOptions.onProgress({
             stage: 'error',
             percent: 0,
@@ -1846,7 +2021,7 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
                 baseUrl
             }
         });
-        
+
         return {
             url: baseUrl,
             error: error.message,
@@ -1887,7 +2062,7 @@ async function fetchXtreamAccountInfo(baseUrl, username, password) {
             logger.info(`Fetching account info from Xtream API (attempt ${attempt + 1}/${attemptDelays.length}): ${apiUrl}`);
             const response = await fetch(apiUrl, {
                 method: 'GET',
-                headers: { 'User-Agent': 'EPG-Matcher/1.0' },
+                headers: XTREAM_API_HEADERS,
                 timeout: 15000,
             });
 

@@ -638,6 +638,24 @@ const Configuration = ({
                 onLoad({ bulk: true, done, failed, total });
               }
             }}
+            onBulkProgressChange={(progress) => {
+              if (!onLoadingChange) return;
+              // Bridge bulk-add state into the parent's background-loadings
+              // tracker via a synthetic 'bulk-add' sessionId. The parent
+              // keeps the modal mounted while the entry is present, so
+              // closing the modal during a bulk-add just minimizes it
+              // (the floating loading bubble re-opens to the bulk-add tab).
+              if (progress.isActive) {
+                const status =
+                  `${progress.done} done · ${progress.loading} loading · ` +
+                  `${progress.queued} queued / ${progress.total} total`;
+                onLoadingChange(true, 'bulk-add', status, 'info');
+              } else {
+                // Bulk-add finished (or hasn't started); remove the entry so
+                // the modal can fully close when the user dismisses it.
+                onLoadingChange(false, 'bulk-add', null, null);
+              }
+            }}
           />
         )}
 

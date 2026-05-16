@@ -44,6 +44,17 @@ export function AppProvider({ children }) {
   const [backgroundLoadings, setBackgroundLoadings] = useState(new Map());
   const [showLoadingPicker, setShowLoadingPicker] = useState(false);
 
+  // Source-list revision counter. Bumped any time a source is added,
+  // updated, or removed. Consumers (MyIPTVs page, App.js userSources)
+  // watch this and refetch when it changes. This decouples the
+  // global Add-IPTV-Source modal (which lives in AppLayout, persists
+  // across page navigation) from the page that consumes the source
+  // list. Without this, navigating away from MyIPTVs mid-bulk-add
+  // unmounted the entire modal including BulkAddSources and dropped
+  // every queued source.
+  const [sourceListRevision, setSourceListRevision] = useState(0);
+  const bumpSourceListRevision = () => setSourceListRevision((n) => n + 1);
+
   // Result state
   const [result, setResult] = useState(null);
   const [showEmergencyCategories, setShowEmergencyCategories] = useState(true);
@@ -116,6 +127,10 @@ export function AppProvider({ children }) {
     setBackgroundLoadings,
     showLoadingPicker,
     setShowLoadingPicker,
+
+    // Source-list revision (bumped when sources are added/changed)
+    sourceListRevision,
+    bumpSourceListRevision,
 
     // Result
     result,

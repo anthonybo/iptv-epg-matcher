@@ -5,6 +5,7 @@ import Sidebar from '../../Sidebar';
 import SessionDebugger from '../SessionDebugger';
 import { ServerStatusModal } from '../modals/ServerStatusModal';
 import { LoadingPickerModal } from '../modals/LoadingPickerModal';
+import AddSourceModal from '../modals/AddSourceModal';
 import { UserBadge } from '../AuthWrapper';
 import TheatreView from '../../TheatreView';
 
@@ -203,6 +204,10 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
           </div>
         </div>
       )}
+
+      {/* Global Add-IPTV-Source modal. Mounted at the layout level so a
+          minimized bulk-add survives navigation to other pages. */}
+      <AddSourceModal />
 
       <LoadingPickerModal
         isOpen={showLoadingPicker}

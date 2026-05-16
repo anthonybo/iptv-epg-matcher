@@ -27,6 +27,7 @@ const MultiViewGrid = ({
   activeId,
   loadingStreams,
   playerType = 'mpegts-player',
+  isFavorited,
   // Callbacks
   onDragStart,
   onDragEnd,
@@ -37,6 +38,7 @@ const MultiViewGrid = ({
   onAlternateSources,
   onBlacklist,
   onRemove,
+  onToggleFavorite,
   onQualityDetected
 }) => {
   // Drag and drop sensors
@@ -148,6 +150,7 @@ const MultiViewGrid = ({
                   isMuted={mutedStreams.has(streamKey)}
                   quality={streamQualities[streamKey]}
                   isFindingAlternative={findingAlternativeFor && findingAlternativeFor.has && findingAlternativeFor.has(streamKey)}
+                  isFavorited={isFavorited ? isFavorited(stream.sourceId, stream.id) : false}
                   playerType={playerType}
                   onToggleMute={() => onToggleMute(streamKey)}
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
@@ -157,6 +160,7 @@ const MultiViewGrid = ({
                   onStreamDead={() => onFindAlternative(stream, true)}
                   onBlacklist={() => onBlacklist(stream.name)}
                   onRemove={() => onRemove(stream.id, stream.sourceId)}
+                  onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(stream) : null}
                   onQualityDetected={(quality) => onQualityDetected(streamKey, quality)}
                   isFeatured={isFeatured}
                 />

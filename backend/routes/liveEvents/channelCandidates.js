@@ -30,6 +30,7 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../../config/logger');
 const postgresService = require('../../services/postgresService');
+const { expandBroadcaster, hasAlias } = require('../../utils/broadcasterAliases');
 
 router.post('/channel-candidates', async (req, res) => {
   const userId = req.user?.id;
@@ -72,6 +73,27 @@ router.post('/channel-candidates', async (req, res) => {
       .filter((t) => t.length >= 2);
     if (queryTokens.length === 0) queryTokens.push(queryLower);
 
+    // Brand-alias auto-expansion. When the query exactly matches a
+    // broadcaster code we know about ("SECN+", "MLB.TV", "TNT", etc.),
+    // fold the alias bag into the OR-set so the picker surfaces every
+    // catalog-naming variant (e.g. " :SEC+  10" overflow slots when
+    // the user types "SECN+", or "SEC NETWORK +" with a space).
+    // Without this the per-tile "Switch source" picker silently
+    // returned 0 candidates whenever the catalog labelled the channel
+    // differently from what ESPN reported — see 2026-05-08 22:09 SECN+
+    // log where searchQuery was "SECN+" but the actual channels were
+    // " :SEC+  10" / " :SEC+  100" / etc.
+    const expandedAliases = hasAlias(searchQuery)
+      ? expandBroadcaster(searchQuery)
+          .filter((a) => typeof a === 'string' && a.trim().length >= 3)
+          .map((a) => a.trim())
+      : [];
+    if (expandedAliases.length > 0) {
+      logger.info(
+        `[Channel Candidates] Brand-alias expand "${searchQuery}" → ${expandedAliases.length}: ${expandedAliases.join(', ')}`
+      );
+    }
+
     // Build params + WHERE incrementally so the placeholder numbering
     // stays in lockstep with the array index.
     const params = [userId];
@@ -81,12 +103,16 @@ router.post('/channel-candidates', async (req, res) => {
     };
 
     // SQL filter: name must contain the primary query OR any of its
-    // tokens. The trgm GIN index from migration 023 makes ILIKE fast
-    // even on the 1.13M-row table. Token-OR catches "US: Reelz HD"
-    // when the user types "reelz".
+    // tokens OR any expanded alias. The trgm GIN index from migration
+    // 023 makes these ILIKEs fast even on the 1.13M-row table.
     const orParts = [];
     const seenLikes = new Set();
-    for (const tok of [queryLower, ...queryTokens]) {
+    const orTerms = [
+      queryLower,
+      ...queryTokens,
+      ...expandedAliases.map((a) => a.toLowerCase())
+    ];
+    for (const tok of orTerms) {
       if (!tok || seenLikes.has(tok)) continue;
       seenLikes.add(tok);
       orParts.push(`c.name ILIKE ${placeholder(`%${tok}%`)}`);
@@ -162,6 +188,23 @@ router.post('/channel-candidates', async (req, res) => {
       deduped.push(r);
     }
 
+    // Pre-tokenise each alias once so the per-row scoring doesn't redo
+    // it on every iteration. Each alias becomes a Set of full tokens
+    // (length ≥ 2 after splitting on whitespace/colon/pipe). A channel
+    // is rewarded +25 if any alias's full token-set is a subset of its
+    // own — that's the "this is a linear feed for the alias family"
+    // signal (e.g. a channel named "USA: SEC NETWORK+" tokens
+    // {usa,sec,network+} contains the {sec,network+} alias-set).
+    const aliasTokenSets = expandedAliases.map((a) => {
+      return new Set(
+        String(a)
+          .toLowerCase()
+          .split(/[\s:|=\\/]+/)
+          .map((t) => t.trim())
+          .filter((t) => t.length >= 2)
+      );
+    }).filter((s) => s.size > 0);
+
     // Score each candidate by name proximity to the query. Goal: surface
     // the linear feed ("US: Reelz HD") above per-event variants
     // ("REELZ Famous & Infamous"). Pure tie-break logic — the picker
@@ -172,6 +215,7 @@ router.post('/channel-candidates', async (req, res) => {
     //   −30 name length > 40   — usually per-event PPV
     //    −5 trailing parens/brackets — region/quality decoration
     //   +20 per query token that appears as a FULL token in the name
+    //   +25 per matching alias token-set (subset of channel tokens)
     const scored = deduped.map((r) => {
       const name = String(r.name || '');
       const lower = name.toLowerCase();
@@ -190,6 +234,18 @@ router.post('/channel-candidates', async (req, res) => {
       let tokenHits = 0;
       for (const tok of queryTokens) if (channelTokens.has(tok)) tokenHits += 1;
       score += tokenHits * 20;
+      // Alias subset bonus — a "USA: SEC NETWORK+" containing all of
+      // the {sec,network+} alias tokens earns more than a bare
+      // " :SEC+  10" overflow slot, even though both legitimately
+      // match the SECN+ family. Picker UI shows both; this just sorts
+      // the canonical linear feed first when one exists.
+      for (const aSet of aliasTokenSets) {
+        let isSubset = true;
+        for (const tok of aSet) {
+          if (!channelTokens.has(tok)) { isSubset = false; break; }
+        }
+        if (isSubset) score += 25;
+      }
       return { ...r, _score: score };
     });
 

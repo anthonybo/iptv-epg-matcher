@@ -1,4 +1,5 @@
 import apiClient from '../utils/apiClient';
+import axios from 'axios';
 
 /**
  * Service for managing user's IPTV sources
@@ -150,14 +151,28 @@ class IPTVSourcesService {
    * @param {number} sourceId - Source ID
    * @returns {Promise<Object>} Updated account info
    */
-  async refreshAccountInfo(sourceId) {
+  async refreshAccountInfo(sourceId, { signal } = {}) {
     try {
-      // Use a 10-minute timeout since large sources can take 5+ minutes to process
+      // Generous timeout — large Xtream providers with 50k+ channels
+      // and a pg_trgm GIN index take 10-15 min on the INSERT step.
+      // 20 min matches the backend's req.setTimeout, so we won't
+      // give up before the server does.
       const response = await apiClient.post(`/iptv/sources/${sourceId}/refresh-account-info`, {}, {
-        timeout: 600000 // 10 minutes
+        timeout: 20 * 60 * 1000,
+        // AbortController signal — when the user hits Cancel on the
+        // Refresh-all pill we cancel the in-flight axios call. The
+        // backend route's req 'close' handler picks up the
+        // disconnect and stops the host-bucket loop.
+        signal,
       });
       return response.data;
     } catch (error) {
+      // Don't noisy-log canceled requests — that's the user's intent.
+      if (axios.isCancel?.(error) || error.name === 'CanceledError' || error.name === 'AbortError') {
+        const cancelErr = new Error('Cancelled');
+        cancelErr.cancelled = true;
+        throw cancelErr;
+      }
       console.error('Error refreshing account info:', error);
       throw error;
     }

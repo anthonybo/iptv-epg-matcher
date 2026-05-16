@@ -316,7 +316,27 @@ async function deleteSource(sourceId, userId) {
 // Channel Operations
 // ============================================================================
 
-async function saveChannels(channels, sourceId) {
+/**
+ * Save channels for a source.
+ *
+ * @param {Array}    channels  Channel objects to save.
+ * @param {number}   sourceId  Source row id.
+ * @param {Object}   [options]
+ * @param {Function} [options.isCancelled]
+ *   Predicate called between batches. When it returns true, saveChannels
+ *   stops issuing more INSERTs and returns whatever it managed to save
+ *   so far. Used by the refresh route to honor a Cancel click — the
+ *   in-flight INSERT batch finishes (Postgres owns that, we can't kill
+ *   a statement mid-flight) but the loop won't fire the remaining ~99
+ *   batches. For a 54k-channel provider that's the difference between
+ *   "cancelled but still chewing for 10 more minutes" and "stops within
+ *   the next 2-5 seconds".
+ */
+async function saveChannels(channels, sourceId, options = {}) {
+    const isCancelled = typeof options.isCancelled === 'function'
+        ? options.isCancelled
+        : () => false;
+
     if (!channels || channels.length === 0) {
         return { saved: 0 };
     }
@@ -349,6 +369,15 @@ async function saveChannels(channels, sourceId) {
     let savedCount = 0;
 
     for (let i = 0; i < uniqueChannels.length; i += batchSize) {
+        // Honor a Cancel between batches. We can't tear down an
+        // in-flight INSERT, but stopping the loop here is what makes
+        // a click on the frontend Cancel button actually visible —
+        // otherwise the 100-batch loop chews through the full 50k+
+        // channels regardless.
+        if (isCancelled()) {
+            logger.info(`saveChannels: cancelled after ${savedCount}/${uniqueChannels.length} channels for source ${sourceId}`);
+            return { saved: savedCount, cancelled: true };
+        }
         const batch = uniqueChannels.slice(i, i + batchSize);
 
         // Build values array: ($1,$2,$3...), ($15,$16,$17...), ...
@@ -404,9 +433,23 @@ async function saveChannels(channels, sourceId) {
         savedCount += batch.length;
     }
 
-    // Update the channel count on the source
+    // Update the source row to reflect this successful load. Stamping
+    // the refresh-status fields here matters for the MyIPTVs page's
+    // "Last refresh" column — bulk-added sources used to leave these
+    // fields null even though the load completed cleanly, so the UI
+    // showed "—" for every just-imported source. By writing them at
+    // the lowest level (every load path bottoms out here), every
+    // single-source / bulk / xtream / stalker code path gets proper
+    // provenance for free.
     await queryWithRetry(
-        'UPDATE iptv_sources SET channel_count = $1 WHERE id = $2',
+        `UPDATE iptv_sources
+            SET channel_count            = $1,
+                last_refresh_attempt     = CURRENT_TIMESTAMP,
+                last_successful_refresh  = CURRENT_TIMESTAMP,
+                last_refresh_status      = 'success',
+                last_refresh_error       = NULL,
+                failure_count            = 0
+          WHERE id = $2`,
         [savedCount, sourceId]
     );
 

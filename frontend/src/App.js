@@ -265,29 +265,10 @@ function AppContent() {
         return (
           <div className="px-6 py-8">
             <MyIPTVs
-              onLoad={async (data) => {
-                await handleLoad(data);
-                setActiveTab('myiptvs');
-              }}
-              loadingError={loadingError}
-              onSourcesUpdated={async () => {
-                try {
-                  const sources = await iptvSourcesService.getUserSources();
-                  setUserSources(sources);
-                } catch (err) {
-                  console.error('Error reloading sources:', err);
-                }
-              }}
               onViewChannels={(source) => {
                 setSelectedSourceFilter(source);
                 setActiveTab('channels');
               }}
-              backgroundLoadings={backgroundLoadings}
-              setBackgroundLoadings={setBackgroundLoadings}
-              showLoadingPicker={showLoadingPicker}
-              setShowLoadingPicker={setShowLoadingPicker}
-              showAddModal={showAddModal}
-              setShowAddModal={setShowAddModal}
             />
           </div>
         );

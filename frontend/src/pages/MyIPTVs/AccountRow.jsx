@@ -1,20 +1,23 @@
 import React, { useRef, useState } from 'react';
 import EditCredentialsModal from './EditCredentialsModal';
 import {
+  ACCOUNT_GRID_TEMPLATE,
   getAccountHealth,
   getAccountLabel,
   healthDotClasses,
   formatExpDate,
   daysUntilExp,
   formatRelativeTime,
+  formatAbsoluteTime,
   formatDuration,
+  lastSourceCheckAt,
   locationLabel,
   buildCredentialsText,
   copyToClipboard,
 } from './utils';
 
-const HealthDot = ({ source, refreshStatus }) => {
-  const health = getAccountHealth(source, refreshStatus);
+const HealthDot = ({ source, refreshStatus, testResult }) => {
+  const health = getAccountHealth(source, refreshStatus, testResult);
   return (
     <span
       className={`inline-block w-2 h-2 rounded-full shrink-0 ${healthDotClasses[health]}`}
@@ -93,19 +96,33 @@ const icons = {
   ),
 };
 
-const DataCell = ({ label, value, tone = 'default', mono }) => {
-  const toneClass = tone === 'muted' ? 'text-slate-500'
-    : tone === 'warn' ? 'text-amber-300'
-    : tone === 'error' ? 'text-red-300'
-    : tone === 'good' ? 'text-emerald-300'
-    : 'text-slate-200';
-  return (
-    <div className="flex flex-col">
-      <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600">{label}</span>
-      <span className={`text-sm tabular-nums ${mono ? 'font-mono' : ''} ${toneClass}`}>{value}</span>
-    </div>
-  );
+// Tone → text color. Same scale used by everything that surfaces a
+// health / expiry / refresh signal.
+const TONE = {
+  default: 'text-slate-200',
+  muted:   'text-slate-500',
+  warn:    'text-amber-300',
+  error:   'text-red-300',
+  good:    'text-emerald-300',
 };
+
+// Faint middle-dot placeholder for "no value". Reads as "this column
+// exists but has nothing to say" without the visual weight of "—"
+// (which a casual scan can confuse with a real value).
+const Placeholder = () => (
+  <span className="text-slate-700 select-none" aria-hidden="true">·</span>
+);
+
+// Right-aligned, mono, tabular numeric cell. Used for channels /
+// expires / conn — every digit lands in the same column position.
+const NumCell = ({ value, tone = 'default', title, hidden }) => (
+  <div
+    className={`hidden md:flex md:items-center md:justify-end font-mono text-sm tabular-nums leading-none ${TONE[tone]} ${hidden ? 'invisible' : ''}`}
+    title={title}
+  >
+    {value || <Placeholder />}
+  </div>
+);
 
 const testPillMeta = {
   testing: { tone: 'bg-blue-500/15 border-blue-500/40 text-blue-300', dot: 'bg-blue-400 animate-pulse' },
@@ -142,7 +159,7 @@ const AccountRow = ({
     password: source.password || '',
   });
 
-  const health = getAccountHealth(source, refreshStatus);
+  const health = getAccountHealth(source, refreshStatus, testResult);
   const accentRail = {
     ok: 'before:bg-emerald-500/60',
     warn: 'before:bg-amber-500/60',
@@ -156,11 +173,25 @@ const AccountRow = ({
   const daysLeft = daysUntilExp(source.exp_date);
   const expTone = daysLeft === null ? 'muted' : daysLeft < 0 ? 'error' : daysLeft <= 7 ? 'warn' : 'default';
 
-  const lastRefreshRel = formatRelativeTime(source.last_refresh_attempt || source.last_refreshed);
+  // "Last refresh" timestamp with fallbacks. Bulk-added sources don't
+  // populate last_refresh_attempt / last_refreshed even after a
+  // successful fetch, so without the updated_at / created_at fallback
+  // the column was always "—" for newly-imported sources. lastSourceCheckAt
+  // returns the freshest available timestamp.
+  const lastRefreshTs = lastSourceCheckAt(source);
+  const lastRefreshRel = formatRelativeTime(lastRefreshTs);
+  const lastRefreshAbs = formatAbsoluteTime(lastRefreshTs);
   const lastRefreshDuration = formatDuration(source.last_refresh_duration_ms);
   const lastRefreshTone = source.last_refresh_status === 'success' ? 'good'
     : source.last_refresh_status === 'error' ? 'error'
     : 'muted';
+  // Tag the timestamp's source so the tooltip can say "imported"
+  // vs "checked" — refresh-stamped fields are an explicit health
+  // verification; updated_at/created_at are just the row's audit time.
+  const lastRefreshOrigin =
+    (source.last_refresh_attempt || source.last_successful_refresh || source.last_refreshed)
+      ? 'checked'
+      : 'imported';
 
   const connectionsStr = (source.active_connections !== null && source.active_connections !== undefined)
     ? `${source.active_connections}/${source.max_connections || '?'}`
@@ -314,11 +345,17 @@ const AccountRow = ({
           if (!rowClickable) return;
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded((v) => !v); }
         }}
-        className="flex items-center gap-4 px-5 py-2.5 cursor-pointer select-none"
+        className="flex md:grid md:items-center gap-3 md:gap-4 px-5 py-2.5 cursor-pointer select-none"
+        // CSS grid template lives in a single shared constant so this
+        // row and the column header in DomainSection literally cannot
+        // drift apart. Below the md: breakpoint we fall back to flex
+        // (the data cells go display:none, so the account label fills
+        // and actions sit on the right — same mobile UX as before).
+        style={{ gridTemplateColumns: ACCOUNT_GRID_TEMPLATE }}
       >
-        {/* Status + account label */}
-        <div className="flex items-center gap-3 min-w-0 flex-1">
-          <HealthDot source={source} refreshStatus={refreshStatus} />
+        {/* Col 1 — Account label */}
+        <div className="flex items-center gap-3 min-w-0 flex-1 md:flex-none">
+          <HealthDot source={source} refreshStatus={refreshStatus} testResult={testResult} />
           {isEditingNickname ? (
             <input
               type="text"
@@ -334,7 +371,7 @@ const AccountRow = ({
               className="flex-1 min-w-0 rounded-md border border-blue-500/60 bg-slate-900 px-2 py-1 text-sm font-medium text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
             />
           ) : (
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 md:flex-none">
               <div className="text-sm font-semibold text-slate-100 truncate">
                 {getAccountLabel(source)}
               </div>
@@ -347,80 +384,113 @@ const AccountRow = ({
           )}
         </div>
 
-        {/* Tabular data cells */}
-        <div className="hidden md:flex items-center gap-8 shrink-0">
-          <div className="w-20 text-right">
-            <DataCell
-              label="Channels"
-              value={channelCount ? channelCount.toLocaleString() : '—'}
-              tone={channelCount ? 'default' : 'muted'}
-            />
-          </div>
-          {expFormatted || connectionsStr ? (
-            <div className="w-24">
-              <DataCell
-                label="Expires"
-                value={expFormatted || '—'}
-                tone={expTone}
-                mono
-              />
-            </div>
-          ) : null}
-          {connectionsStr && (
-            <div className="w-16">
-              <DataCell label="Conn" value={connectionsStr} mono />
-            </div>
-          )}
-          <div className="w-28">
-            <DataCell
-              label="Last refresh"
-              value={lastRefreshRel || '—'}
-              tone={lastRefreshTone}
-            />
-            {lastRefreshDuration && (
-              <span className="text-[10px] text-slate-600 font-mono tabular-nums">{lastRefreshDuration}</span>
-            )}
-          </div>
-          {testResult && (
-            <div className="w-24">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600 block">Streams</span>
-              {testResult.status === 'testing' ? (
-                <span className="inline-flex items-center gap-1.5 text-xs text-blue-300">
-                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                  Testing…
-                </span>
-              ) : testResult.status === 'error' ? (
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); }}
-                  title={testResult.error || 'Test failed'}
-                  className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold ${testPillMeta.error.tone}`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${testPillMeta.error.dot}`} />
-                  Error
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (onShowDiagnostics && testResult.diagnostics) {
-                      onShowDiagnostics(source, testResult.diagnostics);
-                    }
-                  }}
-                  title={`${testResult.passed}/${testResult.tested} streams passed — click for details`}
-                  className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums transition-colors hover:brightness-110 ${testPillMeta[testResult.status]?.tone || testPillMeta.failed.tone}`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${testPillMeta[testResult.status]?.dot || testPillMeta.failed.dot}`} />
-                  {testResult.passed}/{testResult.tested}
-                </button>
-              )}
-            </div>
+        {/* Col 2 — Channels (right-aligned, mono) */}
+        <NumCell
+          value={channelCount ? channelCount.toLocaleString() : null}
+          tone={channelCount ? 'default' : 'muted'}
+          title={channelCount ? `${channelCount.toLocaleString()} channels` : 'No channel count yet'}
+        />
+
+        {/* Col 3 — Expires (right-aligned, mono, tone tracks days-left) */}
+        <NumCell
+          value={expFormatted}
+          tone={expTone}
+          title={
+            daysLeft === null ? 'No expiration on file'
+              : daysLeft < 0 ? `Expired ${Math.abs(daysLeft)} day${Math.abs(daysLeft) === 1 ? '' : 's'} ago`
+              : `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`
+          }
+        />
+
+        {/* Col 4 — Conn (right-aligned, mono) */}
+        <NumCell
+          value={connectionsStr}
+          title={connectionsStr ? `${connectionsStr} concurrent connections in use` : 'Connection limit unknown'}
+        />
+
+        {/* Col 5 — Last check (left-aligned with optional sub-line) */}
+        <div
+          className="hidden md:flex md:flex-col md:justify-center min-w-0 leading-none"
+          title={
+            lastRefreshAbs
+              ? `${lastRefreshOrigin === 'imported' ? 'Imported' : 'Checked'} ${lastRefreshAbs}`
+              : undefined
+          }
+        >
+          <span className={`text-sm ${TONE[lastRefreshTone] || TONE.default} truncate`}>
+            {lastRefreshRel || <Placeholder />}
+          </span>
+          {lastRefreshRel && (lastRefreshDuration || lastRefreshOrigin === 'imported') && (
+            <span className="mt-1 text-[10px] text-slate-600 font-mono tabular-nums truncate">
+              {lastRefreshDuration || 'imported'}
+            </span>
           )}
         </div>
 
-        {/* Action strip */}
-        <div className="flex items-center gap-0.5 shrink-0">
+        {/* Col 6 — Streams (pill + optional "tested ago").
+            Carries the hairline that visually separates the data block
+            from the action strip — anchored on this cell's right edge
+            so the divider sits at a fixed x (right edge of the 6.25rem
+            Streams track) in both the header and every row. */}
+        <div className="hidden md:flex md:flex-col md:justify-center min-w-0 leading-none md:self-stretch md:pr-3 md:border-r md:border-slate-800/60">
+          {(() => {
+            if (!testResult) return <Placeholder />;
+            const testedRel = formatRelativeTime(testResult.testedAt);
+            const testedAbs = formatAbsoluteTime(testResult.testedAt);
+            const pillBase = 'inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold leading-none';
+            const pillMeta = testPillMeta[testResult.status] || testPillMeta.failed;
+            return (
+              <>
+                {testResult.status === 'testing' ? (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-blue-300 leading-none">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                    Testing…
+                  </span>
+                ) : testResult.status === 'error' ? (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); }}
+                    title={`${testResult.error || 'Test failed'}${testedAbs ? ` · ${testedAbs}` : ''}`}
+                    className={`${pillBase} self-start ${testPillMeta.error.tone}`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${testPillMeta.error.dot}`} />
+                    Error
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (onShowDiagnostics && testResult.diagnostics) {
+                        onShowDiagnostics(source, testResult.diagnostics);
+                      }
+                    }}
+                    title={`${testResult.passed}/${testResult.tested} streams passed${testedAbs ? ` · tested ${testedAbs}` : ''} — click for details`}
+                    className={`${pillBase} self-start tabular-nums transition-colors hover:brightness-110 ${pillMeta.tone}`}
+                  >
+                    <span className={`w-1.5 h-1.5 rounded-full ${pillMeta.dot}`} />
+                    {testResult.passed}/{testResult.tested}
+                  </button>
+                )}
+                {testResult.status !== 'testing' && testedRel && (
+                  <span
+                    className="mt-1 text-[10px] text-slate-600 font-mono tabular-nums truncate"
+                    title={testedAbs || undefined}
+                  >
+                    {testedRel}
+                  </span>
+                )}
+              </>
+            );
+          })()}
+        </div>
+
+        {/* Col 7 — Action strip. Fixed 17rem track (see
+            ACCOUNT_GRID_TEMPLATE comment); right-aligned content via
+            justify-end so View/Chevron hug the section's right edge.
+            Hairline divider is rendered on the Streams cell's right
+            edge instead of here so header and rows align identically. */}
+        <div className="flex items-center justify-end gap-0.5 shrink-0 md:self-stretch md:pl-2">
           {/* Copy stays always-visible — it's the most common "export to notes" action. */}
           <button
             type="button"

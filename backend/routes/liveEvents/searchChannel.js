@@ -306,9 +306,40 @@ router.post('/search-channel', async (req, res) => {
     // happens to use a different alias from the one we display first.
     // Sanitised here: only keep non-empty strings ≥3 chars (matches the
     // teamMatcher floor; shorter terms substring-match too aggressively).
-    const aliasesArr = Array.isArray(rawAliases)
+    let aliasesArr = Array.isArray(rawAliases)
       ? rawAliases.filter((a) => typeof a === 'string' && a.trim().length >= 3).map((a) => a.trim())
       : [];
+
+    // Brand-mode auto-expansion. When the caller is searching for a
+    // broadcaster code and didn't bother passing the full alias bag —
+    // which is what the All-Games / Trending broadcaster chips do —
+    // expand the query through the alias dictionary ourselves. Without
+    // this, clicking "SECN+" runs `name ILIKE '%SECN+%'` against a
+    // catalog whose channels are labelled "SEC Network+" / "SEC+" /
+    // "ESPN SECN+" and zero rows match in <2ms — the symptom from the
+    // 2026-05-08 21:59 SECN+ search log. expandBroadcaster's reverse-
+    // lookup turns "SECN+" into the full SEC Network+ alias family
+    // (SEC NETWORK+, SEC+, SECN+) so the SQL OR-bag fans out properly.
+    // Only fires when the caller hasn't already supplied aliases (so
+    // Coverage's explicit row Test still wins) and when no broadcasts
+    // came through from an espnEventId lookup (which is the path that
+    // already populates broadcasterTerms).
+    if (
+      mode === 'brand' &&
+      aliasesArr.length === 0 &&
+      broadcasterTerms.length === 0
+    ) {
+      const expanded = expandBroadcaster(searchQuery);
+      if (expanded.length > 1 || (expanded[0] && expanded[0].toUpperCase() !== searchQuery.toUpperCase())) {
+        // The dict actually had a mapping (vs. the verbatim fallback).
+        aliasesArr = expanded
+          .filter((a) => typeof a === 'string' && a.trim().length >= 3)
+          .map((a) => a.trim());
+        logger.info(
+          `[Find Alternative] Brand-mode auto-expand "${searchQuery}" → ${aliasesArr.length} aliases: ${aliasesArr.join(', ')}`
+        );
+      }
+    }
 
     // Combine team-name terms with broadcaster aliases so the SQL filter
     // pulls both signals into the candidate pool. The relevance scorer
@@ -407,7 +438,23 @@ router.post('/search-channel', async (req, res) => {
     // rows even on the 1.13M-row table.
     let brandModeNoiseExclusion = '';
     if (mode === 'brand') {
-      brandModeNoiseExclusion = `AND c.name !~* '^[[:space:]]*[:|]|^[[:space:]]*[Ss][0-9]+[[:space:]]*\\||[0-9]{1,2}/[0-9]{1,2}|\\yvs\\y'`;
+      // PPV / per-event noise patterns. The earlier version of this
+      // regex also rejected anything starting with leading-`:`/`|`,
+      // which collapsed the legitimate SEC+/ESPN+/Sportsnet+ NUMBERED
+      // OVERFLOW slots (' :SEC+  10', ' :ESPN+  285',
+      // ' :Sportsnet+  14') along with the real PPV junk. Those
+      // numbered slots are the actual live channels for "+ network"
+      // overflow games — the brand-mode SECN+ search produced 0 rows
+      // in the 2026-05-08 22:09 log entirely because of this filter.
+      //
+      // The remaining three alternations still catch real PPV cleanly:
+      //   S### |            — aggregator format ("S004 | 05/05 ...")
+      //   MM/DD             — date-stamped per-event channels
+      //   \yvs\y            — "X vs Y" matchup separator
+      // PPV channels almost always carry one of those — a bare
+      // ' :ESPN+  285' that survives is the harmless overflow slot we
+      // wanted to keep.
+      brandModeNoiseExclusion = `AND c.name !~* '^[[:space:]]*[Ss][0-9]+[[:space:]]*\\||[0-9]{1,2}/[0-9]{1,2}|\\yvs\\y'`;
     }
 
     // SQL-side coarse priority sort. The JS scorer below is the final

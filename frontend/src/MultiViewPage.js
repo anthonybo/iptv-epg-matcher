@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ConfirmModal from './components/ConfirmModal';
+import { showToast } from './components/Toast';
 import { useAppContext } from './contexts/AppContext';
-import { calculateLayout } from './utils/multiviewManager';
+import { addToMultiview, calculateLayout } from './utils/multiviewManager';
 
 // Import extracted components
 import {
@@ -12,7 +13,8 @@ import {
   TrendingModal,
   AllGamesModal,
   BroadcasterCoverageModal,
-  ChannelPickerModal
+  ChannelPickerModal,
+  FavoritesStrip
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
@@ -25,6 +27,7 @@ import { useMultiViewStreams } from './hooks/multiview/useMultiViewStreams';
 import { useStreamFinder } from './hooks/multiview/useStreamFinder';
 import { useStreamSearch } from './hooks/multiview/useStreamSearch';
 import { useChannelPicker } from './hooks/multiview/useChannelPicker';
+import { useFavorites } from './hooks/multiview/useFavorites';
 
 /**
  * MultiViewPage - Display multiple streams in an auto-layout grid
@@ -173,6 +176,80 @@ const MultiViewPage = ({ sessionId }) => {
     mutedStreams
   });
 
+  // Channel favorites — fast tile-fill rail above the grid + Favorites
+  // tab inside the picker modal. Same hook drives both surfaces so
+  // toggling a heart in the modal immediately updates the strip.
+  const {
+    favorites,
+    loading: favoritesLoading,
+    isFavorite,
+    toggleFavorite,
+    removeFavorite,
+    bumpPlayed
+  } = useFavorites();
+
+  // Play a favorite into multi-view. Single-click path:
+  //   - If the (source, channel) is already on screen, just toast — no
+  //     duplicate tiles.
+  //   - Otherwise hand the favorite (in channel-shape) to addToMultiview
+  //     and tag it with searchQuery=name so the later find-alternative
+  //     loop keeps anchored to this brand if the stream goes dead.
+  // Per-tile favorite toggle. The stream object already carries every
+  // field useFavorites.toggleFavorite needs (id, sourceId, name, logo,
+  // url, source*) so we pass it straight through and emit a toast for
+  // both directions of the toggle.
+  const handleToggleTileFavorite = useCallback(async (stream) => {
+    const wasFavorited = isFavorite(stream.sourceId, stream.id);
+    const result = await toggleFavorite(stream);
+    if (!result.ok) {
+      const verb = wasFavorited ? 'remove from favorites' : 'save to favorites';
+      // Surface the actual server error in the toast so issues like
+      // "table does not exist" (migration not run) or FK violations
+      // aren't hidden behind a generic message.
+      showToast(`Failed to ${verb}: ${result.error || 'unknown error'}`, 'error');
+      return;
+    }
+    showToast(
+      wasFavorited
+        ? `Removed "${stream.name}" from favorites`
+        : `Saved "${stream.name}" to favorites`,
+      'success'
+    );
+  }, [isFavorite, toggleFavorite]);
+
+  const handlePlayFavorite = useCallback(async (fav) => {
+    const alreadyOnScreen = streams.some(
+      (s) => s.id === fav.channelId && s.sourceId === fav.sourceId
+    );
+    if (alreadyOnScreen) {
+      showToast(`"${fav.name}" is already on screen`, 'info');
+      return false;
+    }
+    const channel = {
+      id: fav.channelId,
+      sourceId: fav.sourceId,
+      name: fav.name,
+      logo: fav.logo,
+      url: fav.url,
+      sourceType: fav.sourceType,
+      sourceUrl: fav.sourceUrl,
+      sourceUsername: fav.sourceUsername,
+      sourcePassword: fav.sourcePassword,
+      sourceMac: fav.sourceMac,
+      sourceName: fav.sourceName,
+      searchQuery: fav.name
+    };
+    const ok = await addToMultiview(channel);
+    if (ok) {
+      window.dispatchEvent(new Event('multiviewUpdate'));
+      bumpPlayed(fav.id);
+      showToast(`Added "${fav.name}" to Multi-View`, 'success');
+      return true;
+    }
+    showToast(`Failed to add "${fav.name}"`, 'error');
+    return false;
+  }, [streams, bumpPlayed]);
+
 
   // Update layout when streams change
   useEffect(() => {
@@ -317,6 +394,18 @@ const MultiViewPage = ({ sessionId }) => {
         </button>
       )}
 
+      {/* Favorites strip — only outside theatre mode. Empty/loading states
+          are handled inside the component. */}
+      {!isTheatreMode && (
+        <FavoritesStrip
+          favorites={favorites}
+          loading={favoritesLoading}
+          streams={streams}
+          onPlay={handlePlayFavorite}
+          onRemove={removeFavorite}
+        />
+      )}
+
       {/* Grid Container */}
       <div className={`flex-1 ${isTheatreMode ? 'p-0 overflow-hidden' : 'p-4 overflow-auto'}`}>
         <MultiViewGrid
@@ -341,6 +430,8 @@ const MultiViewPage = ({ sessionId }) => {
           onAlternateSources={openPickerForStream}
           onBlacklist={addToBlacklist}
           onRemove={removeStream}
+          isFavorited={isFavorite}
+          onToggleFavorite={handleToggleTileFavorite}
           onQualityDetected={onQualityDetected}
         />
       </div>
@@ -422,7 +513,13 @@ const MultiViewPage = ({ sessionId }) => {
       />
 
       {/* Channel Picker (header search disambiguation + per-tile alt sources) */}
-      <ChannelPickerModal {...pickerState} />
+      <ChannelPickerModal
+        {...pickerState}
+        favorites={favorites}
+        favoritesLoading={favoritesLoading}
+        isFavorite={isFavorite}
+        onToggleFavorite={toggleFavorite}
+      />
 
       {/* Live Scores Ticker */}
       {autoFillSettings.showLiveScoresTicker && (

@@ -238,10 +238,26 @@ app.use((req, res, next) => {
   }
 });
 
-// Configure memory management for large requests
+// Configure memory management for large requests.
+//
+// The 5-minute timeout that was here previously was killing
+// refresh-account-info responses mid-INSERT. Large Xtream providers
+// like cloudserver4kpremium.org ship 50k+ channels, and the
+// pg_trgm GIN index on iptv_channels.name means each batch insert
+// takes longer than the upstream fetch — total request duration
+// regularly hits 8-13 minutes per source. The hard 5-min cap fired
+// before the insert finished, the frontend got a 500 (even though
+// the backend INSERT continued and eventually completed), and the
+// frontend's retry kicked off a SECOND concurrent insert that
+// duplicated the work. See logs from 2026-05-15 10:04 showing every
+// "Saved N channels for source X" line written twice for sources
+// 227/228.
+//
+// 20 minutes leaves plenty of headroom for the slowest insert path
+// we've measured while still bounding genuinely-hung requests.
 app.use((req, res, next) => {
-  req.setTimeout(300000); // 5 minutes timeout for requests
-  res.setTimeout(300000); // 5 minutes for response
+  req.setTimeout(20 * 60 * 1000); // 20 min for the entire request
+  res.setTimeout(20 * 60 * 1000);
   next();
 });
 
@@ -389,6 +405,7 @@ const userEpgSourcesRoutes = require('./routes/userEpgSources');
 const epgRefreshRoutes = require('./routes/epgRefresh');
 const liveEventsRoutes = require('./routes/liveEvents');
 const multiviewRoutes = require('./routes/multiview');
+const favoritesRoutes = require('./routes/favorites');
 const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
 const userLocationsRoutes = require('./routes/userLocations');
@@ -447,6 +464,7 @@ app.use('/api/user-epg-sources', userEpgSourcesRoutes); // User EPG sources mana
 app.use('/api/epg-refresh', epgRefreshRoutes); // EPG refresh management
 app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 app.use('/api/multiview', multiviewRoutes); // Multiview streams management
+app.use('/api/favorites', favoritesRoutes); // Per-user channel favorites for fast multi-view tile fill
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news

@@ -9,3 +9,4 @@ export { default as TrendingModal } from './TrendingModal';
 export { default as AllGamesModal } from './AllGamesModal';
 export { default as BroadcasterCoverageModal } from './BroadcasterCoverageModal';
 export { default as ChannelPickerModal } from './ChannelPickerModal';
+export { default as FavoritesStrip } from './FavoritesStrip';

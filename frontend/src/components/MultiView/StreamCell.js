@@ -341,6 +341,7 @@ const StreamCellInner = memo(({
   isMuted,
   quality,
   isFindingAlternative,
+  isFavorited,
   playerType = 'mpegts-player',
   onToggleMute,
   onRefresh,
@@ -350,6 +351,7 @@ const StreamCellInner = memo(({
   onStreamDead,
   onBlacklist,
   onRemove,
+  onToggleFavorite,
   onQualityDetected,
   dragHandleProps
 }) => {
@@ -413,6 +415,32 @@ const StreamCellInner = memo(({
                   </svg>
                 )}
               </button>
+              {/* Favorite Toggle — save this exact (source, channel)
+                  tuple so the user can recall it from the strip above
+                  the grid. Amber is the "saved" colour slot across the
+                  app; filled = favorited, outlined = not. */}
+              {onToggleFavorite && (
+                <button
+                  onClick={onToggleFavorite}
+                  className={`p-0.5 rounded transition-colors ${
+                    isFavorited
+                      ? 'text-amber-300 hover:text-amber-200 hover:bg-amber-500/20'
+                      : 'text-slate-400 hover:text-amber-300 hover:bg-amber-500/20'
+                  }`}
+                  title={isFavorited ? 'Saved · click to unfavorite' : 'Save to favorites'}
+                  aria-pressed={isFavorited}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="w-3.5 h-3.5"
+                    fill={isFavorited ? 'currentColor' : 'none'}
+                    stroke="currentColor"
+                    strokeWidth={isFavorited ? 0 : 2}
+                  >
+                    <path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" />
+                  </svg>
+                </button>
+              )}
               {/* Refresh Button */}
               <button
                 onClick={onRefresh}
@@ -524,6 +552,7 @@ const StreamCellInner = memo(({
     prevProps.isMuted === nextProps.isMuted &&
     prevProps.quality?.resolution === nextProps.quality?.resolution &&
     prevProps.isFindingAlternative === nextProps.isFindingAlternative &&
+    prevProps.isFavorited === nextProps.isFavorited &&
     prevProps.playerType === nextProps.playerType
   );
 });
@@ -537,6 +566,7 @@ export const SortableStreamCell = ({
   isMuted,
   quality,
   isFindingAlternative,
+  isFavorited,
   playerType = 'mpegts-player',
   onToggleMute,
   onRefresh,
@@ -546,6 +576,7 @@ export const SortableStreamCell = ({
   onStreamDead,
   onBlacklist,
   onRemove,
+  onToggleFavorite,
   onQualityDetected
 }) => {
   const {
@@ -579,6 +610,7 @@ export const SortableStreamCell = ({
         isMuted={isMuted}
         quality={quality}
         isFindingAlternative={isFindingAlternative}
+        isFavorited={isFavorited}
         playerType={playerType}
         onToggleMute={onToggleMute}
         onRefresh={onRefresh}
@@ -588,6 +620,7 @@ export const SortableStreamCell = ({
         onStreamDead={onStreamDead}
         onBlacklist={onBlacklist}
         onRemove={onRemove}
+        onToggleFavorite={onToggleFavorite}
         onQualityDetected={onQualityDetected}
         dragHandleProps={dragHandleProps}
       />
