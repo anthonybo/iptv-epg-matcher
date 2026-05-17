@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 /**
  * TileInfoButton — the "ⓘ" affordance in the tile OSD. Click pins the
@@ -53,10 +54,31 @@ const TileInfoButton = ({ stream, quality }) => {
   const [event, setEvent] = useState(null);
   const [eventLoading, setEventLoading] = useState(false);
   const [nowTick, setNowTick] = useState(Date.now());
+  const [anchorRect, setAnchorRect] = useState(null);
   const pollTimerRef = useRef(null);
+  const buttonRef = useRef(null);
 
   const isVisible = isHovered || isPinned;
   const eventId = stream.espnEventId;
+
+  // When the popover is visible, track the button's bounding rect so
+  // the portaled popover stays glued to it across scroll/resize.
+  // The popover lives in document.body so it escapes the tile's
+  // overflow-hidden clip — that's how it can extend beyond the OSD
+  // strip without getting cut off.
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    const update = () => {
+      if (buttonRef.current) setAnchorRect(buttonRef.current.getBoundingClientRect());
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+    };
+  }, [isVisible]);
 
   useEffect(() => {
     if (!isVisible || !eventId) return undefined;
@@ -105,9 +127,22 @@ const TileInfoButton = ({ stream, quality }) => {
     }
   })();
 
+  // Popover positioning — anchored to the button's right edge so the
+  // panel grows leftward (avoids overflowing the screen on right-most
+  // tiles in a grid). The 8px gap matches mt-2 / mb-2.
+  const popoverStyle = anchorRect
+    ? {
+        position: 'fixed',
+        top: Math.round(anchorRect.bottom + 8),
+        right: Math.round(window.innerWidth - anchorRect.right),
+        width: 288 // w-72
+      }
+    : { position: 'fixed', top: 0, right: 0, width: 288, visibility: 'hidden' };
+
   return (
-    <div className="relative">
+    <>
       <button
+        ref={buttonRef}
         type="button"
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
@@ -124,11 +159,12 @@ const TileInfoButton = ({ stream, quality }) => {
         </svg>
       </button>
 
-      {isVisible && (
+      {isVisible && createPortal(
         <div
-          className={`absolute right-0 bottom-full mb-2 z-50 w-72 rounded-lg border bg-slate-900/95 shadow-xl shadow-black/60 p-3 text-xs backdrop-blur-md mv-anim-palette-in ${
+          className={`z-[9999] rounded-lg border bg-slate-900/95 shadow-xl shadow-black/60 p-3 text-xs backdrop-blur-md mv-anim-palette-in ${
             isPinned ? 'border-cyan-500/50' : 'border-slate-700'
           }`}
+          style={popoverStyle}
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
           onClick={(e) => e.stopPropagation()}
@@ -262,9 +298,10 @@ const TileInfoButton = ({ stream, quality }) => {
           }`}>
             {isPinned ? 'Pinned — click ⓘ to unpin' : 'Click ⓘ to pin'}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
-    </div>
+    </>
   );
 };
 
