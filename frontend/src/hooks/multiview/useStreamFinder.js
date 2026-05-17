@@ -33,6 +33,10 @@ function getToken() {
  */
 export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModal }) {
   const [searchingStream, setSearchingStream] = useState(false);
+  // Human-readable label of what's being searched for — surfaced by
+  // the TopBar so the user can see whether the click registered and
+  // what event we're chasing. Cleared in each handler's finally block.
+  const [searchStatus, setSearchStatus] = useState(null);
   const [searchAbortController, setSearchAbortController] = useState(null);
   const [showSportDropdown, setShowSportDropdown] = useState(false);
   const [liveSports, setLiveSports] = useState([]);
@@ -84,10 +88,12 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
       setSearchAbortController(null);
     }
     setSearchingStream(false);
+    setSearchStatus(null);
   };
 
   const findRandomSportsChannel = async () => {
     setSearchingStream(true);
+    setSearchStatus('Finding a random live sports stream');
     setShowSportDropdown(false);
 
     try {
@@ -125,6 +131,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
       showToast('Failed to find random sports channel', 'error');
     } finally {
       setSearchingStream(false);
+      setSearchStatus(null);
     }
   };
 
@@ -184,6 +191,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
 
   const findRandomAnyChannel = async () => {
     setSearchingStream(true);
+    setSearchStatus('Finding a random channel');
     setShowSportDropdown(false);
 
     try {
@@ -226,6 +234,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
       showToast('Failed to find random channel', 'error');
     } finally {
       setSearchingStream(false);
+      setSearchStatus(null);
     }
   };
 
@@ -233,6 +242,13 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
   // cancellation via the header's Cancel button (stored abort controller).
   const selectSport = async (sportType, leagueName) => {
     setSearchingStream(true);
+    setSearchStatus(
+      leagueName
+        ? `Finding a ${leagueName} stream`
+        : sportType
+          ? `Finding a ${sportType} stream`
+          : 'Finding a sports stream'
+    );
     setShowSportDropdown(false);
 
     const abortController = new AbortController();
@@ -282,6 +298,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
       }
     } finally {
       setSearchingStream(false);
+      setSearchStatus(null);
       setSearchAbortController(null);
     }
   };
@@ -304,6 +321,13 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
     }
 
     setSearchingStream(true);
+    // Build a status label using whichever team data we have. Falls
+    // back to the event name (e.g. "ESPN: NBA Finals Game 5") when
+    // both teams aren't provided.
+    const eventLabel = (score.away_team && score.home_team)
+      ? `${score.away_team} vs ${score.home_team}`
+      : (score.event_name || 'live event');
+    setSearchStatus(`Finding stream for ${eventLabel}`);
 
     try {
       const currentSourceIds = autoFillSettings.avoidDuplicateSources
@@ -315,6 +339,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
         console.warn(`${tag} blocked: ${score.event_name} already in multi-view`);
         showToast('This game is already in your Multi-View', 'info');
         setSearchingStream(false);
+        setSearchStatus(null);
         return;
       }
 
@@ -323,6 +348,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
         console.error(`${tag} blocked: no auth token`);
         showToast('Authentication required', 'error');
         setSearchingStream(false);
+        setSearchStatus(null);
         return;
       }
 
@@ -443,6 +469,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
       }
     } finally {
       setSearchingStream(false);
+      setSearchStatus(null);
     }
   };
 
@@ -450,6 +477,7 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
     // State
     searchingStream,
     setSearchingStream,
+    searchStatus,
     showSportDropdown,
     setShowSportDropdown,
     liveSports,

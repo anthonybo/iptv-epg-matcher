@@ -122,6 +122,7 @@ const MultiViewPage = ({ sessionId }) => {
 
   const {
     searchingStream,
+    searchStatus,
     setSearchingStream,
     setShowSportDropdown,
     searchingNews,
@@ -392,6 +393,7 @@ const MultiViewPage = ({ sessionId }) => {
             onSearchChannel={handleSearchSubmit}
             autoFillProgress={autoFillProgress}
             searchingStream={searchingStream}
+            searchStatus={searchStatus}
             onCancelSearch={cancelSearch}
             onOpenPalette={palette.open}
           />
