@@ -1,5 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import Modal from './Modal';
+import DiagnosticsMiniPlayer from './DiagnosticsMiniPlayer';
+import { useAppContext } from '../contexts/AppContext';
 
 /**
  * Status badge component for overall health
@@ -23,10 +25,16 @@ const StatusBadge = ({ status }) => {
 };
 
 /**
- * Individual test result row
+ * Individual test result row — now with a Preview button that
+ * expands a small mpegts.js player below the row. ffprobe can only
+ * verify that bytes are flowing; the actual frames may be an
+ * "Account expired" splash from the upstream. The preview is the
+ * only way to catch that case before the user adds the channel to
+ * the grid and discovers it the hard way.
  */
-const TestResultRow = ({ result }) => {
-  const statusIcon = result.status === 'passed' ? (
+const TestResultRow = ({ result, sessionId, isOpen, onTogglePreview }) => {
+  const passed = result.status === 'passed';
+  const statusIcon = passed ? (
     <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
     </svg>
@@ -36,24 +44,87 @@ const TestResultRow = ({ result }) => {
     </svg>
   );
 
+  // Preview is only meaningful when the test passed (ffprobe handshake
+  // succeeded) — for failed rows, the proxy will hit the same
+  // failure mode and frustrate the user. We still show the button
+  // disabled with a tooltip explaining why.
+  const canPreview = passed && result.channelId && result.sourceId && sessionId;
+
   return (
-    <div className={`flex items-start gap-3 p-3 rounded-lg ${result.status === 'passed' ? 'bg-emerald-500/10' : 'bg-red-500/10'}`}>
-      <div className="mt-0.5">{statusIcon}</div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-slate-200 truncate">{result.channelName}</span>
-          {result.resolution && (
-            <span className="text-xs bg-slate-700 px-2 py-0.5 rounded text-slate-300">{result.resolution}</span>
+    <div className={`rounded-lg overflow-hidden transition ${passed ? 'bg-emerald-500/[0.07] ring-1 ring-emerald-500/20' : 'bg-red-500/10 ring-1 ring-rose-500/20'}`}>
+      <div className="flex items-start gap-3 p-3">
+        <div className="mt-0.5">{statusIcon}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-slate-200 truncate">{result.channelName}</span>
+            {result.resolution && (
+              <span className="text-xs bg-slate-700 px-2 py-0.5 rounded text-slate-300 font-mono">{result.resolution}</span>
+            )}
+            {result.responseTime != null && (
+              <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                {result.responseTime}ms
+              </span>
+            )}
+          </div>
+          <div className="text-sm text-slate-400">{result.category}</div>
+          {result.error && (
+            <div className="text-sm text-red-400 mt-1 break-words">{result.error}</div>
           )}
         </div>
-        <div className="text-sm text-slate-400">{result.category}</div>
-        {result.error && (
-          <div className="text-sm text-red-400 mt-1">{result.error}</div>
-        )}
-        {result.responseTime && (
-          <div className="text-xs text-slate-500 mt-1">{result.responseTime}ms</div>
-        )}
+
+        {/* Preview toggle — separate visual treatment so it doesn't
+            blend into the green/red row chrome. Outlined cyan since
+            cyan is this app's "open/inspect" accent. */}
+        <button
+          type="button"
+          onClick={() => canPreview && onTogglePreview?.()}
+          disabled={!canPreview}
+          title={
+            !passed                      ? 'Preview unavailable — test failed, the proxy will hit the same error' :
+            !result.channelId            ? 'Preview unavailable — missing channel data' :
+            !sessionId                   ? 'Preview unavailable — open the channels page once to start a session' :
+            isOpen                       ? 'Hide preview' :
+                                           'Preview this channel'
+          }
+          className={`flex-shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-mono uppercase tracking-[0.14em] transition ${
+            !canPreview
+              ? 'border-slate-800 bg-slate-900/40 text-slate-700 cursor-not-allowed'
+              : isOpen
+                ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/20'
+                : 'border-slate-700 bg-slate-900/60 text-slate-300 hover:border-cyan-500/40 hover:text-cyan-200 hover:bg-cyan-500/10'
+          }`}
+        >
+          {isOpen ? (
+            <>
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 12H5" />
+              </svg>
+              Hide
+            </>
+          ) : (
+            <>
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+              Preview
+            </>
+          )}
+        </button>
       </div>
+
+      {/* Inline player — only mounts when expanded so the mpegts.js
+          load + proxy ffprobe is on-demand, not eager. */}
+      {isOpen && canPreview && (
+        <div className="px-3 pb-3">
+          <DiagnosticsMiniPlayer
+            sessionId={sessionId}
+            channelId={result.channelId}
+            sourceId={result.sourceId}
+            channelName={result.channelName}
+            onClose={onTogglePreview}
+          />
+        </div>
+      )}
     </div>
   );
 };
@@ -98,6 +169,25 @@ const ErrorBreakdown = ({ breakdown, total }) => {
  * Shows detailed stream health information for troubleshooting
  */
 const StreamDiagnosticsModal = ({ isOpen, onClose, diagnostics, sourceName }) => {
+  // Session ID lives at the app root; the resilient stream proxy
+  // requires it on the path. We DON'T early-return on missing
+  // sessionId — the modal is still useful for reading ffprobe
+  // results — but the Preview button disables itself in that case
+  // with a helpful tooltip pointing the user at the channels page
+  // (which creates a session).
+  const { sessionId } = useAppContext();
+  // Single-row preview at a time — opening another row tears down
+  // the previous mpegts.js instance, which avoids stacking two live
+  // upstream connections against the provider.
+  const [previewRowIndex, setPreviewRowIndex] = useState(null);
+
+  // Reset preview when the modal closes/reopens so we don't auto-
+  // resume the last channel when the user opens a fresh diagnostics
+  // run for a different account.
+  React.useEffect(() => {
+    if (!isOpen) setPreviewRowIndex(null);
+  }, [isOpen]);
+
   if (!diagnostics) return null;
 
   const passRate = diagnostics.tested > 0
@@ -191,10 +281,23 @@ const StreamDiagnosticsModal = ({ isOpen, onClose, diagnostics, sourceName }) =>
 
         {/* Individual Test Results */}
         <div className="bg-slate-800 rounded-xl p-4">
-          <h4 className="text-sm font-medium text-slate-300 mb-3">Test Results</h4>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-sm font-medium text-slate-300">Test Results</h4>
+            <span className="text-[10.5px] text-slate-500 font-mono">
+              Tap <span className="text-cyan-300">Preview</span> on any row to watch the live frames
+            </span>
+          </div>
           <div className="space-y-2">
             {diagnostics.results.map((result, idx) => (
-              <TestResultRow key={idx} result={result} />
+              <TestResultRow
+                key={idx}
+                result={result}
+                sessionId={sessionId}
+                isOpen={previewRowIndex === idx}
+                onTogglePreview={() =>
+                  setPreviewRowIndex((cur) => (cur === idx ? null : idx))
+                }
+              />
             ))}
           </div>
         </div>

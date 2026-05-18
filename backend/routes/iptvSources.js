@@ -480,16 +480,30 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         let categories;
 
         if (source.type === 'xtream') {
-            // 1. Fetch fresh channels from Xtream API (force refresh to bypass cache)
+            // 1. Fetch fresh channels from Xtream API (force refresh to bypass cache).
+            // Pipe the service's onProgress callback into our logger so
+            // the log stream shows "still working — fetching, parsing,
+            // streaming N rows…" instead of going silent for minutes.
+            // The user reported "I don't see backend logs doing anything";
+            // this fixes that.
+            logger.info(`[REFRESH] Source ${sourceId}: step 1/3 — fetching channels from Xtream API`);
+            const xtreamStartedAt = Date.now();
             channelsResult = await epgService.loadXtreamEPG(
                 source.url,
                 source.username,
                 source.password,
                 {
-                    onProgress: () => {}, // No-op progress callback
+                    onProgress: (progress) => {
+                        if (progress && progress.message) {
+                            logger.info(`[REFRESH] Source ${sourceId}: ${progress.message}`);
+                        }
+                    },
                     maxChannelsToProcess: 0, // No limit
                     forceRefresh: true // Force fresh fetch from API, bypass cache
                 }
+            );
+            logger.info(
+                `[REFRESH] Source ${sourceId}: fetched ${channelsResult.channels?.length || 0} channels in ${Date.now() - xtreamStartedAt}ms`
             );
 
             if (!channelsResult.success || !channelsResult.channels) {
@@ -664,31 +678,41 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             logger.warn(`Filtered out ${filteredCount} channels with null/empty names`);
         }
 
-        // Cancel check + cancel-aware saveChannels. The 100-batch INSERT
-        // loop for 50k+ channels takes 10-15 min thanks to the pg_trgm
-        // GIN index, so:
-        //   1. If cancel arrives BEFORE we get here, skip the whole
-        //      thing — existing channels stay intact in the DB.
-        //   2. If cancel arrives MID-loop, saveChannels polls
-        //      `isCancelled()` between batches and returns early
-        //      ({ cancelled: true, saved: N }). The remaining batches
-        //      never fire. We can't tear down an in-flight INSERT
-        //      statement (Postgres owns that), but the next batch is
-        //      typically 2-5 seconds away.
+        // Detached work — keep going even if the client socket has
+        // already closed. Dev-mode Vite/StrictMode + the http-proxy
+        // middleware sporadically drop the socket while the backend
+        // is still mid-fetch; previously we honoured that disconnect
+        // and aborted, which left the user staring at a frozen
+        // spinner because the work was killed seconds after start.
+        // The new behavior: log the disconnect for diagnostics, but
+        // finish the save anyway. The frontend reads the result by
+        // polling getUserSources() after the click — that path is
+        // resilient to a dropped socket.
         if (clientGone) {
-            logger.info(`[REFRESH] Source ${sourceId}: cancelled by client before saveChannels — leaving existing data intact`);
-            return;
+            logger.warn(
+                `[REFRESH] Source ${sourceId}: client disconnected during refresh — continuing anyway so the result lands in the DB`
+            );
         }
+        logger.info(`[REFRESH] Source ${sourceId}: step 3/3 — saving ${dbChannels.length} channels to DB`);
+        const saveStartedAt = Date.now();
+        // Pass a never-cancelled probe so saveChannels runs to
+        // completion. We still log if the client is gone (above) so
+        // it's visible in diagnostics, but we don't act on it.
         const saveResult = await iptvDatabaseService.saveChannels(
             sourceId,
             dbChannels,
-            { isCancelled: () => clientGone },
+            { isCancelled: () => false },
         );
         if (saveResult && saveResult.cancelled) {
+            // Should be unreachable now, but keep the branch so a
+            // future caller passing a real isCancelled probe still
+            // behaves correctly.
             logger.info(`[REFRESH] Source ${sourceId}: cancelled mid-saveChannels after ${saveResult.saved}/${dbChannels.length}`);
             return;
         }
-        logger.info(`Saved ${dbChannels.length} channels for source ${sourceId}`);
+        logger.info(
+            `[REFRESH] Source ${sourceId}: saved ${dbChannels.length} channels in ${Date.now() - saveStartedAt}ms`
+        );
 
         // Lookup server location if not already set
         let locationUpdate = '';
@@ -720,14 +744,30 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         const updatedSource = await iptvDatabaseService.getUserSources(userId, null);
         const refreshedSource = updatedSource.find(s => s.id === parseInt(sourceId));
 
-        res.json({
-            success: true,
-            message: 'Channels and account information refreshed successfully',
-            channelCount: dbChannels.length,
-            categoryCount: categories.length,
-            accountInfo,
-            source: refreshedSource // Include updated source with channel count
-        });
+        // If the socket already died (Vite/StrictMode disconnect), the
+        // DB write is the user's only signal that the refresh completed
+        // — log the final outcome so it's visible in the log stream,
+        // then try to respond. Express will silently no-op the write
+        // when the response is detached.
+        logger.info(
+            `[REFRESH] Source ${sourceId}: complete — ${dbChannels.length} channels, ${categories.length} categories${clientGone ? ' (client had disconnected; DB updated regardless)' : ''}`
+        );
+        if (!res.writableEnded) {
+            try {
+                res.json({
+                    success: true,
+                    message: 'Channels and account information refreshed successfully',
+                    channelCount: dbChannels.length,
+                    categoryCount: categories.length,
+                    accountInfo,
+                    source: refreshedSource
+                });
+            } catch (e) {
+                // Socket gone — frontend is polling getUserSources()
+                // and will see the result. Don't crash on EPIPE.
+                logger.debug(`[REFRESH] Source ${sourceId}: response send failed (socket closed): ${e.message}`);
+            }
+        }
     } catch (error) {
         logger.error(`Error refreshing source data: ${error.message}`);
 
@@ -1011,6 +1051,14 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
         for (const testChannel of channelsToTest) {
             streamDiagnostics.tested++;
             const result = {
+                // Identity — exposed so the frontend can play the
+                // channel back through the resilient proxy for visual
+                // verification. ffprobe says the stream is reachable;
+                // a human eye is the only thing that can tell if the
+                // upstream is returning an "account expired" splash
+                // frame instead of real content.
+                channelId: testChannel.channel_id,
+                sourceId: parseInt(sourceId),
                 channelName: testChannel.name,
                 category: testChannel.group_title || 'Unknown',
                 status: 'unknown',

@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import EditCredentialsModal from './EditCredentialsModal';
 import {
   ACCOUNT_GRID_TEMPLATE,
@@ -150,6 +150,35 @@ const AccountRow = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  // Locks the Delete button while the request is in flight. Without
+  // this, the parent's notification toast was the only feedback and
+  // the button stayed clickable — users (rightly) hammered it because
+  // nothing on the row changed for ~1s after the click. Each click
+  // fired another DELETE on the backend; logs showed `Deleted source
+  // X for user Y` repeating 5-6× per attempt.
+  const [isDeleting, setIsDeleting] = useState(false);
+  // Live elapsed-time counter while the row is refreshing — gives the
+  // user something to watch instead of staring at a frozen icon and
+  // wondering "did this actually do anything?". Resets when the
+  // refresh ends.
+  const [refreshElapsedMs, setRefreshElapsedMs] = useState(0);
+  // True when this row is doing refresh work — either the local
+  // ActionButton state (single-source click) OR the page-level
+  // sourceRefreshStatus marker (used by both flows now).
+  const isRefreshActive = isRefreshing || refreshStatus === 'loading';
+
+  useEffect(() => {
+    if (!isRefreshActive) {
+      setRefreshElapsedMs(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    setRefreshElapsedMs(0);
+    const id = setInterval(() => {
+      setRefreshElapsedMs(Date.now() - startedAt);
+    }, 250);
+    return () => clearInterval(id);
+  }, [isRefreshActive]);
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef(null);
   const [showEditCredentials, setShowEditCredentials] = useState(false);
@@ -209,8 +238,18 @@ const AccountRow = ({
   };
 
   const handleDelete = async () => {
-    await onDelete?.(source.id);
-    setShowDeleteConfirm(false);
+    if (isDeleting) return; // hard guard against double-fire
+    setIsDeleting(true);
+    try {
+      await onDelete?.(source.id);
+      // Parent will unmount this row on success, so the setState
+      // below may never commit — but if the delete failed and the
+      // row stays mounted, we need to flip the lock back so the
+      // user can retry.
+      setShowDeleteConfirm(false);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleRefresh = async () => {
@@ -309,19 +348,37 @@ const AccountRow = ({
       )}
 
       {showDeleteConfirm && (
-        <div className="mt-4 flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
-          <span className="text-xs text-red-200 flex-1">Delete this account? This cannot be undone.</span>
+        <div className={`mt-4 flex items-center gap-2 rounded-md border px-3 py-2 transition ${
+          isDeleting
+            ? 'border-red-500/60 bg-red-500/15'
+            : 'border-red-500/40 bg-red-500/10'
+        }`}>
+          <span className="text-xs text-red-200 flex-1">
+            {isDeleting ? 'Deleting account…' : 'Delete this account? This cannot be undone.'}
+          </span>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); handleDelete(); }}
-            className="inline-flex items-center rounded-md bg-red-500/80 hover:bg-red-500 px-2.5 py-1 text-xs font-semibold text-white"
+            disabled={isDeleting}
+            className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-semibold text-white transition ${
+              isDeleting
+                ? 'bg-red-700/70 cursor-wait'
+                : 'bg-red-500/80 hover:bg-red-500'
+            }`}
           >
-            Delete
+            {isDeleting && (
+              <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {isDeleting ? 'Deleting…' : 'Delete'}
           </button>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); setShowDeleteConfirm(false); }}
-            className="inline-flex items-center rounded-md border border-slate-700 bg-slate-900 hover:bg-slate-800 px-2.5 py-1 text-xs text-slate-300"
+            disabled={isDeleting}
+            className="inline-flex items-center rounded-md border border-slate-700 bg-slate-900 hover:bg-slate-800 px-2.5 py-1 text-xs text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
@@ -506,7 +563,11 @@ const AccountRow = ({
             {copied ? icons.check : icons.copy}
           </button>
 
-          <div className="flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 focus-within:opacity-100 transition-opacity">
+          <div className={`flex items-center gap-0.5 ${
+            isRefreshActive || isTesting
+              ? 'opacity-100'
+              : 'opacity-0 group-hover/row:opacity-100 focus-within:opacity-100'
+          } transition-opacity`}>
             {(source.type === 'xtream' || source.type === 'stalker') && (
               <>
                 <ActionButton onClick={handleRefresh} disabled={isRefreshing || isTesting} spinning={isRefreshing} title="Refresh">
@@ -548,6 +609,46 @@ const AccountRow = ({
           </span>
         </div>
       </div>
+
+      {/* Refreshing banner — unmissable status strip directly below
+          the row body. Replaces the "tiny rotating SVG inside a
+          hover-hidden button" feedback that left users wondering if
+          the refresh was even running. The animated stripe + live
+          elapsed-time counter gives a constant visual cue that the
+          backend is doing work. */}
+      {isRefreshActive && (
+        <div
+          className="relative flex items-center gap-3 px-5 py-2 bg-blue-500/[0.07] border-t border-blue-500/20 overflow-hidden"
+          aria-live="polite"
+        >
+          {/* Indeterminate progress stripe — diagonal bands that
+              translate continuously, the universal "still working"
+              signal. Pointer-events:none so the row clicks land. */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-30 mv-refresh-stripe"
+            style={{
+              backgroundImage:
+                'repeating-linear-gradient(-45deg, rgba(59,130,246,0.35) 0 12px, transparent 12px 24px)',
+              backgroundSize: '34px 100%'
+            }}
+          />
+          {/* Pulsing LED */}
+          <span className="relative inline-flex items-center justify-center flex-shrink-0">
+            <span className="absolute inline-flex h-3 w-3 rounded-full bg-blue-400 opacity-60 animate-ping" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-blue-300 shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
+          </span>
+          <span className="relative font-mono text-[11px] uppercase tracking-[0.2em] text-blue-200 font-semibold">
+            Refreshing
+          </span>
+          <span className="relative font-mono text-[11px] text-blue-300/80 truncate">
+            Fetching channels &amp; categories from {source.type === 'stalker' ? 'Stalker portal' : 'Xtream API'}…
+          </span>
+          <span className="relative ml-auto font-mono text-[11px] tabular-nums text-blue-200 flex-shrink-0">
+            {(refreshElapsedMs / 1000).toFixed(1)}s
+          </span>
+        </div>
+      )}
 
       {expanded && renderExpanded()}
 

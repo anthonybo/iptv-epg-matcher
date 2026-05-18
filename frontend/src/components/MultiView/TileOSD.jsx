@@ -229,6 +229,8 @@ const TileOSD = ({
                 <circle cx="19" cy="12" r="1.5" />
               </svg>
             </OSDButton>
+
+            {/* Removed — moved out so this map keeps the right anchor. */}
             {overflowOpen && (
               <div
                 onClick={(e) => e.stopPropagation()}
@@ -258,20 +260,32 @@ const TileOSD = ({
                     </svg>
                   }
                 />
-                <OverflowItem
-                  onClick={() => { onRemove?.(); setOverflowOpen(false); }}
-                  label="Remove tile"
-                  hint="Take this stream off the grid"
-                  color="rose"
-                  icon={
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  }
-                />
               </div>
             )}
           </div>
+
+          {/* Hairline separator before the destructive close action so
+              it visually reads as its own group rather than another
+              setting toggle. */}
+          <span aria-hidden className="mx-0.5 h-4 w-px bg-slate-700/70" />
+
+          {/* Dedicated REMOVE TILE button — primary action gets a
+              first-class affordance rather than being buried under
+              the overflow. Rose-toned so the destructive intent reads
+              at a glance; the icon rotates -90° on hover for a small
+              "this will eject" cue. */}
+          {onRemove && (
+            <OSDButton
+              onClick={(e) => { e.stopPropagation(); onRemove?.(); }}
+              title="Remove tile from grid"
+              color="rose"
+              aria-label="Remove tile"
+            >
+              <svg className="w-3.5 h-3.5 transition group-hover:rotate-90" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </OSDButton>
+          )}
         </div>
       </div>
     </div>

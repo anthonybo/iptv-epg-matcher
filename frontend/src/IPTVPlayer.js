@@ -64,7 +64,8 @@ const IPTVPlayer = ({
   skipRecovery = false, // When true, skip retry logic (for auto-test mode)
   onStreamPlaying = null, // Callback when stream starts playing successfully
   onStreamError = null, // Callback when stream fails (after skipRecovery or exhausted retries)
-  onStreamDead = null // Callback when stream is dead and needs alternative (for multi-view auto-recovery)
+  onStreamDead = null, // Callback when stream is dead and needs alternative (for multi-view auto-recovery)
+  onVideoElement = null // Callback(videoEl|null) — fires when the underlying <video> ref changes so external code (e.g. commercial detector) can attach Web Audio + canvas analyzers
 }) => {
   // Determine if we should use the resilient proxy
   // Auto mode: use resilient proxy in theatre mode (multi-view) by default
@@ -189,6 +190,24 @@ const IPTVPlayer = ({
       if (Number.isFinite(v)) videoElementRef.current.volume = v;
     }
   }, [volume, videoElementKey]);
+
+  // Expose the current <video> element to consumers (commercial
+  // detector etc.). Fires every time the player reinitializes (which
+  // bumps videoElementKey), and once with null on unmount so the
+  // consumer can release Web Audio + canvas resources.
+  //
+  // We keep onVideoElement in a ref so identity churn from the parent
+  // (e.g. inline arrow callbacks) doesn't cause the effect to re-run
+  // every render — that would teardown + rebuild the audio chain
+  // constantly and lose audio samples.
+  const onVideoElementRef = useRef(onVideoElement);
+  useEffect(() => { onVideoElementRef.current = onVideoElement; }, [onVideoElement]);
+  useEffect(() => {
+    const cb = onVideoElementRef.current;
+    if (!cb) return undefined;
+    cb(videoElementRef.current || null);
+    return () => onVideoElementRef.current?.(null);
+  }, [videoElementKey]);
 
   // Initialize component
   useEffect(() => {

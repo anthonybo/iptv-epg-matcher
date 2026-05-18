@@ -102,20 +102,40 @@ router.post('/channel-candidates', async (req, res) => {
       return `$${params.length}`;
     };
 
-    // SQL filter: name must contain the primary query OR any of its
-    // tokens OR any expanded alias. The trgm GIN index from migration
-    // 023 makes these ILIKEs fast even on the 1.13M-row table.
+    // SQL filter: name must contain the full query phrase OR any
+    // expanded alias. We deliberately do NOT OR in individual tokens
+    // — for a user with ~1M channels, a token like "nhl" or
+    // "network" matches tens of thousands of rows and the trgm
+    // index's BitmapOr explodes the working set; resolving 67-source
+    // JOIN + sort over that set used to push response times past 5
+    // minutes. Instead, the AND-all-tokens fallback below catches
+    // out-of-order phrasings ("ESPN NHL" vs "NHL ESPN") without the
+    // selectivity blowup.
     const orParts = [];
     const seenLikes = new Set();
     const orTerms = [
       queryLower,
-      ...queryTokens,
       ...expandedAliases.map((a) => a.toLowerCase())
     ];
     for (const tok of orTerms) {
-      if (!tok || seenLikes.has(tok)) continue;
+      if (!tok || tok.length < 3 || seenLikes.has(tok)) continue;
       seenLikes.add(tok);
       orParts.push(`c.name ILIKE ${placeholder(`%${tok}%`)}`);
+    }
+
+    // AND-all-tokens fallback for multi-token queries. Requires every
+    // ≥3-char token to appear somewhere in the name (in any order).
+    // This catches "NHL Network HD", "USA NHL Network", and other
+    // permutations that the bare phrase ILIKE misses, while still
+    // being trgm-indexed and selective (each token narrows the set).
+    if (queryTokens.length > 1) {
+      const longTokens = queryTokens.filter((t) => t.length >= 3);
+      if (longTokens.length >= 2) {
+        const andClauses = longTokens.map(
+          (t) => `c.name ILIKE ${placeholder(`%${t}%`)}`
+        );
+        orParts.push(`(${andClauses.join(' AND ')})`);
+      }
     }
 
     let sourceExclusion = '';
@@ -158,7 +178,18 @@ router.post('/channel-candidates', async (req, res) => {
       LIMIT ${limitPh}
     `;
 
-    const { rows } = await postgresService.query(sql, params);
+    // Hard ceiling so a pathological pattern can never tie up a
+    // server-side worker for minutes. 5s is generous given the trgm
+    // index — previous 5-minute response times were a query-shape
+    // problem (low-selectivity tokens OR'd together), but the
+    // timeout is a belt-and-braces guard against future regressions.
+    // SET LOCAL only takes effect inside a transaction, so we use
+    // the transaction wrapper to scope it correctly.
+    const rows = await postgresService.transaction(async (client) => {
+      await client.query('SET LOCAL statement_timeout = 5000');
+      const result = await client.query(sql, params);
+      return result.rows;
+    });
 
     // Dedupe by (lower(name), host, account). Earlier this was just
     // (name, host) which collapsed a user's 5 xtream accounts on the
@@ -278,6 +309,20 @@ router.post('/channel-candidates', async (req, res) => {
       candidates
     });
   } catch (error) {
+    // Postgres surfaces statement_timeout cancellations as a query
+    // with code "57014". Treat those as a soft failure with no
+    // candidates so the picker UI shows "no matches" instead of an
+    // error banner — the user's next attempt at a more specific
+    // query usually resolves it.
+    if (error.code === '57014') {
+      logger.warn(`[Channel Candidates] query="${searchQuery}" timed out (>5s)`);
+      return res.json({
+        success: true,
+        query: searchQuery,
+        candidates: [],
+        timedOut: true
+      });
+    }
     logger.error('[Channel Candidates] failed:', error);
     return res.status(500).json({
       success: false,

@@ -15,23 +15,18 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 
 /**
- * FavoritesPanel — slide-in management panel for favorites.
- *
- * Rendered to the right of the page rail, 320px wide, full page
- * height. Slides in with `mv-anim-panel-in` and dims the tile grid
- * behind it via a click-to-close backdrop.
+ * FavoritesPanel — body content for the favorites drawer. Rendered
+ * inside <DrawerShell>; this component is just the filter input +
+ * sortable list. The drawer chrome (header, minimize, close) lives
+ * one layer up.
  *
  * Capabilities the slim TopBar strip doesn't have:
  *   - Filter by name / host / account
  *   - Drag-to-reorder via @dnd-kit
- *   - Per-row metadata (play count, last played)
  *   - Ghost preset slot empty state
- *
- * Click a row = play (same fast-path as the strip). The X removes.
  */
 const FavoritesPanel = ({
   isOpen,
-  onClose,
   favorites = [],
   streams = [],
   onPlay,
@@ -49,14 +44,6 @@ const FavoritesPanel = ({
   useEffect(() => {
     setOrderedIds(favorites.map((f) => f.id));
   }, [favorites]);
-
-  // Esc closes.
-  useEffect(() => {
-    if (!isOpen) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') onClose?.(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, onClose]);
 
   // Live keys (sourceId::channelId) → which favorites are currently
   // on screen. We render a "Live" badge so the user doesn't waste a
@@ -124,54 +111,10 @@ const FavoritesPanel = ({
   if (!isOpen) return null;
 
   return (
-    <>
-      {/* Backdrop. Click outside the panel to dismiss. The rail
-          itself stays visible — only the tiles get dimmed. */}
-      <div
-        className="absolute inset-0 z-30 bg-slate-950/40 backdrop-blur-[2px]"
-        onClick={onClose}
-        aria-hidden
-      />
-
-      <aside
-        role="dialog"
-        aria-label="Favorites"
-        className="absolute top-0 left-0 bottom-0 z-40 w-[320px] flex flex-col border-r border-slate-800/80 bg-slate-950/95 backdrop-blur-md shadow-[12px_0_36px_-12px_rgba(0,0,0,0.7)] mv-anim-panel-in"
-      >
-        <span aria-hidden className="pointer-events-none absolute inset-y-0 right-0 w-px bg-gradient-to-b from-amber-400/30 via-amber-400/10 to-transparent" />
-
-        {/* Header */}
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800/80">
-          <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 text-amber-300 flex-shrink-0">
-            <path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" />
-          </svg>
-          <h2 className="font-mono text-[11px] font-bold uppercase tracking-[0.22em] text-slate-200 flex-1">
-            Favorites
-          </h2>
-          <span
-            className={`relative inline-flex items-center px-1.5 py-0.5 rounded-sm font-mono text-[10px] tabular-nums tracking-tight border ${
-              favorites.length > 0
-                ? 'text-amber-200 border-amber-500/30 bg-amber-500/[0.04] shadow-[inset_0_1px_2px_rgba(0,0,0,0.55),0_0_8px_rgba(251,191,36,0.12)]'
-                : 'text-slate-600 border-slate-800 bg-slate-950 shadow-[inset_0_1px_2px_rgba(0,0,0,0.55)]'
-            }`}
-          >
-            {String(favorites.length).padStart(2, '0')}
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 rounded-md text-slate-500 hover:bg-slate-800 hover:text-slate-100 transition"
-            title="Close (Esc)"
-          >
-            <svg className="w-3.5 h-3.5 transition hover:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
+    <div className="flex-1 min-h-0 flex flex-col">
         {/* Filter */}
         {favorites.length > 0 && (
-          <div className="px-3 py-2 border-b border-slate-800/80">
+          <div className="flex-shrink-0 px-3 py-2 border-b border-slate-800/80">
             <div className={`relative rounded-md border transition ${
               filter
                 ? 'border-cyan-500/30 bg-slate-900'
@@ -200,7 +143,7 @@ const FavoritesPanel = ({
           ) : filtered.length === 0 ? (
             <div className="px-3 py-8 text-center text-[11px] text-slate-500">
               No favorites match
-              <div className="font-mono text-cyan-300/80 mt-1">"{filter}"</div>
+              <div className="font-mono text-cyan-300/80 mt-1">&ldquo;{filter}&rdquo;</div>
             </div>
           ) : (
             <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -233,12 +176,11 @@ const FavoritesPanel = ({
         </div>
 
         {/* Footer hint */}
-        <div className="px-3 py-2 border-t border-slate-800/80 flex items-center justify-between text-[9px] uppercase tracking-[0.18em] text-slate-600 font-mono">
+        <div className="flex-shrink-0 px-3 py-2 border-t border-slate-800/80 flex items-center justify-between text-[9px] uppercase tracking-[0.18em] text-slate-600 font-mono">
           <span>Drag to reorder · click to play</span>
           <kbd className="px-1 py-px rounded bg-slate-900 border border-slate-800 normal-case tracking-normal text-slate-500">Esc</kbd>
         </div>
-      </aside>
-    </>
+    </div>
   );
 };
 
@@ -420,4 +362,4 @@ const GhostSlots = () => (
   </div>
 );
 
-export default FavoritesPanel;
+export default React.memo(FavoritesPanel);

@@ -68,7 +68,7 @@ function fmtDate(iso) {
   }
 }
 
-const BroadcasterCoverageModal = ({ isOpen, onClose, onTestCode }) => {
+const BroadcasterCoverageModal = ({ isOpen, onTestCode, onStatusChange }) => {
   const [data, setData] = useState({ rows: [], summary: null });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -153,29 +153,33 @@ const BroadcasterCoverageModal = ({ isOpen, onClose, onTestCode }) => {
     });
   }, [data.rows, statusFilter, textFilter]);
 
+  // Report live status to the dock chip. Don't depend on
+  // `onStatusChange` — its identity churns every render and would
+  // loop with the resulting setStatus side-effect.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!onStatusChange) return;
+    if (loading) onStatusChange({ kind: 'working', text: 'Loading…' });
+    else if (error) onStatusChange({ kind: 'error', text: 'Error' });
+    else {
+      const unaliased = data.summary?.unaliased_codes || 0;
+      if (unaliased > 0) onStatusChange({ kind: 'warn', text: `${unaliased} unaliased` });
+      else onStatusChange({ kind: 'idle', text: `${data.rows.length} codes` });
+    }
+  }, [loading, error, data]);
+
   if (!isOpen) return null;
 
   const s = data.summary;
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-5xl w-full max-h-[88vh] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-700">
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <h2 className="text-xl font-semibold text-slate-100">Broadcaster Coverage</h2>
-              <p className="mt-1 text-xs text-slate-400">
-                Every broadcaster code ESPN has emitted, cross-checked against our alias table + runtime match stats.
-                Sorted by "most actionable to fix" first.
-              </p>
-            </div>
-            <button onClick={onClose} className="text-slate-400 hover:text-slate-200" aria-label="Close">
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
+    <div className="flex-1 min-h-0 flex flex-col">
+        {/* Sub-header: summary + filters */}
+        <div className="flex-shrink-0 px-4 py-3 border-b border-slate-800/60 space-y-3">
+          <p className="text-[10.5px] text-slate-500 leading-snug">
+            Every broadcaster code ESPN has emitted, cross-checked against our alias table + runtime match stats.
+            Sorted by &ldquo;most actionable to fix&rdquo; first.
+          </p>
 
           {s && (
             <div className="mt-3 flex flex-wrap gap-3 text-[11px]">
@@ -405,15 +409,14 @@ const BroadcasterCoverageModal = ({ isOpen, onClose, onTestCode }) => {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-700 bg-slate-900/60 text-[11px] text-slate-500 leading-relaxed">
-          <strong>Status legend:</strong>
-          {' '}<em className="text-rose-300">Unaliased</em> = code passes through verbatim (no entry in <code>broadcasterAliases.js</code>; likely false positives).
-          {' '}<em className="text-rose-300">Always fails</em> = every search attempt for this code returned no working channel.
-          {' '}<em className="text-amber-300">Sometimes fails</em> = mixed; might be transient stream outages or borderline aliasing.
-          {' '}<em>Untested</em> = code observed in events but never searched yet.
-          {' '}<em className="text-emerald-300">Works</em> = at least one successful match, no failures.
+        <div className="flex-shrink-0 px-4 py-2.5 border-t border-slate-800/60 bg-slate-900/40 text-[10.5px] text-slate-500 leading-relaxed">
+          <strong className="text-slate-400">Legend:</strong>
+          {' '}<em className="text-rose-300">Unaliased</em> = code passes verbatim.
+          {' '}<em className="text-rose-300">Always fails</em> = every search returned nothing.
+          {' '}<em className="text-amber-300">Sometimes fails</em> = mixed.
+          {' '}<em>Untested</em> = never searched yet.
+          {' '}<em className="text-emerald-300">Works</em> = at least one success, no failures.
         </div>
-      </div>
     </div>
   );
 };
@@ -434,4 +437,4 @@ function Stat({ label, value, tone = 'slate' }) {
   );
 }
 
-export default BroadcasterCoverageModal;
+export default React.memo(BroadcasterCoverageModal);

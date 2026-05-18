@@ -406,6 +406,7 @@ const epgRefreshRoutes = require('./routes/epgRefresh');
 const liveEventsRoutes = require('./routes/liveEvents');
 const multiviewRoutes = require('./routes/multiview');
 const favoritesRoutes = require('./routes/favorites');
+const commercialProfileRoutes = require('./routes/commercialProfile');
 const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
 const userLocationsRoutes = require('./routes/userLocations');
@@ -465,6 +466,7 @@ app.use('/api/epg-refresh', epgRefreshRoutes); // EPG refresh management
 app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 app.use('/api/multiview', multiviewRoutes); // Multiview streams management
 app.use('/api/favorites', favoritesRoutes); // Per-user channel favorites for fast multi-view tile fill
+app.use('/api/commercial-profile', commercialProfileRoutes); // Per-user, per-channel commercial detection profile + FP learning
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news

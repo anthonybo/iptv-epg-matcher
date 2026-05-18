@@ -29,6 +29,12 @@ const MultiViewGrid = ({
   loadingStreams,
   playerType = 'mpegts-player',
   isFavorited,
+  // Commercial detector
+  autoMutedKeys,
+  tileStates,
+  onRegisterVideoElement,
+  onUnregisterVideoElement,
+  onUndoAdMute,
   // Callbacks
   onDragStart,
   onDragEnd,
@@ -154,9 +160,20 @@ const MultiViewGrid = ({
                   quality={streamQualities[streamKey]}
                   isFindingAlternative={findingAlternativeFor && findingAlternativeFor.has && findingAlternativeFor.has(streamKey)}
                   isFavorited={isFavorited ? isFavorited(stream.sourceId, stream.id) : false}
+                  isAutoMuted={Boolean(autoMutedKeys?.has?.(streamKey))}
+                  adSignals={tileStates?.[streamKey]?.signals
+                    ? Object.entries(tileStates[streamKey].signals).filter(([, v]) => v).map(([k]) => k)
+                    : []}
                   playerType={playerType}
                   onToggleMute={() => onToggleMute(streamKey)}
                   onVolumeChange={onVolumeChange ? (v) => onVolumeChange(`${stream.sourceId}_${stream.id}`, v) : null}
+                  onUndoAdMute={onUndoAdMute ? () => onUndoAdMute(streamKey) : null}
+                  onVideoElement={onRegisterVideoElement
+                    ? (videoEl) => {
+                        if (videoEl) onRegisterVideoElement(streamKey, videoEl, stream);
+                        else onUnregisterVideoElement?.(streamKey);
+                      }
+                    : null}
                   onRefresh={() => onRefresh(stream.id, stream.sourceId)}
                   onFindAlternative={() => onFindAlternative(stream, false)}
                   onFindDifferentGame={() => onFindDifferentGame(stream)}

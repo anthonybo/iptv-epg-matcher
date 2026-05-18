@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ConfirmModal from './components/ConfirmModal';
 import { showToast } from './components/Toast';
 import { useAppContext } from './contexts/AppContext';
@@ -17,7 +17,9 @@ import {
   MultiViewTopBar,
   FavoritesPanel,
   LayoutPanel,
-  CommandPalette
+  CommandPalette,
+  DrawerShell,
+  MultiViewTaskBar
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
@@ -32,6 +34,8 @@ import { useStreamSearch } from './hooks/multiview/useStreamSearch';
 import { useChannelPicker } from './hooks/multiview/useChannelPicker';
 import { useFavorites } from './hooks/multiview/useFavorites';
 import { useCommandPalette } from './hooks/multiview/useCommandPalette';
+import { useCommercialOrchestrator } from './hooks/multiview/useCommercialOrchestrator';
+import usePanelManager from './hooks/multiview/usePanelManager';
 
 /**
  * MultiViewPage — Patchbay-layout multi-stream viewer.
@@ -65,7 +69,12 @@ const MultiViewPage = ({ sessionId }) => {
       avoidDuplicateEvents: true,
       minQuality: 0,
       showLiveScoresTicker: false,
-      playerType: 'mpegts-player'
+      playerType: 'mpegts-player',
+      // Commercial auto-skip — off by default. When enabled, both
+      // audio and logo detection run unless individually disabled.
+      commercialAutoSkip: false,
+      commercialDetectAudio: true,
+      commercialDetectLogo: true
     };
     if (saved) {
       try {
@@ -80,14 +89,32 @@ const MultiViewPage = ({ sessionId }) => {
     return saved || 'grid';
   });
 
-  // ─── Modal visibility (rail icons open these) ──────────────────────
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [showTrendingModal, setShowTrendingModal] = useState(false);
-  const [showAllGamesModal, setShowAllGamesModal] = useState(false);
-  const [showBroadcasterCoverageModal, setShowBroadcasterCoverageModal] = useState(false);
-
-  // ─── Slide-in panel state (only one open at a time) ────────────────
-  const [activePanel, setActivePanel] = useState(null); // 'favorites' | 'layout' | null
+  // ─── Drawer/panel management ───────────────────────────────────────
+  // Each rail icon opens a drawer via the panel manager (search,
+  // trending, allgames, coverage, blacklist, settings, favorites,
+  // layout). One drawer visible at a time; the rest dock in the
+  // bottom taskbar but stay mounted so async work keeps running.
+  const panels = usePanelManager();
+  // Destructure the stable callbacks (useCallback'd inside the hook
+  // with [] deps) so memoised openers below don't churn on every
+  // render — depending on the `panels` object directly would mean
+  // every useCallback we build with it as a dep re-creates each render
+  // (panels is a new object literal even though its methods are
+  // stable references).
+  const {
+    open: openPanel,
+    minimize: minimizePanel,
+    restore: restorePanel,
+    close: closePanel,
+    toggle: togglePanelManager,
+    setStatus: setPanelStatus,
+    isMounted: isPanelMounted,
+    isOpen: isPanelOpen,
+    get: getPanel
+  } = panels;
+  // Ref for the channel picker's filter input so DrawerShell can
+  // refocus it every time the drawer pops back into view.
+  const pickerFocusRef = useRef(null);
 
   // ─── Drag/drop state for tile reordering ───────────────────────────
   const [activeId, setActiveId] = useState(null);
@@ -96,8 +123,6 @@ const MultiViewPage = ({ sessionId }) => {
   // ─── Hooks ─────────────────────────────────────────────────────────
   const {
     blacklistedChannels,
-    showBlacklistModal,
-    setShowBlacklistModal,
     addToBlacklist,
     removeFromBlacklist
   } = useBlacklist();
@@ -131,7 +156,16 @@ const MultiViewPage = ({ sessionId }) => {
     findRandomSportsChannel,
     findRandomAnyChannel,
     handleTickerEventClick
-  } = useStreamFinder({ streams, autoFillSettings, setShowSettingsModal });
+  } = useStreamFinder({
+    streams,
+    autoFillSettings,
+    // useStreamFinder pops settings when local-news fails for lack of
+    // a saved location. Route that through the panel manager.
+    setShowSettingsModal: (v) => {
+      if (v) openPanel('settings', { title: 'Multi-View Settings', spineColor: 'emerald', icon: GEAR_ICON });
+      else closePanel('settings');
+    }
+  });
 
   const {
     showSearchInput,
@@ -173,6 +207,24 @@ const MultiViewPage = ({ sessionId }) => {
     mutedStreams
   });
 
+  // Single entry point for "run a search". Used by:
+  //   - the TopBar's submit (handleSearchSubmit below)
+  //   - the in-drawer search input (Enter / Search button)
+  //
+  // openPanel('search') is idempotent AND restores a minimized panel
+  // back to the open state — that's the bug the user hit before this
+  // wrapper existed: hitting the TopBar search while the drawer was
+  // docked would update the data underneath but never re-surface the
+  // drawer. Now every search routes through here, so the drawer
+  // always pops back into view when fresh results arrive.
+  const performSearch = useCallback(
+    (q) => {
+      openPanel('search', { title: 'Search', spineColor: 'cyan', icon: SEARCH_ICON });
+      openPickerForQuery(q);
+    },
+    [openPanel, openPickerForQuery]
+  );
+
   const {
     favorites,
     loading: favoritesLoading,
@@ -185,6 +237,19 @@ const MultiViewPage = ({ sessionId }) => {
 
   const palette = useCommandPalette();
 
+  // Commercial auto-skip orchestrator — owns detection + mute-swap +
+  // false-positive learning. Disabled until the user opts in via the
+  // settings panel. Sub-toggles let them lean on just audio (sports)
+  // or include logo detection (cable).
+  const commercial = useCommercialOrchestrator({
+    enabled: Boolean(autoFillSettings.commercialAutoSkip),
+    audioEnabled: autoFillSettings.commercialDetectAudio !== false,
+    logoEnabled: autoFillSettings.commercialDetectLogo !== false,
+    streams,
+    mutedStreams,
+    toggleMute
+  });
+
   // ─── Effects ───────────────────────────────────────────────────────
   useEffect(() => { setLayout(calculateLayout(streams.length)); }, [streams.length]);
   useEffect(() => {
@@ -193,8 +258,48 @@ const MultiViewPage = ({ sessionId }) => {
   useEffect(() => {
     localStorage.setItem('multiview_layout_mode', layoutMode);
   }, [layoutMode]);
-  // Close panels when theatre mode flips on — they'd be invisible anyway.
-  useEffect(() => { if (isTheatreMode) setActivePanel(null); }, [isTheatreMode]);
+  // Close all panels when theatre mode flips on — they'd be invisible
+  // anyway, and stale open state would resurface them on exit.
+  useEffect(() => {
+    if (isTheatreMode) {
+      panels.panels.forEach((p) => closePanel(p.id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTheatreMode]);
+
+  // Mirror static counts into panel status so the taskbar chip stays
+  // in sync for panels that don't manage their own status (blacklist,
+  // favorites, layout). setPanelStatus is idempotent so these can
+  // safely fire every render without triggering re-render loops.
+  useEffect(() => {
+    setPanelStatus('blacklist', { kind: 'idle', text: `${blacklistedChannels.length} entries` });
+  }, [blacklistedChannels.length, setPanelStatus]);
+  useEffect(() => {
+    setPanelStatus('favorites', { kind: 'idle', text: `${favorites.length} saved` });
+  }, [favorites.length, setPanelStatus]);
+  useEffect(() => {
+    setPanelStatus('layout', { kind: 'idle', text: `${streams.length} tile${streams.length === 1 ? '' : 's'}` });
+  }, [streams.length, setPanelStatus]);
+
+  // Mirror the picker hook's isOpen into the panel manager so the
+  // picker's openForQuery / openForStream / openEmpty calls (which
+  // each setIsOpen(true) internally) automatically pop the drawer.
+  // When the picker hook's isOpen flips false (close was called), we
+  // also close the drawer — the picker's own X is the only path that
+  // does this, since the modal no longer has its own close button.
+  const pickerHookIsOpen = pickerState.isOpen;
+  useEffect(() => {
+    if (pickerHookIsOpen) {
+      openPanel('search', {
+        title: 'Search',
+        spineColor: 'cyan',
+        icon: SEARCH_ICON
+      });
+    }
+    // We don't auto-close on isOpen→false here because that case
+    // would conflict with the user's own minimize-via-drawer-chrome.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickerHookIsOpen]);
 
   // ─── Wired handlers ────────────────────────────────────────────────
 
@@ -253,15 +358,16 @@ const MultiViewPage = ({ sessionId }) => {
 
   // Header search submit — open the picker so generic queries surface
   // every match rather than auto-adding whichever ffprobe-validates
-  // first.
+  // first. Routes through `performSearch` so a TopBar search ALSO
+  // restores the drawer when it was minimized.
   const handleSearchSubmit = useCallback((e) => {
     e?.preventDefault?.();
     const q = String(searchQuery || '').trim();
     if (q.length < 2) return;
-    openPickerForQuery(q);
+    performSearch(q);
     setSearchQuery('');
     setShowSearchInput(false);
-  }, [searchQuery, openPickerForQuery, setSearchQuery, setShowSearchInput]);
+  }, [searchQuery, performSearch, setSearchQuery, setShowSearchInput]);
 
   // Drag-and-drop tile reordering (preserved from previous design).
   const handleDragStart = useCallback((event) => { setActiveId(event.active.id); }, []);
@@ -290,10 +396,115 @@ const MultiViewPage = ({ sessionId }) => {
     }
   }, [streams]);
 
-  // Panel toggle — clicking the same icon twice closes it.
+  // ─── Panel openers (rail icons + command palette) ──────────────────
+  // Each rail icon → panel.open with the module's descriptor (title,
+  // spine color, icon). Calling .open while a panel is already in the
+  // stack restores it; calling on the currently-open panel keeps it
+  // (no flicker).
+  const openSearchPanel = useCallback(() => {
+    openPanel('search', { title: 'Search', spineColor: 'cyan', icon: SEARCH_ICON });
+    openPickerEmptyHook();
+  }, [openPanel, openPickerEmptyHook]);
+
+  const openTrendingPanel = useCallback(() => {
+    openPanel('trending', { title: 'Trending', spineColor: 'rose', icon: FLAME_ICON });
+  }, [openPanel]);
+
+  const openAllGamesPanel = useCallback(() => {
+    openPanel('allgames', { title: "Today's Slate", spineColor: 'amber', icon: BALL_ICON });
+  }, [openPanel]);
+
+  const openCoveragePanel = useCallback(() => {
+    openPanel('coverage', { title: 'Broadcaster Coverage', spineColor: 'indigo', icon: BROADCAST_ICON });
+  }, [openPanel]);
+
+  const openBlacklistPanel = useCallback(() => {
+    openPanel('blacklist', { title: 'Blacklist', spineColor: 'rose', icon: BAN_ICON });
+  }, [openPanel]);
+
+  const openSettingsPanel = useCallback(() => {
+    openPanel('settings', { title: 'Settings', spineColor: 'emerald', icon: GEAR_ICON });
+  }, [openPanel]);
+
+  const openFavoritesPanel = useCallback(() => {
+    togglePanelManager('favorites', { title: 'Favorites', spineColor: 'amber', icon: HEART_ICON });
+  }, [togglePanelManager]);
+
+  const openLayoutPanel = useCallback(() => {
+    togglePanelManager('layout', { title: 'Layout', spineColor: 'cyan', icon: LAYOUT_ICON });
+  }, [togglePanelManager]);
+
+  // ─── Stable per-panel callback bundles ─────────────────────────────
+  // The inline arrows we were passing to drawer/modal props
+  // (onMinimize, onClose, onStatusChange, onAfterPick) had a fresh
+  // identity every render. React.memo couldn't kick in, so every
+  // page re-render (4Hz from the commercial orchestrator + every
+  // keystroke + every panel state mutation) re-rendered ALL mounted
+  // drawer bodies — which is what was making the search drawer feel
+  // sticky and intercepting clicks on the header's minimize button.
+  // Bind these once per panel id and reuse the references.
+  const onMinimizeSearch    = useCallback(() => minimizePanel('search'),    [minimizePanel]);
+  const onMinimizeTrending  = useCallback(() => minimizePanel('trending'),  [minimizePanel]);
+  const onMinimizeAllGames  = useCallback(() => minimizePanel('allgames'),  [minimizePanel]);
+  const onMinimizeCoverage  = useCallback(() => minimizePanel('coverage'),  [minimizePanel]);
+  const onMinimizeBlacklist = useCallback(() => minimizePanel('blacklist'), [minimizePanel]);
+  const onMinimizeSettings  = useCallback(() => minimizePanel('settings'),  [minimizePanel]);
+  const onMinimizeFavorites = useCallback(() => minimizePanel('favorites'), [minimizePanel]);
+  const onMinimizeLayout    = useCallback(() => minimizePanel('layout'),    [minimizePanel]);
+
+  const onCloseTrending  = useCallback(() => closePanel('trending'),  [closePanel]);
+  const onCloseAllGames  = useCallback(() => closePanel('allgames'),  [closePanel]);
+  const onCloseCoverage  = useCallback(() => closePanel('coverage'),  [closePanel]);
+  const onCloseBlacklist = useCallback(() => closePanel('blacklist'), [closePanel]);
+  const onCloseSettings  = useCallback(() => closePanel('settings'),  [closePanel]);
+  const onCloseFavorites = useCallback(() => closePanel('favorites'), [closePanel]);
+  const onCloseLayout    = useCallback(() => closePanel('layout'),    [closePanel]);
+
+  const onStatusSearch   = useCallback((s) => setPanelStatus('search',   s), [setPanelStatus]);
+  const onStatusTrending = useCallback((s) => setPanelStatus('trending', s), [setPanelStatus]);
+  const onStatusAllGames = useCallback((s) => setPanelStatus('allgames', s), [setPanelStatus]);
+  const onStatusCoverage = useCallback((s) => setPanelStatus('coverage', s), [setPanelStatus]);
+
+  const onVisibleFocusSearch = useCallback(() => pickerFocusRef.current?.focus?.(), []);
+
+  // The in-drawer search calls the same path the TopBar uses, so
+  // both surfaces restore the panel on a fresh query.
+  const onSearchFromPicker = performSearch;
+
+  // Stable picker / test callbacks for each discovery panel. The
+  // searchByName + handleTickerEventClick references are themselves
+  // useCallback'd inside their respective hooks; if they ever start
+  // churning identity, this useMemo wall stops the lag at the door.
+  const onTrendingPick = useCallback(
+    (channel, signal) => searchByName(channel.name, { mode: 'brand', signal }),
+    [searchByName]
+  );
+  const onAllGamesPick = useCallback(
+    async (event, signal) => {
+      await handleTickerEventClick(event, { signal });
+      return true;
+    },
+    [handleTickerEventClick]
+  );
+  const onAllGamesPickBroadcaster = useCallback(
+    (code, signal) => searchByName(code, { mode: 'brand', signal }),
+    [searchByName]
+  );
+  const onCoverageTest = useCallback(
+    (code, signal, aliases) => searchByName(code, { mode: 'brand', signal, aliases }),
+    [searchByName]
+  );
+
+  // Rail's `activePanel` prop expects a single id for the currently
+  // open panel (drives the recessed/active visual state). Map panel
+  // manager's openPanel into that contract.
+  const activePanelId = panels.openPanel?.id || null;
   const togglePanel = useCallback((id) => {
-    setActivePanel((cur) => (cur === id ? null : id));
-  }, []);
+    // Backwards-compatible hook for older rail wiring — favorites
+    // and layout are the only callers via this shape.
+    if (id === 'favorites') openFavoritesPanel();
+    else if (id === 'layout') openLayoutPanel();
+  }, [openFavoritesPanel, openLayoutPanel]);
 
   const setTheatreMode = useCallback((v) => {
     setIsTheatreMode(typeof v === 'function' ? v(isTheatreMode) : v);
@@ -305,13 +516,34 @@ const MultiViewPage = ({ sessionId }) => {
   }, []);
 
   // Search activator from the rail — open the inline TopBar input.
+  // The picker drawer pops as soon as the user submits a query (via
+  // handleSearchSubmit) or types in the drawer's own filter input.
   const openSearch = useCallback(() => setShowSearchInput(true), [setShowSearchInput]);
 
   // "Open picker" rail icon — opens the modal with no query so the
   // user lands on the Favorites tab (or an empty Results tab if no
   // favorites yet). The filter input is ready for typing if they want
   // to search instead.
-  const openPickerEmpty = openPickerEmptyHook;
+  const openPickerEmpty = openSearchPanel;
+
+  // Wrap openForStream so the per-tile "alternate sources" button
+  // opens the drawer too (the picker hook flips its own isOpen,
+  // which the effect mirrors, but we want the descriptor right).
+  const openPickerForStreamPanel = useCallback((stream) => {
+    openPanel('search', {
+      title: stream?.name ? `Alt: ${stream.name}` : 'Alt sources',
+      spineColor: 'cyan',
+      icon: SEARCH_ICON
+    });
+    openPickerForStream(stream);
+  }, [openPanel, openPickerForStream]);
+
+  // Close the search drawer fully — also resets the picker hook
+  // state so the next open starts fresh.
+  const handleSearchClose = useCallback(() => {
+    closePanel('search');
+    pickerState.onClose?.();
+  }, [closePanel, pickerState]);
 
   // ─── Command palette commands ──────────────────────────────────────
   const commands = useMemo(() => [
@@ -322,28 +554,54 @@ const MultiViewPage = ({ sessionId }) => {
     { id: 'random-any', group: 'Find',     label: 'Random any channel',      hint: 'Truly random — anything in your sources', accent: 'violet', icon: <CmdIcon name="grid" />, run: findRandomAnyChannel },
     { id: 'picker',     group: 'Find',     label: 'Open channel picker',     hint: 'Browse your favorites + library', accent: 'cyan', icon: <CmdIcon name="grid" />, run: openPickerEmpty },
     // DISCOVER
-    { id: 'trending',   group: 'Discover', label: 'Trending channels',       hint: 'YT / Twitch / Reddit / Bluesky composite', accent: 'rose', icon: <CmdIcon name="flame" />, run: () => setShowTrendingModal(true) },
-    { id: 'allgames',   group: 'Discover', label: 'All games today',         hint: 'Live, scheduled, and final',  accent: 'emerald', icon: <CmdIcon name="ball" />, run: () => setShowAllGamesModal(true) },
-    { id: 'coverage',   group: 'Discover', label: 'Broadcaster coverage',    hint: 'Alias gaps and discovery report', accent: 'cyan', icon: <CmdIcon name="broadcast" />, run: () => setShowBroadcasterCoverageModal(true) },
+    { id: 'trending',   group: 'Discover', label: 'Trending channels',       hint: 'YT / Twitch / Reddit / Bluesky composite', accent: 'rose', icon: <CmdIcon name="flame" />, run: openTrendingPanel },
+    { id: 'allgames',   group: 'Discover', label: 'All games today',         hint: 'Live, scheduled, and final',  accent: 'emerald', icon: <CmdIcon name="ball" />, run: openAllGamesPanel },
+    { id: 'coverage',   group: 'Discover', label: 'Broadcaster coverage',    hint: 'Alias gaps and discovery report', accent: 'cyan', icon: <CmdIcon name="broadcast" />, run: openCoveragePanel },
     { id: 'news',       group: 'Discover', label: 'Find local news',         hint: 'Random local news station',   accent: 'amber',   icon: <CmdIcon name="news" />, disabled: searchingNews, run: findLocalNews },
     // SAVED
-    { id: 'favorites',  group: 'Saved',    label: 'Open favorites',          hint: 'Slide-in panel for management', accent: 'amber', icon: <CmdIcon name="heart" />, run: () => togglePanel('favorites') },
-    { id: 'blacklist',  group: 'Saved',    label: 'Manage blacklist',        hint: 'Channels excluded from random fill', accent: 'amber', icon: <CmdIcon name="ban" />, run: () => setShowBlacklistModal(true) },
-    { id: 'settings',   group: 'Saved',    label: 'Multi-view settings',     hint: 'Player type, max slots, duplicate rules', accent: 'cyan', icon: <CmdIcon name="gear" />, run: () => setShowSettingsModal(true) },
+    { id: 'favorites',  group: 'Saved',    label: 'Open favorites',          hint: 'Slide-in panel for management', accent: 'amber', icon: <CmdIcon name="heart" />, run: openFavoritesPanel },
+    { id: 'blacklist',  group: 'Saved',    label: 'Manage blacklist',        hint: 'Channels excluded from random fill', accent: 'amber', icon: <CmdIcon name="ban" />, run: openBlacklistPanel },
+    { id: 'settings',   group: 'Saved',    label: 'Multi-view settings',     hint: 'Player type, max slots, duplicate rules', accent: 'cyan', icon: <CmdIcon name="gear" />, run: openSettingsPanel },
     // VIEW
-    { id: 'layout',     group: 'View',     label: 'Change layout',           hint: 'Grid / featured / dual / theatre', accent: 'cyan', icon: <CmdIcon name="layout" />, run: () => togglePanel('layout') },
+    { id: 'layout',     group: 'View',     label: 'Change layout',           hint: 'Grid / featured / dual / theatre', accent: 'cyan', icon: <CmdIcon name="layout" />, run: openLayoutPanel },
     { id: 'theatre',    group: 'View',     label: isTheatreMode ? 'Exit theatre mode' : 'Enter theatre mode', hint: 'Hide all chrome', accent: 'amber', icon: <CmdIcon name="theatre" />, disabled: streams.length === 0, run: () => setTheatreMode((v) => !v) },
     { id: 'ticker',     group: 'View',     label: autoFillSettings.showLiveScoresTicker ? 'Hide live scores ticker' : 'Show live scores ticker', hint: 'Bottom-edge running ticker', accent: 'emerald', icon: <CmdIcon name="ticker" />, run: toggleTicker },
     { id: 'clear',      group: 'View',     label: 'Clear all streams',       hint: 'Remove every tile', accent: 'rose', icon: <CmdIcon name="trash" />, disabled: streams.length === 0, run: () => setShowClearConfirm(true) }
   ], [
     openSearch, handleAutoFill, openPickerEmpty, searchingNews, findLocalNews,
     findRandomSportsChannel, findRandomAnyChannel,
-    togglePanel, isTheatreMode, streams.length, autoFillSettings.showLiveScoresTicker,
-    toggleTicker, setShowClearConfirm, setShowBlacklistModal, setShowSettingsModal,
-    setShowAllGamesModal, setShowBroadcasterCoverageModal, setShowTrendingModal, setTheatreMode
+    openTrendingPanel, openAllGamesPanel, openCoveragePanel,
+    openFavoritesPanel, openBlacklistPanel, openSettingsPanel, openLayoutPanel,
+    isTheatreMode, streams.length, autoFillSettings.showLiveScoresTicker,
+    toggleTicker, setShowClearConfirm, setTheatreMode
   ]);
 
   // ─── Render ────────────────────────────────────────────────────────
+  // Layout offsets:
+  //   - Ticker (when on) lives at the very bottom of the viewport,
+  //     full-width, owned by the page wrapper.
+  //   - Vertical dock (TaskBar) lives on the right edge of the
+  //     content column, top to (bottom - ticker).
+  //   - Drawers anchor top-left of the content column. Their bottom
+  //     stops above the ticker; their width is unaffected by the
+  //     dock (the dock overlays them on the right edge, but since
+  //     drawers are 340-580px wide and the dock is 48px, the overlap
+  //     is small and intentional — the dock is "on top of" the
+  //     drawer's far edge, which already has the colored spine).
+  const tickerHeight = autoFillSettings.showLiveScoresTicker ? 48 : 0;
+  // Drawer's top starts BELOW the topbar so the topbar's controls
+  // (favorites strip, inline search input, command palette button)
+  // stay accessible without fighting the drawer for clicks.
+  const drawerTopGap = isTheatreMode ? 0 : 40; // topbar is h-10 = 40px
+  // Drawer's bottom = ticker so its body sits cleanly above the
+  // ticker.
+  const drawerBottomGap = tickerHeight;
+  // Right-side dock width when at least one panel is docked. The
+  // grid reserves this much padding-right so tiles don't extend
+  // under it — the per-tile X-close button in the OSD would
+  // otherwise be unreachable. 48 = MultiViewTaskBar's w-12.
+  const dockWidth = panels.minimizedPanels.length > 0 ? 48 : 0;
+
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden">
       {/* Left rail — page-scoped controls. Hidden in theatre mode for
@@ -353,15 +611,15 @@ const MultiViewPage = ({ sessionId }) => {
           onSearch={openSearch}
           onAutoFill={() => handleAutoFill(null, null)}
           onOpenPicker={openPickerEmpty}
-          onOpenTrending={() => setShowTrendingModal(true)}
-          onOpenAllGames={() => setShowAllGamesModal(true)}
-          onOpenCoverage={() => setShowBroadcasterCoverageModal(true)}
+          onOpenTrending={openTrendingPanel}
+          onOpenAllGames={openAllGamesPanel}
+          onOpenCoverage={openCoveragePanel}
           onLocalNews={findLocalNews}
-          onOpenBlacklist={() => setShowBlacklistModal(true)}
-          onOpenSettings={() => setShowSettingsModal(true)}
+          onOpenBlacklist={openBlacklistPanel}
+          onOpenSettings={openSettingsPanel}
           onOpenClearConfirm={() => setShowClearConfirm(true)}
           onOpenPalette={palette.open}
-          activePanel={activePanel}
+          activePanel={activePanelId}
           onTogglePanel={togglePanel}
           isTheatreMode={isTheatreMode}
           onToggleTheatre={() => setTheatreMode((v) => !v)}
@@ -400,7 +658,10 @@ const MultiViewPage = ({ sessionId }) => {
         )}
 
         {/* Tile grid */}
-        <div className={`flex-1 ${isTheatreMode ? 'p-0 overflow-hidden' : 'p-3 overflow-auto'}`}>
+        <div
+          className={`flex-1 ${isTheatreMode ? 'p-0 overflow-hidden' : 'p-3 overflow-auto'}`}
+          style={isTheatreMode ? undefined : { paddingRight: `${12 + dockWidth}px` }}
+        >
           <MultiViewGrid
             streams={streams}
             streamOrder={streamOrder}
@@ -422,38 +683,249 @@ const MultiViewPage = ({ sessionId }) => {
             onRefresh={refreshStream}
             onFindAlternative={handleFindAlternative}
             onFindDifferentGame={handleFindDifferentGame}
-            onAlternateSources={openPickerForStream}
+            onAlternateSources={openPickerForStreamPanel}
             onBlacklist={addToBlacklist}
             onRemove={removeStream}
             isFavorited={isFavorite}
             onToggleFavorite={handleToggleTileFavorite}
+            autoMutedKeys={commercial.autoMutedKeys}
+            tileStates={commercial.tileStates}
+            onRegisterVideoElement={commercial.registerVideoElement}
+            onUnregisterVideoElement={commercial.unregisterVideoElement}
+            onUndoAdMute={commercial.undoForKey}
             onQualityDetected={onQualityDetected}
           />
         </div>
 
-        {/* Slide-in panels — positioned absolute against this column so
-            they overlay the tiles but not the rail. */}
+        {/* ── Drawer panels ────────────────────────────────────────
+            All drawers mount inside this content column (left edge =
+            just right of the rail). Each panel stays mounted while
+            in the dock so its async work (search debounce, polling
+            fetches) keeps running while minimized.
+
+            Reserve room at the bottom for the taskbar when at least
+            one panel is docked, so drawers don't overlap their own
+            minimized chips. */}
         {!isTheatreMode && (
           <>
-            <FavoritesPanel
-              isOpen={activePanel === 'favorites'}
-              onClose={() => setActivePanel(null)}
-              favorites={favorites}
-              streams={streams}
-              onPlay={handlePlayFavorite}
-              onRemove={removeFavorite}
-              onReorder={reorderFavorites}
-            />
-            <LayoutPanel
-              isOpen={activePanel === 'layout'}
-              onClose={() => setActivePanel(null)}
-              layoutMode={layoutMode}
-              onLayoutChange={setLayoutMode}
-              showTicker={autoFillSettings.showLiveScoresTicker}
-              onToggleTicker={toggleTicker}
-              isTheatreMode={isTheatreMode}
-              onToggleTheatre={() => setTheatreMode((v) => !v)}
-              streamsCount={streams.length}
+            {/* SEARCH / CHANNEL PICKER — the most-used drawer.
+                Drawer width 540px (dense rows, two-column metadata). */}
+            {isPanelMounted('search') && (
+              <DrawerShell
+                isMounted={isPanelMounted('search')}
+                isVisible={isPanelOpen('search')}
+                width={540}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title={getPanel('search')?.title || 'Search'}
+                subtitle={pickerState.subtitle}
+                icon={SEARCH_ICON}
+                spineColor="cyan"
+                status={getPanel('search')?.status}
+                onMinimize={onMinimizeSearch}
+                onClose={handleSearchClose}
+                onVisibleFocus={onVisibleFocusSearch}
+              >
+                <ChannelPickerModal
+                  {...pickerState}
+                  isOpen={isPanelMounted('search')}
+                  isVisible={isPanelOpen('search')}
+                  onAfterPick={onMinimizeSearch}
+                  onSearch={onSearchFromPicker}
+                  autoFocusRef={pickerFocusRef}
+                  onStatusChange={onStatusSearch}
+                  favorites={favorites}
+                  favoritesLoading={favoritesLoading}
+                  isFavorite={isFavorite}
+                  onToggleFavorite={toggleFavorite}
+                />
+              </DrawerShell>
+            )}
+
+            {/* TRENDING */}
+            {isPanelMounted('trending') && (
+              <DrawerShell
+                isMounted={isPanelMounted('trending')}
+                isVisible={isPanelOpen('trending')}
+                width={460}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Trending"
+                subtitle="YT · Twitch · Reddit · Bluesky"
+                icon={FLAME_ICON}
+                spineColor="rose"
+                status={getPanel('trending')?.status}
+                onMinimize={onMinimizeTrending}
+                onClose={onCloseTrending}
+              >
+                <TrendingModal
+                  isOpen={isPanelMounted('trending')}
+                  onPick={onTrendingPick}
+                  onAfterPick={onMinimizeTrending}
+                  onStatusChange={onStatusTrending}
+                />
+              </DrawerShell>
+            )}
+
+            {/* ALL GAMES — densest list, 560px feels right. */}
+            {isPanelMounted('allgames') && (
+              <DrawerShell
+                isMounted={isPanelMounted('allgames')}
+                isVisible={isPanelOpen('allgames')}
+                width={560}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Today's Slate"
+                subtitle="Live · scheduled · final"
+                icon={BALL_ICON}
+                spineColor="amber"
+                status={getPanel('allgames')?.status}
+                onMinimize={onMinimizeAllGames}
+                onClose={onCloseAllGames}
+              >
+                <AllGamesModal
+                  isOpen={isPanelMounted('allgames')}
+                  onPick={onAllGamesPick}
+                  onPickBroadcaster={onAllGamesPickBroadcaster}
+                  onAfterPick={onMinimizeAllGames}
+                  onStatusChange={onStatusAllGames}
+                />
+              </DrawerShell>
+            )}
+
+            {/* BROADCASTER COVERAGE */}
+            {isPanelMounted('coverage') && (
+              <DrawerShell
+                isMounted={isPanelMounted('coverage')}
+                isVisible={isPanelOpen('coverage')}
+                width={560}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Broadcaster Coverage"
+                subtitle="Alias gaps & match stats"
+                icon={BROADCAST_ICON}
+                spineColor="indigo"
+                status={getPanel('coverage')?.status}
+                onMinimize={onMinimizeCoverage}
+                onClose={onCloseCoverage}
+              >
+                <BroadcasterCoverageModal
+                  isOpen={isPanelMounted('coverage')}
+                  onTestCode={onCoverageTest}
+                  onStatusChange={onStatusCoverage}
+                />
+              </DrawerShell>
+            )}
+
+            {/* BLACKLIST — slim, 380px. */}
+            {isPanelMounted('blacklist') && (
+              <DrawerShell
+                isMounted={isPanelMounted('blacklist')}
+                isVisible={isPanelOpen('blacklist')}
+                width={380}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Blacklist"
+                icon={BAN_ICON}
+                spineColor="rose"
+                status={getPanel('blacklist')?.status}
+                onMinimize={onMinimizeBlacklist}
+                onClose={onCloseBlacklist}
+              >
+                <BlacklistModal
+                  isOpen={isPanelMounted('blacklist')}
+                  blacklistedChannels={blacklistedChannels}
+                  onRemoveFromBlacklist={removeFromBlacklist}
+                />
+              </DrawerShell>
+            )}
+
+            {/* SETTINGS — wide because of the section nav. */}
+            {isPanelMounted('settings') && (
+              <DrawerShell
+                isMounted={isPanelMounted('settings')}
+                isVisible={isPanelOpen('settings')}
+                width={580}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Multi-View Settings"
+                subtitle="Auto-fill · player · display"
+                icon={GEAR_ICON}
+                spineColor="emerald"
+                onMinimize={onMinimizeSettings}
+                onClose={onCloseSettings}
+              >
+                <SettingsModal
+                  isOpen={isPanelMounted('settings')}
+                  streams={streams}
+                  autoFillSettings={autoFillSettings}
+                  setAutoFillSettings={setAutoFillSettings}
+                />
+              </DrawerShell>
+            )}
+
+            {/* FAVORITES — compact, 340px. */}
+            {isPanelMounted('favorites') && (
+              <DrawerShell
+                isMounted={isPanelMounted('favorites')}
+                isVisible={isPanelOpen('favorites')}
+                width={340}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Favorites"
+                icon={HEART_ICON}
+                spineColor="amber"
+                status={getPanel('favorites')?.status}
+                onMinimize={onMinimizeFavorites}
+                onClose={onCloseFavorites}
+              >
+                <FavoritesPanel
+                  isOpen={isPanelMounted('favorites')}
+                  favorites={favorites}
+                  streams={streams}
+                  onPlay={handlePlayFavorite}
+                  onRemove={removeFavorite}
+                  onReorder={reorderFavorites}
+                />
+              </DrawerShell>
+            )}
+
+            {/* LAYOUT — compact, 340px. */}
+            {isPanelMounted('layout') && (
+              <DrawerShell
+                isMounted={isPanelMounted('layout')}
+                isVisible={isPanelOpen('layout')}
+                width={340}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Layout"
+                icon={LAYOUT_ICON}
+                spineColor="cyan"
+                status={getPanel('layout')?.status}
+                onMinimize={onMinimizeLayout}
+                onClose={onCloseLayout}
+              >
+                <LayoutPanel
+                  isOpen={isPanelMounted('layout')}
+                  layoutMode={layoutMode}
+                  onLayoutChange={setLayoutMode}
+                  showTicker={autoFillSettings.showLiveScoresTicker}
+                  onToggleTicker={toggleTicker}
+                  isTheatreMode={isTheatreMode}
+                  onToggleTheatre={() => setTheatreMode((v) => !v)}
+                  streamsCount={streams.length}
+                />
+              </DrawerShell>
+            )}
+
+            {/* ── TASKBAR / DOCK ──────────────────────────────────
+                Only mounts when at least one panel is minimized. */}
+            <MultiViewTaskBar
+              panels={panels.minimizedPanels}
+              onRestore={restorePanel}
+              onClose={closePanel}
+              topOffset={drawerTopGap}
+              bottomOffset={tickerHeight}
             />
           </>
         )}
@@ -472,7 +944,7 @@ const MultiViewPage = ({ sessionId }) => {
         </button>
       )}
 
-      {/* ─── Global modals (still mounted, just opened by rail/palette) ─── */}
+      {/* ─── Global confirm/palette overlays (not part of dock) ─── */}
       <ConfirmModal
         isOpen={showClearConfirm}
         onClose={() => setShowClearConfirm(false)}
@@ -482,50 +954,6 @@ const MultiViewPage = ({ sessionId }) => {
         confirmText="Clear All"
         cancelText="Cancel"
         variant="danger"
-      />
-      <BlacklistModal
-        isOpen={showBlacklistModal}
-        onClose={() => setShowBlacklistModal(false)}
-        blacklistedChannels={blacklistedChannels}
-        onRemoveFromBlacklist={removeFromBlacklist}
-      />
-      <SettingsModal
-        isOpen={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        streams={streams}
-        autoFillSettings={autoFillSettings}
-        setAutoFillSettings={setAutoFillSettings}
-      />
-      <TrendingModal
-        isOpen={showTrendingModal}
-        onClose={() => setShowTrendingModal(false)}
-        onPick={(channel, signal) =>
-          searchByName(channel.name, { mode: 'brand', signal })
-        }
-      />
-      <BroadcasterCoverageModal
-        isOpen={showBroadcasterCoverageModal}
-        onClose={() => setShowBroadcasterCoverageModal(false)}
-        onTestCode={(code, signal, aliases) =>
-          searchByName(code, { mode: 'brand', signal, aliases })
-        }
-      />
-      <AllGamesModal
-        isOpen={showAllGamesModal}
-        onClose={() => setShowAllGamesModal(false)}
-        onPick={async (event, signal) => {
-          await handleTickerEventClick(event, { signal });
-          return true;
-        }}
-        onPickBroadcaster={(code, signal) => searchByName(code, { mode: 'brand', signal })}
-      />
-
-      <ChannelPickerModal
-        {...pickerState}
-        favorites={favorites}
-        favoritesLoading={favoritesLoading}
-        isFavorite={isFavorite}
-        onToggleFavorite={toggleFavorite}
       />
 
       <CommandPalette
@@ -549,6 +977,25 @@ const MultiViewPage = ({ sessionId }) => {
 // Tiny inline-icon helper for the command palette rows so the
 // palette stays a single self-contained component without growing a
 // giant icon dictionary at module level.
+// Module icons — used in drawer headers + taskbar chips so each panel
+// has a consistent identity color/glyph pair. Smaller than the rail's
+// own icons (the drawer chrome's icon slot is 16px).
+const ICON_PROPS = {
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 2,
+  viewBox: '0 0 24 24',
+  className: 'w-full h-full'
+};
+const SEARCH_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>);
+const FLAME_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M12 3c1 4 5 5 5 9a5 5 0 11-10 0c0-2 1-3 2-4-1 4 3 4 3 0 0-2 0-3 0-5z" /></svg>);
+const BALL_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3v18M5.5 5.5l13 13M18.5 5.5l-13 13" /></svg>);
+const BROADCAST_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" /><circle cx="12" cy="12" r="1.5" fill="currentColor" /></svg>);
+const BAN_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path strokeLinecap="round" d="M5.6 5.6l12.8 12.8" /></svg>);
+const GEAR_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="3" /><path strokeLinecap="round" strokeLinejoin="round" d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 01-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 01-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 010-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3h0a1.7 1.7 0 001-1.5V3a2 2 0 014 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8v0a1.7 1.7 0 001.5 1H21a2 2 0 010 4h-.1a1.7 1.7 0 00-1.5 1z" /></svg>);
+const HEART_ICON = (<svg viewBox="0 0 24 24" fill="currentColor" className="w-full h-full"><path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" /></svg>);
+const LAYOUT_ICON = (<svg {...ICON_PROPS}><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h18M9 21V9" /></svg>);
+
 const CmdIcon = ({ name }) => {
   const cls = 'w-4 h-4';
   switch (name) {

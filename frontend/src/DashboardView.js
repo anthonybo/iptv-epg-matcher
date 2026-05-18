@@ -8,6 +8,7 @@ import MemoryChart from './components/Dashboard/MemoryChart';
 import StreamTypeChart from './components/Dashboard/StreamTypeChart';
 import ActiveSessionsPanel from './components/Dashboard/ActiveSessionsPanel';
 import PageActivityPanel from './components/Dashboard/PageActivityPanel';
+import CommercialDetectionPanel from './components/Dashboard/CommercialDetectionPanel';
 
 /**
  * MetricCard - Displays a single metric value
@@ -359,6 +360,14 @@ const DashboardView = () => {
             Active Users
           </h3>
           <ActiveSessionsPanel streams={streams.list} />
+        </div>
+
+        {/* Commercial Detection Learning Data */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-6 md:col-span-2 lg:col-span-3">
+          <h3 className="text-lg font-semibold text-slate-300 mb-4">
+            Commercial-Detection Hotlist
+          </h3>
+          <CommercialDetectionPanel />
         </div>
       </div>
 

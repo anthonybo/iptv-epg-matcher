@@ -501,7 +501,28 @@ async function processChannels(sessionId, channels, userId = null, options = {})
         source_mac: sourceInfo.mac_address || null
       }));
 
-      await iptvDatabaseService.saveChannels(sourceId, dbChannels);
+      // Pass an onProgress callback so the SSE pipe can update the
+      // BulkAdd modal's "Saving to database…" row in real time.
+      // Without this the row sits at "97% · Still working on saving
+      // to database" for 5+ minutes with nothing on the wire — the
+      // user had no way to tell working from frozen.
+      await iptvDatabaseService.saveChannels(sourceId, dbChannels, {
+        onProgress: ({ saved, total }) => {
+          // The progress band 97→99% is reserved for the INSERT loop.
+          // We map saved/total into that 2-point window so the
+          // existing 'persisting' step retains its position in the
+          // overall pipeline visual. The text gives the user the
+          // concrete numbers ("4,200 / 8,238 channels saved (51%)").
+          const innerPct = total > 0 ? Math.floor((saved / total) * 100) : 0;
+          const outerPct = 97 + Math.floor((innerPct / 100) * 2); // 97..99
+          sendProgressUpdate(
+            sessionId,
+            'persisting',
+            outerPct,
+            `Saving channels to database… ${saved.toLocaleString()} / ${total.toLocaleString()} (${innerPct}%)`
+          );
+        }
+      });
       logger.info(`Successfully saved ${dbChannels.length} channels to database`);
 
       // Associate session with source

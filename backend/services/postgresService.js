@@ -336,6 +336,16 @@ async function saveChannels(channels, sourceId, options = {}) {
     const isCancelled = typeof options.isCancelled === 'function'
         ? options.isCancelled
         : () => false;
+    // Optional progress callback so long-running INSERT loops can
+    // tell the SSE pipe / log stream how far they've gotten. Default
+    // is a no-op. The previous code logged once at the very end,
+    // which left the user staring at a "Saving to database…" UI for
+    // 5+ minutes with zero feedback — even the backend logs went
+    // silent during the loop, so there was no way to tell if it was
+    // working or hung.
+    const onProgress = typeof options.onProgress === 'function'
+        ? options.onProgress
+        : () => {};
 
     if (!channels || channels.length === 0) {
         return { saved: 0 };
@@ -362,11 +372,15 @@ async function saveChannels(channels, sourceId, options = {}) {
         [sourceId]
     );
 
-    logger.info(`Deleted old channels for source ${sourceId}, inserting ${uniqueChannels.length} new channels`);
-
     // Batch insert in chunks of 500 to avoid parameter limits
     const batchSize = 500;
+    const totalBatches = Math.ceil(uniqueChannels.length / batchSize);
     let savedCount = 0;
+    const saveStartedAt = Date.now();
+
+    logger.info(
+        `[saveChannels] Source ${sourceId}: deleted old rows, inserting ${uniqueChannels.length} channels in ${totalBatches} batches of ${batchSize}`
+    );
 
     for (let i = 0; i < uniqueChannels.length; i += batchSize) {
         // Honor a Cancel between batches. We can't tear down an
@@ -375,7 +389,7 @@ async function saveChannels(channels, sourceId, options = {}) {
         // otherwise the 100-batch loop chews through the full 50k+
         // channels regardless.
         if (isCancelled()) {
-            logger.info(`saveChannels: cancelled after ${savedCount}/${uniqueChannels.length} channels for source ${sourceId}`);
+            logger.info(`[saveChannels] Source ${sourceId}: cancelled after ${savedCount}/${uniqueChannels.length} channels`);
             return { saved: savedCount, cancelled: true };
         }
         const batch = uniqueChannels.slice(i, i + batchSize);
@@ -431,6 +445,30 @@ async function saveChannels(channels, sourceId, options = {}) {
 
         await queryWithRetry(query, params);
         savedCount += batch.length;
+
+        // Per-batch progress. Log every batch up to 5k, then every
+        // 5th batch so the log stream doesn't drown when a 100k
+        // provider lands. Also surface to the optional onProgress
+        // callback so SSE pipes can update the UI.
+        const batchNumber = Math.floor(savedCount / batchSize);
+        const shouldLog =
+            totalBatches <= 10 ||           // small saves: log every batch
+            batchNumber <= 10 ||             // first 10 of larger saves
+            batchNumber % 5 === 0 ||         // then every 5th batch
+            savedCount >= uniqueChannels.length; // and the final one
+        if (shouldLog) {
+            const pct = Math.floor((savedCount / uniqueChannels.length) * 100);
+            const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
+            logger.info(
+                `[saveChannels] Source ${sourceId}: ${savedCount}/${uniqueChannels.length} channels (${pct}%, ${elapsedSec}s)`
+            );
+        }
+        onProgress({
+            saved: savedCount,
+            total: uniqueChannels.length,
+            batchNumber,
+            totalBatches
+        });
     }
 
     // Update the source row to reflect this successful load. Stamping

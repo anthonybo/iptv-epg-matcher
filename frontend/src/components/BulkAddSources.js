@@ -107,6 +107,331 @@ const formatElapsed = (ms) => {
 const STALL_SOFT_MS = 10000;  // shimmer + "Still working"
 const STALL_HARD_MS = 60000;  // amber notice promoting the message
 
+// ─── Edit-panel sub-components ─────────────────────────────────────
+
+/**
+ * FormatExampleCard — single supported-format reference card. Header
+ * label, mono code block, hover-revealed Copy button. Used in the
+ * collapsible format drawer.
+ */
+const FormatExampleCard = ({ label, sample, tone = 'cyan' }) => {
+  const [copied, setCopied] = useState(false);
+  const TONES = {
+    cyan:    { label: 'text-cyan-300/90',    border: 'border-cyan-500/20',    glow: 'rgba(34,211,238,0.18)' },
+    emerald: { label: 'text-emerald-300/90', border: 'border-emerald-500/20', glow: 'rgba(16,185,129,0.18)' },
+    violet:  { label: 'text-violet-300/90',  border: 'border-violet-500/20',  glow: 'rgba(167,139,250,0.18)' },
+    sky:     { label: 'text-sky-300/90',     border: 'border-sky-500/20',     glow: 'rgba(56,189,248,0.18)' },
+    amber:   { label: 'text-amber-300/90',   border: 'border-amber-500/20',   glow: 'rgba(251,191,36,0.18)' }
+  };
+  const t = TONES[tone] || TONES.cyan;
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(sample);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return (
+    <div className={`group/fmt relative rounded-md border ${t.border} bg-slate-950 overflow-hidden`} style={{ boxShadow: `inset 0 1px 0 ${t.glow}` }}>
+      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-b border-slate-800/60 bg-slate-900/40">
+        <span className={`font-mono text-[9px] font-bold uppercase tracking-[0.22em] ${t.label}`}>
+          {label}
+        </span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono uppercase tracking-[0.16em] transition ${
+            copied
+              ? 'bg-emerald-500/15 text-emerald-200 border border-emerald-500/30'
+              : 'bg-slate-900/60 text-slate-500 border border-slate-800 hover:bg-slate-800 hover:text-slate-200'
+          }`}
+        >
+          {copied ? (
+            <>
+              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+              Copied
+            </>
+          ) : (
+            <>
+              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+              Copy
+            </>
+          )}
+        </button>
+      </div>
+      <pre className="px-2.5 py-2 font-mono text-[10.5px] leading-relaxed text-slate-200 whitespace-pre overflow-x-auto [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
+        {sample}
+      </pre>
+    </div>
+  );
+};
+
+// Static reference for the format drawer. Keeping these here (not
+// inside the component) so they don't re-create on every render.
+const FORMAT_EXAMPLES = [
+  {
+    label: 'Standard M3U URL',
+    tone: 'sky',
+    sample: 'http://host:port/get.php?username=alice&password=hunter2&type=m3u_plus'
+  },
+  {
+    label: 'Portal + labeled credentials',
+    tone: 'cyan',
+    sample: 'Portal: http://host:8080\nUsername: alice | Password: hunter2\nUsername: bob   | Password: sw0rdf1sh'
+  },
+  {
+    label: 'Column list',
+    tone: 'emerald',
+    sample: 'canal-pro.xyz:8080    alice:hunter2    0/3    Active\ncanal-pro.xyz:8080    bob:sw0rdf1sh    1/3    Active'
+  },
+  {
+    label: 'Stalker block',
+    tone: 'violet',
+    sample: 'Real ➤  Some Provider\nPortal ➤ http://portal:8080/c/\nMac    ➤ 00:1A:79:AA:BB:CC'
+  },
+  {
+    label: 'Bare MAC list (uses Default Portal)',
+    tone: 'amber',
+    sample: '[MAC] ✔ 00:1A:79:11:22:33\n[MAC] ✔ 00:1A:79:44:55:66\n[MAC] ✔ 00:1A:79:77:88:99'
+  }
+];
+
+// Quick heuristic counters so the textarea can show a live recognition
+// hint as the user types — without running the actual parser on every
+// keystroke. Cheap regex sweeps; the canonical count comes from
+// parseBulkSources when Parse is clicked.
+const URL_LIKE = /https?:\/\/[^\s|,]+/gi;
+const MAC_LIKE = /(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/g;
+const countInputSignals = (text) => {
+  if (!text) return { lines: 0, urls: 0, macs: 0 };
+  const trimmed = text.replace(/\r/g, '');
+  const nonEmpty = trimmed.split('\n').filter((l) => l.trim().length > 0);
+  const urls = (trimmed.match(URL_LIKE) || []).length;
+  const macs = (trimmed.match(MAC_LIKE) || []).length;
+  return { lines: nonEmpty.length, urls, macs };
+};
+
+// ─── Progress-panel sub-components ─────────────────────────────────
+// All defined at module level so they're stable references (no
+// remount on each parent render). They're presentation-only — no
+// state of their own except local UI affordances.
+
+/**
+ * StackedProgressBar — the headline visual at the top of the bulk-
+ * add panel. Four segments side-by-side: done (emerald), failed
+ * (rose), loading (cyan w/ animated stripe), queued (slate). Each
+ * segment's width is proportional to its share of the total. Count
+ * labels overlay each segment when it's wide enough to fit.
+ *
+ * Heavy treatment (h-7) on purpose — this is the "is my bulk job
+ * working" answer and should be readable from 8 feet away.
+ */
+const StackedProgressBar = ({ done, failed, loading, queued, total, isRunning }) => {
+  const safeTotal = Math.max(total, 1);
+  const pct = (n) => (n / safeTotal) * 100;
+  const segments = [
+    { key: 'done',    count: done,    pct: pct(done),    bg: 'bg-emerald-500',         label: 'done',    text: 'text-emerald-100' },
+    { key: 'failed',  count: failed,  pct: pct(failed),  bg: 'bg-rose-500',            label: 'failed',  text: 'text-rose-100' },
+    { key: 'loading', count: loading, pct: pct(loading), bg: 'bg-cyan-500 mv-refresh-stripe-light', label: 'loading', text: 'text-cyan-100', striped: true },
+    { key: 'queued',  count: queued,  pct: pct(queued),  bg: 'bg-slate-700',           label: 'queued',  text: 'text-slate-300' }
+  ];
+
+  return (
+    <div className="relative h-7 rounded-md overflow-hidden border border-slate-800/80 bg-slate-900/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.4)]">
+      <div className="absolute inset-0 flex">
+        {segments.map((seg) => (
+          seg.count > 0 && (
+            <div
+              key={seg.key}
+              className={`relative h-full ${seg.bg} transition-[width] duration-300 overflow-hidden`}
+              style={{ width: `${seg.pct}%` }}
+              title={`${seg.count} ${seg.label}`}
+            >
+              {/* Stripe overlay on the loading segment so it's
+                  visibly "in motion" even when its width isn't
+                  changing. */}
+              {seg.striped && isRunning && (
+                <div
+                  aria-hidden
+                  className="absolute inset-0 mv-refresh-stripe opacity-50"
+                  style={{
+                    backgroundImage:
+                      'repeating-linear-gradient(-45deg, rgba(255,255,255,0.18) 0 6px, transparent 6px 14px)',
+                    backgroundSize: '20px 100%'
+                  }}
+                />
+              )}
+              {/* Inline count — only render when the segment is
+                  wide enough to fit it without ellipsis. */}
+              {seg.pct >= 8 && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className={`font-mono text-[11px] font-bold tabular-nums ${seg.text} drop-shadow-[0_1px_2px_rgba(0,0,0,0.4)]`}>
+                    {seg.count}
+                  </span>
+                </div>
+              )}
+            </div>
+          )
+        ))}
+      </div>
+      {/* Subtle inner highlight on the top edge for depth. */}
+      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/10" />
+    </div>
+  );
+};
+
+/**
+ * FilterChip — toggle pill in the strip below the bar. Mirrors the
+ * stacked-bar segment colors so the user reads "I'm filtering by
+ * the rose segment" instinctively.
+ */
+const FilterChip = ({ active, onClick, label, count, tone }) => {
+  const TONES = {
+    slate:   { active: 'border-slate-600 bg-slate-800 text-slate-100',          rest: 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200' },
+    emerald: { active: 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200', rest: 'border-slate-800 bg-slate-900/40 text-emerald-300/80 hover:text-emerald-200' },
+    rose:    { active: 'border-rose-500/50 bg-rose-500/15 text-rose-200',       rest: 'border-slate-800 bg-slate-900/40 text-rose-300/80 hover:text-rose-200' },
+    cyan:    { active: 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200',       rest: 'border-slate-800 bg-slate-900/40 text-cyan-300/80 hover:text-cyan-200' }
+  };
+  const t = TONES[tone] || TONES.slate;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border font-mono text-[10px] font-bold uppercase tracking-[0.14em] transition ${
+        active ? t.active : t.rest
+      }`}
+    >
+      <span>{label}</span>
+      <span className="font-mono text-[10px] tabular-nums">
+        {count}
+      </span>
+    </button>
+  );
+};
+
+/**
+ * ErrorGroupCard — fingerprints identical error strings. Header
+ * shows a big count badge + the error message; expanding shows the
+ * list of affected source labels. Solves the original UX problem
+ * (24 identical lines of unreadable red text per row → one card).
+ */
+const ErrorGroupCard = ({ group, expanded, onToggle }) => {
+  const count = group.sources.length;
+  return (
+    <div className="rounded-md border border-rose-500/30 bg-rose-500/[0.06] overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-3 px-3 py-2 hover:bg-rose-500/10 transition text-left"
+      >
+        {/* Count badge — the dominant visual on the card. */}
+        <span className="flex-shrink-0 inline-flex items-center justify-center min-w-[36px] h-7 px-2 rounded border border-rose-500/40 bg-rose-500/15 font-mono text-[11px] font-bold tabular-nums text-rose-100">
+          {count}×
+        </span>
+        <span className="min-w-0 flex-1 font-mono text-[11px] text-rose-200 truncate">
+          {group.error}
+        </span>
+        <svg
+          className={`flex-shrink-0 w-3 h-3 text-rose-300/70 transition ${expanded ? 'rotate-90' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-2.5 pt-1 border-t border-rose-500/20 bg-rose-500/[0.03]">
+          <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-rose-300/60 mb-1.5">
+            Affected sources
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {group.sources.map((s, i) => {
+              const label = s.entry.type === 'xtream'
+                ? (s.entry.username || '—')
+                : (s.entry.mac || '—');
+              return (
+                <span
+                  key={i}
+                  className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-rose-500/25 bg-rose-500/[0.06] text-rose-200/90"
+                >
+                  {label}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * HostGroup — a single host's accounts collapsed into a labeled
+ * section. The header row shows host + per-host status counts; the
+ * body is the list of compact source rows for that host. Default
+ * expanded; can be collapsed when the user has triaged this host.
+ */
+const HostGroup = ({ host, items, collapsed, onToggle, renderRow }) => {
+  // Per-host aggregate counts so the header gives a glanceable
+  // summary even when the body is collapsed.
+  const counts = items.reduce((acc, it) => {
+    const s = it.state.status;
+    if (s === 'done') acc.done++;
+    else if (s === 'failed') acc.failed++;
+    else if (s === 'pending') acc.queued++;
+    else acc.loading++;
+    return acc;
+  }, { done: 0, failed: 0, loading: 0, queued: 0 });
+
+  return (
+    <div className="rounded-md border border-slate-800/80 bg-slate-950 overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2.5 px-3 py-2 bg-slate-900/40 hover:bg-slate-900/70 transition border-b border-slate-800/60 text-left"
+      >
+        <svg
+          className={`flex-shrink-0 w-3 h-3 text-slate-500 transition ${collapsed ? '' : 'rotate-90'}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-3.5 h-3.5 text-slate-500 flex-shrink-0">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9 9 0 100-18 9 9 0 000 18zM3 12h18M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18" />
+        </svg>
+        <span className="font-mono text-[11.5px] text-slate-100 truncate flex-1 font-medium">
+          {host}
+        </span>
+        <span className="flex items-center gap-2 font-mono text-[10px] tabular-nums flex-shrink-0">
+          <span className="text-slate-600">{items.length} accounts</span>
+          {counts.done > 0    && <span className="text-emerald-300">{counts.done}✓</span>}
+          {counts.failed > 0  && <span className="text-rose-300">{counts.failed}✗</span>}
+          {counts.loading > 0 && <span className="text-cyan-300">{counts.loading}⟳</span>}
+          {counts.queued > 0  && <span className="text-slate-500">{counts.queued}…</span>}
+        </span>
+      </button>
+      {!collapsed && (
+        <ul className="px-2 py-2 space-y-1">
+          {items.map(renderRow)}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 // Cap how many loads run concurrently on the backend. Each load hammers the
 // channel table with 500-row INSERT batches; running too many at once hits
 // Postgres `statement_timeout` and starves unrelated queries (/api/epg/init etc.).
@@ -160,6 +485,27 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone, onBulkProgressChange }) 
   const eventSourcesRef = useRef([]);
   const completedNotifiedRef = useRef(false);
   const queueRef = useRef({ pending: [], active: 0 });
+
+  // ─── Progress-panel view state ─────────────────────────────────────
+  // The user is staring at 39 rows in a modal — they need filters,
+  // collapsible host groups, and an error-fingerprint summary so 24
+  // identical HTTP 512 failures don't drown the readable rows. These
+  // bits only affect rendering; the EventSource pipe + queue pump
+  // don't see them.
+  const [progressFilter, setProgressFilter] = useState('all'); // 'all' | 'loading' | 'failed' | 'done' | 'queued'
+  // Hosts collapse to a single header row when toggled off. Default
+  // is expanded for everything — but a user reviewing 100+ rows can
+  // collapse a host they've already triaged.
+  const [collapsedHosts, setCollapsedHosts] = useState(() => new Set());
+  // Each unique error message has its own group card. Expanded =
+  // shows the affected source list. Collapsed by default — the
+  // header chip + count is the user's primary signal; the list is
+  // there if they want to drill in.
+  const [expandedErrorGroups, setExpandedErrorGroups] = useState(() => new Set());
+  // Format-reference drawer in the edit panel. Closed by default;
+  // the textarea is the primary affordance and the help is a
+  // disclosable secondary layer.
+  const [showFormatExamples, setShowFormatExamples] = useState(false);
 
   useEffect(() => () => {
     eventSourcesRef.current.forEach((es) => {
@@ -516,79 +862,333 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone, onBulkProgressChange }) 
     pumpQueue();
   };
 
-  const renderEditPanel = () => (
-    <section className="space-y-4">
-      <h3 className="text-lg font-semibold text-slate-100">Bulk Add Sources</h3>
-      <p className="text-sm text-slate-400">
-        Paste any mix of Xtream accounts, MAG/Stalker portals, or bulk MAC lists. Each line is auto-detected.
-      </p>
-      <ul className="list-disc pl-5 text-xs text-slate-400 space-y-1">
-        <li><code className="text-slate-300">http://host:port/get.php?username=X&amp;password=Y&amp;type=m3u_plus</code></li>
-        <li>
-          A server URL followed by labeled creds, one per line:
-          <code className="block text-slate-300 mt-1">
-            Portal: http://host:8080<br />
-            Username: alice | Password: hunter2<br />
-            Username: bob | Password: sw0rdf1sh
-          </code>
-        </li>
-        <li>
-          Column-style list — server, user:pass, then any trailing metadata:
-          <code className="block text-slate-300 mt-1">
-            canal-pro.xyz:8080    alice:hunter2    0/3    Active<br />
-            canal-pro.xyz:8080    bob:sw0rdf1sh    1/3    Active
-          </code>
-        </li>
-        <li>Stalker block with <code className="text-slate-300">Real/Portal/Mac ➤</code> lines</li>
-        <li><code className="text-slate-300">[MAC] ✔ 00:1A:79:XX:XX:XX</code> (uses default portal below)</li>
-      </ul>
+  // Re-queue every failed entry so the user can retry transient
+  // rate-limits (which is exactly what the 24× HTTP 512 cluster in
+  // their last bulk-add looked like). Reset the failed rows back to
+  // 'pending' with cleared error/progress, then pump the queue.
+  // Sources that are still loading or already done are left alone.
+  const handleRetryFailed = () => {
+    const failedIndices = entryStates
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => s.status === 'failed')
+      .map(({ i }) => i);
+    if (failedIndices.length === 0) return;
 
-      <label className="flex flex-col gap-2">
-        <span className="text-sm font-semibold text-slate-200">Default Portal URL (optional)</span>
-        <input
-          type="text"
-          placeholder="http://z1mac.com:8080/c/"
-          value={defaultPortal}
-          onChange={(e) => setDefaultPortal(e.target.value)}
-          className={inputClasses}
-        />
-        <span className="text-xs text-slate-500">
-          Used for MACs that appear without a portal URL (e.g. <code>[MAC] ✔ ...</code> lines).
-        </span>
-      </label>
+    completedNotifiedRef.current = false;
+    setPhase('running');
+    setEntryStates((prev) => prev.map((s, i) => {
+      if (!failedIndices.includes(i)) return s;
+      return {
+        ...s,
+        status: 'pending',
+        progress: 0,
+        stage: null,
+        message: failedIndices.length > MAX_CONCURRENT ? 'Waiting for open slot…' : '',
+        channelCount: 0,
+        error: null,
+        sessionId: null,
+        startedAt: null,
+        lastUpdatedAt: Date.now()
+      };
+    }));
 
-      <label className="flex flex-col gap-2">
-        <span className="text-sm font-semibold text-slate-200">Sources</span>
-        <textarea
-          value={rawText}
-          onChange={(e) => setRawText(e.target.value)}
-          rows={12}
-          placeholder={'http://server1/get.php?username=u1&password=p1&type=m3u_plus\nhttp://server1/get.php?username=u2&password=p2&type=m3u_plus\n\nPortal ➤ http://portal/c/\nMac ➤ 00:1A:79:AA:BB:CC\n\n[MAC] ✔ 00:1A:79:11:22:33'}
-          className={`${inputClasses} font-mono`}
-        />
-      </label>
+    // Append the retried entries to the queue with their original
+    // indices so the SSE-driven updateEntry calls still land on the
+    // right row.
+    queueRef.current.pending.push(
+      ...failedIndices.map((i) => ({ idx: i, entry: entryStates[i].entry }))
+    );
+    pumpQueue();
+  };
 
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={handleParse}
-          disabled={parsing || !rawText.trim()}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {parsing ? 'Parsing…' : 'Parse'}
-        </button>
-        {hasPreview && (
+  // Drop everything that hasn't started yet. Sources already loading
+  // run to completion (we can't tear down an in-flight backend job
+  // from the client cleanly without losing the channels that already
+  // imported). Pending entries get a 'cancelled' status so the user
+  // sees a clear record of "this never got a chance" — distinct from
+  // failed (which means it tried and the upstream rejected it).
+  const handleCancelRemaining = () => {
+    queueRef.current.pending = [];
+    setEntryStates((prev) => prev.map((s) => {
+      if (s.status !== 'pending') return s;
+      return {
+        ...s,
+        status: 'failed',
+        error: 'Cancelled before start',
+        lastUpdatedAt: Date.now()
+      };
+    }));
+  };
+
+  const toggleHost = (host) => {
+    setCollapsedHosts((prev) => {
+      const next = new Set(prev);
+      if (next.has(host)) next.delete(host); else next.add(host);
+      return next;
+    });
+  };
+
+  const toggleErrorGroup = (key) => {
+    setExpandedErrorGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const renderEditPanel = () => {
+    // Live recognition signals — pure functions of rawText. Updates
+    // every keystroke; cheap regex sweeps so this is fine inline.
+    const signals = countInputSignals(rawText);
+    const hasContent = rawText.trim().length > 0;
+
+    // "User clicked Parse but parser returned nothing recognizable."
+    // Detected from existing state (no new state needed): parse ran,
+    // result was empty in BOTH entries and errors.
+    const parsedNothing =
+      parsed && parsed.entries.length === 0 && parsed.errors.length === 0 && hasContent;
+
+    return (
+      <section className="space-y-4">
+        {/* ── HEADER STRIP ─────────────────────────────────────────
+            Mono-caps section label + plain-English subtitle on the
+            left; help-toggle chip on the right. The chip opens the
+            format drawer below. Visually quieter than the prior
+            `text-lg font-semibold` heading — the textarea is the
+            star of the show, not the header. */}
+        <div className="flex items-end justify-between gap-3 pb-2 border-b border-slate-800/80">
+          <div className="min-w-0">
+            <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-slate-500">
+              Input · raw sources
+            </div>
+            <div className="mt-1 text-[13px] text-slate-300">
+              Paste any mix of Xtream accounts, MAG/Stalker portals, or bulk MAC lists. Each line is auto-detected.
+            </div>
+          </div>
           <button
             type="button"
-            onClick={handleReparse}
-            className="text-sm text-slate-400 hover:text-slate-200 underline"
+            onClick={() => setShowFormatExamples((v) => !v)}
+            aria-expanded={showFormatExamples}
+            className={`flex-shrink-0 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border transition ${
+              showFormatExamples
+                ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
+                : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:text-cyan-200 hover:border-cyan-500/30'
+            }`}
           >
-            Clear preview
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3 h-3">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em]">
+              {showFormatExamples ? 'Hide formats' : 'View formats'}
+            </span>
           </button>
+        </div>
+
+        {/* ── FORMAT REFERENCE DRAWER ──────────────────────────────
+            Bouncy slide-down using the existing `mv-anim-palette-in`
+            keyframes. Each example is a self-contained card with
+            its own Copy button so the user can grab the syntax
+            without retyping. Closed by default — out of the way. */}
+        {showFormatExamples && (
+          <div className="mv-anim-palette-in rounded-lg border border-slate-800/80 bg-slate-900/40 p-3 space-y-2">
+            <div className="flex items-center gap-2 pb-1.5 mb-1 border-b border-slate-800/60">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-3.5 h-3.5 text-cyan-300/70">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+              <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-slate-500">
+                Supported formats — click Copy to grab a starter template
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {FORMAT_EXAMPLES.map((ex, i) => (
+                <FormatExampleCard key={i} label={ex.label} sample={ex.sample} tone={ex.tone} />
+              ))}
+            </div>
+          </div>
         )}
-      </div>
-    </section>
-  );
+
+        {/* ── DEFAULT PORTAL STRIP ─────────────────────────────────
+            Sits ABOVE the textarea as a compact header strip; the
+            user reads it as "this is what we'll use for unqualified
+            MAC lines below". Violet accent matches the Stalker
+            source-type color since this field is Stalker-only. */}
+        <div className="rounded-md border border-violet-500/20 bg-violet-500/[0.04] overflow-hidden">
+          <div className="flex items-stretch">
+            <div className="flex items-center gap-2 px-3 py-2 border-r border-violet-500/15 bg-violet-500/[0.05]">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-3.5 h-3.5 text-violet-300/80 flex-shrink-0">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 17v-2a4 4 0 014-4h4m0 0l-3-3m3 3l-3 3M5 7h14v12H5V7z" />
+              </svg>
+              <div className="leading-tight">
+                <div className="font-mono text-[9px] font-bold uppercase tracking-[0.22em] text-violet-200/90">
+                  Default Portal
+                </div>
+                <div className="font-mono text-[9px] uppercase tracking-[0.16em] text-violet-400/60">
+                  for bare MAC lines
+                </div>
+              </div>
+            </div>
+            <input
+              type="text"
+              placeholder="http://z1mac.com:8080/c/  (optional)"
+              value={defaultPortal}
+              onChange={(e) => setDefaultPortal(e.target.value)}
+              className="flex-1 bg-transparent px-3 py-2 text-[12.5px] font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* ── SOURCES TERMINAL ────────────────────────────────────
+            The textarea is the actual workspace. Custom border so
+            it reads as a code terminal: dark plate, mono content,
+            cyan-tinted edge when there's recognizable content, and
+            a live counter overlay in the bottom-right corner. */}
+        <div className={`relative rounded-md border bg-slate-950 transition-colors overflow-hidden ${
+          parsedNothing
+            ? 'border-rose-500/40 shadow-[0_0_0_3px_rgba(244,63,94,0.06)]'
+            : signals.urls + signals.macs > 0
+              ? 'border-cyan-500/30 shadow-[0_0_0_3px_rgba(34,211,238,0.05)]'
+              : 'border-slate-800'
+        }`}>
+          {/* Top rail — terminal-style chrome strip. */}
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-800/80 bg-slate-900/40">
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500/40" />
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400/40" />
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/40" />
+              <span className="ml-2 font-mono text-[9px] uppercase tracking-[0.22em] text-slate-600">
+                sources.txt
+              </span>
+            </div>
+            <div className="flex items-center gap-2 font-mono text-[10px] tabular-nums">
+              <span className="text-slate-500">
+                {signals.lines}<span className="text-slate-700"> lines</span>
+              </span>
+              {signals.urls > 0 && (
+                <>
+                  <span className="text-slate-800">·</span>
+                  <span className="text-sky-300/90">
+                    {signals.urls}<span className="text-sky-500/60"> URL{signals.urls === 1 ? '' : 's'}</span>
+                  </span>
+                </>
+              )}
+              {signals.macs > 0 && (
+                <>
+                  <span className="text-slate-800">·</span>
+                  <span className="text-violet-300/90">
+                    {signals.macs}<span className="text-violet-500/60"> MAC{signals.macs === 1 ? '' : 's'}</span>
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+
+          <textarea
+            value={rawText}
+            onChange={(e) => setRawText(e.target.value)}
+            rows={12}
+            spellCheck={false}
+            placeholder={'# Paste any mix — auto-detected line-by-line\n\nhttp://server1/get.php?username=u1&password=p1&type=m3u_plus\nhttp://server1/get.php?username=u2&password=p2&type=m3u_plus\n\nPortal ➤ http://portal/c/\nMac    ➤ 00:1A:79:AA:BB:CC\n\n[MAC] ✔ 00:1A:79:11:22:33'}
+            className="w-full bg-transparent px-3.5 py-3 text-[12.5px] font-mono leading-relaxed text-slate-100 placeholder:text-slate-700 focus:outline-none resize-y min-h-[14rem]"
+          />
+        </div>
+
+        {/* ── COULDN'T-RECOGNIZE WARNING ──────────────────────────
+            Fires when the user clicked Parse but the parser found
+            zero entries AND zero errors — the prior silent-fail
+            mode. Inline rose card with the diagnosis + a quick
+            link to the format drawer. */}
+        {parsedNothing && (
+          <div className="mv-anim-palette-in rounded-md border border-rose-500/40 bg-rose-500/[0.06] px-3 py-2.5 flex items-start gap-2.5">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4 text-rose-300 flex-shrink-0 mt-0.5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0 3v.008m9-3.758a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[10.5px] font-bold uppercase tracking-[0.18em] text-rose-200">
+                Couldn't recognize any sources in that input
+              </div>
+              <div className="mt-1 text-[12px] text-rose-200/80">
+                The parser scanned your input and didn't find any Xtream URLs, Stalker portals, or MAC lines.
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => setShowFormatExamples(true)}
+                  className="underline decoration-rose-500/50 hover:decoration-rose-300 text-rose-100"
+                >
+                  Show supported formats
+                </button>
+                {' '}or try one of the templates above.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── ACTION FOOTER ───────────────────────────────────────
+            Mono caps live tally on the left; emerald Parse CTA on
+            the right with a clear "Parse N lines →" call. The CTA
+            gets an inner glow when enabled so it reads as the
+            primary action. Disabled state is flat with a tooltip. */}
+        <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/60">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">
+            {hasContent ? (
+              <>
+                Ready to parse
+                <span className="text-slate-700"> · </span>
+                <span className="text-slate-300 tabular-nums normal-case tracking-normal">
+                  {signals.lines} non-empty line{signals.lines === 1 ? '' : 's'}
+                </span>
+              </>
+            ) : (
+              <span className="text-slate-600">Paste sources above to begin</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {hasPreview && (
+              <button
+                type="button"
+                onClick={handleReparse}
+                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-md border border-slate-800 bg-slate-900/60 text-slate-400 hover:bg-slate-900 hover:text-slate-200 transition font-mono text-[10px] font-bold uppercase tracking-[0.16em]"
+              >
+                Clear
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleParse}
+              disabled={parsing || !hasContent}
+              title={!hasContent ? 'Paste some sources to parse.' : undefined}
+              className={`inline-flex items-center gap-2 h-9 px-4 rounded-md border transition ${
+                parsing
+                  ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200 cursor-wait'
+                  : !hasContent
+                    ? 'border-slate-800 bg-slate-900/40 text-slate-700 cursor-not-allowed'
+                    : 'border-emerald-500/50 bg-emerald-500/[0.12] text-emerald-100 hover:bg-emerald-500/20 hover:border-emerald-400/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_18px_-4px_rgba(16,185,129,0.5)]'
+              }`}
+            >
+              {parsing ? (
+                <>
+                  <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={4} />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em]">Parsing…</span>
+                </>
+              ) : (
+                <>
+                  <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em]">
+                    {hasContent ? `Parse ${signals.lines} line${signals.lines === 1 ? '' : 's'}` : 'Parse'}
+                  </span>
+                  <svg className="w-3.5 h-3.5 transition group-hover:translate-x-0.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  };
 
   const renderPreviewRow = (entry, i) => {
     const { alreadyExists, selected, existingSource, type } = entry;
@@ -802,113 +1402,201 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone, onBulkProgressChange }) 
     );
   };
 
+  // ── Compact single-row renderer (~32px tall) ─────────────────────
+  // Replaces the old card-per-source layout. Each row is one
+  // operational line with: status dot · type chip · username ·
+  // inline progress bar · numeric column · status pill. Density:
+  // 12-15 rows visible at modal default size, ~30 with a tall window.
   const renderProgressRow = (state, idx) => {
-    const meta = statusMeta[state.status] || statusMeta.pending;
     const pct = typeof state.progress === 'number' ? Math.min(100, Math.max(0, state.progress)) : 0;
     const active = state.status === 'queuing' || state.status === 'loading';
     const terminal = state.status === 'done' || state.status === 'failed';
-    // Live elapsed while active; frozen final duration once terminal (captured
-    // via the last meaningful update, which for done/failed is the final transition).
     const elapsed = state.startedAt
       ? (terminal && state.lastUpdatedAt ? state.lastUpdatedAt - state.startedAt : now - state.startedAt)
       : 0;
     const sinceUpdate = state.lastUpdatedAt ? now - state.lastUpdatedAt : 0;
-    const stalled = active && sinceUpdate >= STALL_SOFT_MS;
     const stalledHard = active && sinceUpdate >= STALL_HARD_MS;
     const stageText = state.status === 'done'
       ? 'Done'
       : state.status === 'failed'
-        ? 'Failed'
+        ? (state.error === 'Cancelled before start' ? 'Cancelled' : 'Failed')
         : stageLabel(state);
 
+    const isInDbPhase = (state.stage === 'persisting' || state.stage === 'finalizing');
+
+    // Pull the "saved / total" numbers out of the persisting-phase
+    // message ("Saving channels to database… 500 / 8,238 (39%)").
+    // The numbers are what the user actually wants to see during
+    // this slow phase — without them the row sits at "97%" for
+    // minutes and feels frozen. Declared BEFORE barWidth because
+    // barWidth uses it (TDZ issue otherwise).
+    let saveProgress = null;
+    if (isInDbPhase && state.message) {
+      const m = state.message.match(/([\d,]+)\s*\/\s*([\d,]+)\s*(?:\(\s*(\d+)\s*%\s*\))?/);
+      if (m) {
+        const saved = parseInt(m[1].replace(/,/g, ''), 10);
+        const total = parseInt(m[2].replace(/,/g, ''), 10);
+        const innerPct = m[3] != null ? parseInt(m[3], 10)
+                                       : (total > 0 ? Math.round((saved / total) * 100) : 0);
+        if (Number.isFinite(saved) && Number.isFinite(total) && total > 0) {
+          saveProgress = { saved, total, pct: innerPct };
+        }
+      }
+    }
+
+    // Inline progress fill — colored bar that sits BEHIND the row
+    // content, not above/below.
+    //
+    // The pipeline's outer `pct` advances through milestones
+    // (fetched=10, parsed=40, persisting=97, complete=100) so it
+    // would freeze at 97% for the entire 5-minute INSERT loop —
+    // visually indistinguishable from a frozen row. During the
+    // persisting phase we use the INNER save-phase % instead so
+    // the bar fills smoothly 0→100% as channels land in the DB.
+    // The user sees real motion proportional to the actual work
+    // remaining, which is the bulk of the wall-clock time anyway.
     const barWidth = state.status === 'done' ? 100
       : state.status === 'failed' ? 0
-      : pct;
+      : (saveProgress ? saveProgress.pct : pct);
+
+    const trackBg = state.status === 'done' ? 'bg-emerald-500/10'
+      : state.status === 'failed' ? 'bg-rose-500/10'
+      : stalledHard ? 'bg-amber-500/10'
+      : 'bg-slate-900/60';
+    const fillBg = state.status === 'done' ? 'bg-emerald-500/25'
+      : state.status === 'failed' ? 'bg-rose-500/20'
+      : 'bg-cyan-500/15';
+
+    const dotBg = state.status === 'done' ? 'bg-emerald-400'
+      : state.status === 'failed' ? 'bg-rose-400'
+      : active ? 'bg-cyan-400'
+      : 'bg-slate-600';
+
+    const typeChip = state.entry.type === 'xtream'
+      ? 'text-sky-300 border-sky-500/30 bg-sky-500/[0.08]'
+      : 'text-violet-300 border-violet-500/30 bg-violet-500/[0.08]';
+
+    const statusText = state.status === 'done' ? 'text-emerald-300'
+      : state.status === 'failed' ? 'text-rose-300'
+      : active ? 'text-cyan-200'
+      : 'text-slate-500';
+
+    // Label — just the username for xtream (host is in the group
+    // header) or the MAC for stalker. describeEntry returns the
+    // host-included version; we strip the host since it's redundant
+    // when grouped.
+    const label = state.entry.type === 'xtream'
+      ? (state.entry.username || describeEntry(state.entry))
+      : (state.entry.mac || describeEntry(state.entry));
 
     return (
-      <div
-        key={idx}
-        className={`rounded-lg border px-4 py-3 space-y-2 transition-colors ${
-          state.status === 'done' ? 'border-emerald-500/20 bg-emerald-500/5'
-          : state.status === 'failed' ? 'border-red-500/30 bg-red-500/5'
-          : stalledHard ? 'border-amber-500/30 bg-amber-500/5'
-          : 'border-slate-800 bg-slate-900/40'
-        }`}
-      >
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <span className={typeBadge(state.entry.type)}>
-              {state.entry.type === 'xtream' ? 'Xtream' : 'Stalker'}
-            </span>
-            <span className="text-sm text-slate-200 truncate">{describeEntry(state.entry)}</span>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {state.channelCount > 0 && state.status !== 'failed' && (
-              <span className="text-[11px] font-mono tabular-nums text-slate-500">
-                {state.channelCount.toLocaleString()} ch
-              </span>
+      <li key={idx} className="group">
+        <div className={`relative flex items-center gap-2 h-9 px-3 rounded-md border border-slate-800/80 ${trackBg} overflow-hidden`}>
+          {/* Inline progress fill — sits BEHIND the content. */}
+          <div
+            aria-hidden
+            className={`absolute inset-y-0 left-0 ${fillBg} transition-[width] duration-300`}
+            style={{ width: `${barWidth}%` }}
+          />
+          {/* Animated stripe overlay during the slow DB save step,
+              so the user can distinguish "downloading channels" from
+              "writing to the DB" at a glance. */}
+          {active && isInDbPhase && (
+            <div
+              aria-hidden
+              className="absolute inset-y-0 pointer-events-none opacity-30 mv-refresh-stripe"
+              style={{
+                left: 0,
+                width: `${barWidth}%`,
+                backgroundImage:
+                  'repeating-linear-gradient(-45deg, rgba(34,211,238,0.45) 0 8px, transparent 8px 16px)',
+                backgroundSize: '24px 100%'
+              }}
+            />
+          )}
+
+          {/* All content rides above the fill. */}
+          <span className={`relative z-10 flex-shrink-0 w-1.5 h-1.5 rounded-full ${dotBg}`}>
+            {active && (
+              <span className="absolute inset-0 rounded-full bg-cyan-400 opacity-60 animate-ping" />
             )}
-            {active && typeof state.progress === 'number' && (
-              <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                {Math.round(pct)}%
+          </span>
+
+          <span className={`relative z-10 flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded border font-mono text-[9px] font-bold uppercase tracking-[0.14em] ${typeChip}`}>
+            {state.entry.type === 'xtream' ? 'XTR' : 'STK'}
+          </span>
+
+          <span className="relative z-10 min-w-0 flex-1 font-mono text-[11.5px] text-slate-100 truncate">
+            {label}
+          </span>
+
+          {/* Right-aligned numeric column. During the persisting
+              (DB save) phase, the channel count is replaced with
+              a live "saved / total" display so the user can watch
+              progress climb instead of staring at a static total.
+              Order: channels · pct · elapsed. */}
+          <span className="relative z-10 hidden sm:flex items-center gap-2.5 font-mono text-[10.5px] tabular-nums text-slate-400 flex-shrink-0">
+            {saveProgress ? (
+              // Persisting phase — show live per-batch progress.
+              // saved/total replaces the static channel count, and
+              // the percentage shown is the INNER save-phase pct
+              // (not the outer 97-99% pipeline band) so it climbs
+              // 0→100 visibly during the long INSERT loop.
+              <span
+                title={`Saved ${saveProgress.saved.toLocaleString()} of ${saveProgress.total.toLocaleString()} channels (${saveProgress.pct}%)`}
+                className="inline-flex items-baseline gap-1"
+              >
+                <span className="text-cyan-200">{saveProgress.saved.toLocaleString()}</span>
+                <span className="text-slate-600">/</span>
+                <span>{saveProgress.total.toLocaleString()}</span>
+                <span className="text-slate-600 ml-0.5">ch</span>
               </span>
+            ) : (
+              state.channelCount > 0 && state.status !== 'failed' && (
+                <span title={`${state.channelCount.toLocaleString()} channels`}>
+                  {state.channelCount.toLocaleString()}<span className="text-slate-600 ml-0.5">ch</span>
+                </span>
+              )
+            )}
+            {active && (saveProgress
+              ? (
+                <span title={`${saveProgress.pct}% saved`} className="text-cyan-200">
+                  {saveProgress.pct}%
+                </span>
+              )
+              : (typeof state.progress === 'number' && (
+                <span title={`${Math.round(pct)}%`} className="text-cyan-200">
+                  {Math.round(pct)}%
+                </span>
+              ))
             )}
             {(active || terminal) && state.startedAt && (
-              <span className="text-[11px] font-mono tabular-nums text-slate-500">
+              <span title={`elapsed ${formatElapsed(elapsed)}`} className="text-slate-500">
                 {formatElapsed(elapsed)}
               </span>
             )}
-            <span className={`text-xs font-semibold ${meta.text}`}>
-              {state.status === 'done' && state.channelCount
-                ? `Done · ${state.channelCount.toLocaleString()} channels`
-                : stageText}
-            </span>
-          </div>
+          </span>
+
+          <span className={`relative z-10 flex-shrink-0 font-mono text-[10px] font-bold uppercase tracking-[0.14em] ${statusText}`}>
+            {stalledHard && active ? 'Stalled' : stageText}
+          </span>
         </div>
 
-        <div className="relative w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
-          <div
-            className={`h-full transition-all duration-300 ${meta.bar}`}
-            style={{ width: `${barWidth}%` }}
-          />
-          {stalled && active && (
-            <div
-              className="absolute inset-0 pointer-events-none bg-gradient-to-r from-transparent via-white/10 to-transparent animate-pulse"
-              aria-hidden
-            />
-          )}
-        </div>
-
-        {state.status === 'failed' && state.error && (
-          <div className="text-xs text-red-400 break-words">{state.error}</div>
-        )}
-        {state.status !== 'failed' && state.message && !stalledHard && (
-          <div className="text-xs text-slate-500 truncate">{state.message}</div>
-        )}
-        {stalledHard && (
-          <div className="flex items-center gap-2 text-xs text-amber-300">
-            <svg className="w-3.5 h-3.5 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={4} />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
-            <span className="truncate">
-              Still working on <span className="font-semibold">{stageText.toLowerCase()}</span>
-              {' · this can take a few minutes on larger providers'}
-            </span>
+        {/* Per-row error message — only shown when status is failed
+            AND the error isn't already represented in the error-
+            fingerprint card above. Currently we always show it
+            inline for symmetry; the group card is the bird's-eye
+            summary, the row is the per-source detail. */}
+        {state.status === 'failed' && state.error && state.error !== 'Cancelled before start' && (
+          <div className="mt-1 px-3 text-[10.5px] font-mono text-rose-400/80 truncate" title={state.error}>
+            ↳ {state.error}
           </div>
         )}
-        {stalled && !stalledHard && state.message && (
-          <div className="flex items-center gap-2 text-xs text-slate-500">
-            <span className="inline-block w-1 h-1 rounded-full bg-slate-500 animate-pulse" />
-            <span className="truncate">{state.message} · still working</span>
-          </div>
-        )}
-      </div>
+      </li>
     );
   };
 
-  // Wall-clock span: from the earliest row start to the latest row finish.
-  // Computed once per render — entryStates re-renders on every tick while running.
+  // Wall-clock span across the whole batch.
   const wallClock = (() => {
     const withStart = entryStates.filter((s) => s.startedAt);
     if (withStart.length === 0) return null;
@@ -920,50 +1608,284 @@ const BulkAddSources = ({ onSourceCompleted, onAllDone, onBulkProgressChange }) 
     return now - earliest;
   })();
 
-  const renderProgressPanel = () => (
-    <section className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-lg font-semibold text-slate-100">
-            {phase === 'finished' ? 'All Done' : 'Loading Sources'}
-            {wallClock !== null && (
-              <span className="ml-2 text-sm font-mono tabular-nums text-slate-500 font-normal">
-                {formatElapsed(wallClock)}
+  // Group entries by normalized host so the modal reads as a list
+  // of providers, not a list of 39 sources that all repeat the same
+  // host string. The user previously stared at "http://mrtrb.xyz:8080"
+  // 39 times — once per row.
+  const buildHostGroups = (states) => {
+    const groups = new Map();
+    states.forEach((s, idx) => {
+      const host = normalizeHost(s.entry.server) || 'unknown';
+      if (!groups.has(host)) groups.set(host, []);
+      groups.get(host).push({ state: s, idx });
+    });
+    return groups;
+  };
+
+  // Bucket failures by error message so 24 copies of "HTTP 512:
+  // Unknown Error" collapse into a single card with a count badge.
+  // The user lost the readable rows under 24 lines of identical
+  // red text — fingerprinting + group display fixes that.
+  const buildErrorGroups = (states) => {
+    const groups = new Map();
+    states.forEach((s) => {
+      if (s.status !== 'failed' || !s.error || s.error === 'Cancelled before start') return;
+      const key = s.error.trim();
+      if (!groups.has(key)) {
+        groups.set(key, { error: key, sources: [] });
+      }
+      groups.get(key).sources.push(s);
+    });
+    return Array.from(groups.values()).sort((a, b) => b.sources.length - a.sources.length);
+  };
+
+  const matchesFilter = (state) => {
+    if (progressFilter === 'all') return true;
+    if (progressFilter === 'loading') return state.status === 'queuing' || state.status === 'loading';
+    if (progressFilter === 'failed') return state.status === 'failed';
+    if (progressFilter === 'done') return state.status === 'done';
+    if (progressFilter === 'queued') return state.status === 'pending';
+    return true;
+  };
+
+  const renderProgressPanel = () => {
+    const total = entryStates.length;
+    const finishedCount = doneCount + failedCount;
+    const overallPct = total > 0 ? Math.round((finishedCount / total) * 100) : 0;
+
+    // Filtered + grouped rows
+    const filteredStates = entryStates.filter(matchesFilter);
+    const hostGroups = buildHostGroups(filteredStates);
+    const errorGroups = phase === 'edit' ? [] : buildErrorGroups(entryStates);
+    const hostsSorted = Array.from(hostGroups.keys()).sort();
+
+    const phaseLabel = phase === 'finished' ? 'Run complete' : 'Run in progress';
+    const isRunning = phase === 'running';
+
+    return (
+      <section className="space-y-4">
+
+        {/* ── STICKY HEADER ──────────────────────────────────────
+            Headline visual: stacked progress bar + big mono counts.
+            Sticky at the top so it stays visible while scrolling
+            through the rows below. */}
+        <div className="sticky top-0 z-20 -mx-5 px-5 py-3 -mt-5 mb-2 bg-slate-950 border-b border-slate-800/80 backdrop-blur">
+          {/* Title row */}
+          <div className="flex items-baseline justify-between gap-3 mb-2.5">
+            <div className="flex items-baseline gap-2.5 min-w-0">
+              <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-slate-500">
+                {phaseLabel}
               </span>
-            )}
-          </h3>
-          {phase === 'running' && (
-            <p className="text-xs text-slate-500 mt-0.5">
-              Running up to {MAX_CONCURRENT} at a time to avoid overloading the server.
-            </p>
+              <span className="font-mono text-[10px] text-slate-700">·</span>
+              <span className="font-mono text-[10px] tabular-nums text-slate-400">
+                {wallClock !== null ? formatElapsed(wallClock) : '0s'}
+              </span>
+              {isRunning && (
+                <>
+                  <span className="font-mono text-[10px] text-slate-700">·</span>
+                  <span className="font-mono text-[10px] text-slate-500">
+                    Max {MAX_CONCURRENT} concurrent
+                  </span>
+                </>
+              )}
+            </div>
+            <div className="flex items-baseline gap-1.5 flex-shrink-0">
+              <span className="text-[28px] leading-none font-bold font-mono tabular-nums text-slate-100">
+                {finishedCount}
+              </span>
+              <span className="text-slate-600 font-mono text-base">/</span>
+              <span className="font-mono tabular-nums text-slate-500 text-base">{total}</span>
+            </div>
+          </div>
+
+          {/* Stacked progress bar — done | failed | loading | queued.
+              The headline at-a-glance "what's the state of this job".
+              Each segment colored + labeled with a count overlay
+              when wide enough to fit. */}
+          <StackedProgressBar
+            done={doneCount}
+            failed={failedCount}
+            loading={activeCount}
+            queued={waitingCount}
+            total={total}
+            isRunning={isRunning}
+          />
+
+          {/* Filter chips + summary counts. The counts here mirror
+              the bar segments — they double as filter buttons. */}
+          <div className="mt-3 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <FilterChip
+                active={progressFilter === 'all'}
+                onClick={() => setProgressFilter('all')}
+                label="All"
+                count={total}
+                tone="slate"
+              />
+              {doneCount > 0 && (
+                <FilterChip
+                  active={progressFilter === 'done'}
+                  onClick={() => setProgressFilter('done')}
+                  label="Done"
+                  count={doneCount}
+                  tone="emerald"
+                />
+              )}
+              {failedCount > 0 && (
+                <FilterChip
+                  active={progressFilter === 'failed'}
+                  onClick={() => setProgressFilter('failed')}
+                  label="Failed"
+                  count={failedCount}
+                  tone="rose"
+                />
+              )}
+              {activeCount > 0 && (
+                <FilterChip
+                  active={progressFilter === 'loading'}
+                  onClick={() => setProgressFilter('loading')}
+                  label="Loading"
+                  count={activeCount}
+                  tone="cyan"
+                />
+              )}
+              {waitingCount > 0 && (
+                <FilterChip
+                  active={progressFilter === 'queued'}
+                  onClick={() => setProgressFilter('queued')}
+                  label="Queued"
+                  count={waitingCount}
+                  tone="slate"
+                />
+              )}
+            </div>
+
+            <span className="font-mono text-[10px] tabular-nums text-slate-500">
+              {overallPct}% complete
+            </span>
+          </div>
+        </div>
+
+        {/* ── ERROR FINGERPRINT CARDS ────────────────────────────
+            Group identical errors so 24× HTTP 512s collapse to a
+            single card with a big count badge + expandable affected-
+            sources list. This is what the user couldn't read before:
+            small red text repeating per row. Now it's one prominent
+            card and the per-row clutter goes away. */}
+        {errorGroups.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 px-1">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3 h-3 text-rose-300">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m0 3v.008m9-3.758a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-slate-500">
+                Errors · {errorGroups.length} unique signature{errorGroups.length === 1 ? '' : 's'} across {failedCount} source{failedCount === 1 ? '' : 's'}
+              </span>
+            </div>
+            {errorGroups.map((group, i) => (
+              <ErrorGroupCard
+                key={i}
+                group={group}
+                expanded={expandedErrorGroups.has(group.error)}
+                onToggle={() => toggleErrorGroup(group.error)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* ── HOST-GROUPED SOURCE LIST ───────────────────────────
+            Sources collapsed into a per-host group. The host header
+            shows the host + its in-flight stats; the rows beneath
+            are the per-account progress lines. Default state is
+            expanded; the user can collapse hosts they've triaged. */}
+        <div className="max-h-[55vh] overflow-y-auto pr-1 space-y-3 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
+          {hostsSorted.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-600">
+                No sources match this filter
+              </span>
+              {progressFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setProgressFilter('all')}
+                  className="mt-3 px-3 py-1 rounded-md border border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800 text-xs"
+                >
+                  Show all sources
+                </button>
+              )}
+            </div>
+          ) : (
+            hostsSorted.map((host) => (
+              <HostGroup
+                key={host}
+                host={host}
+                items={hostGroups.get(host)}
+                collapsed={collapsedHosts.has(host)}
+                onToggle={() => toggleHost(host)}
+                renderRow={(item) => renderProgressRow(item.state, item.idx)}
+              />
+            ))
           )}
         </div>
-        <div className="flex items-center gap-3 text-xs">
-          <span className="text-emerald-300">{doneCount} done</span>
-          {failedCount > 0 && <span className="text-red-300">{failedCount} failed</span>}
-          {activeCount > 0 && <span className="text-blue-300">{activeCount} loading</span>}
-          {waitingCount > 0 && <span className="text-slate-400">{waitingCount} queued</span>}
-          <span className="text-slate-500">/ {entryStates.length} total</span>
-        </div>
-      </div>
 
-      <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
-        {entryStates.map(renderProgressRow)}
-      </div>
+        {/* ── FOOTER ACTIONS ─────────────────────────────────────
+            Sticky-style row of decisive actions. Cancel remaining
+            (pending only) on the left, Retry failed (re-queues all
+            failed entries) on the right. Both visually distinct
+            from the rest of the UI so they don't get lost. */}
+        <div className="flex items-center justify-between gap-3 pt-3 border-t border-slate-800/80">
+          <div className="flex items-center gap-2">
+            {waitingCount > 0 && isRunning && (
+              <button
+                type="button"
+                onClick={handleCancelRemaining}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-slate-700 bg-slate-900/60 hover:bg-rose-500/10 hover:border-rose-500/30 hover:text-rose-200 text-slate-300 transition"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.16em]">
+                  Cancel {waitingCount} queued
+                </span>
+              </button>
+            )}
+          </div>
 
-      {phase === 'finished' && (
-        <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={handleReparse}
-            className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-100 hover:bg-slate-700"
-          >
-            Add more
-          </button>
+          <div className="flex items-center gap-2">
+            {failedCount > 0 && (
+              <button
+                type="button"
+                onClick={handleRetryFailed}
+                title={`Re-queue ${failedCount} failed source${failedCount === 1 ? '' : 's'} for another attempt`}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/[0.08] text-amber-200 hover:bg-amber-500/15 hover:border-amber-500/50 transition shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_12px_-4px_rgba(251,191,36,0.4)]"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.16em]">
+                  Retry {failedCount} failed
+                </span>
+              </button>
+            )}
+            {phase === 'finished' && (
+              <button
+                type="button"
+                onClick={handleReparse}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md border border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-200 hover:bg-emerald-500/15 hover:border-emerald-500/50 transition"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                </svg>
+                <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.16em]">
+                  Add more
+                </span>
+              </button>
+            )}
+          </div>
         </div>
-      )}
-    </section>
-  );
+      </section>
+    );
+  };
 
   return (
     <div className="mt-8 space-y-8">

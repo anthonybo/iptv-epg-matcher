@@ -40,20 +40,32 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
  */
 const ChannelPickerModal = ({
   isOpen,
-  onClose,
-  title = 'Pick a channel',
+  isVisible,            // separate from isOpen so we can refocus on each restore
+  onAfterPick,          // page wires this to minimize-on-success
   subtitle,
   loading = false,
   error = null,
   candidates = [],
   onPick,
+  onSearch = null,      // (query) => void — runs a fresh backend search
+  currentQuery = null,  // last query that produced the current candidates
   currentChannelId = null,
   currentSourceId = null,
   favorites = [],
   favoritesLoading = false,
   isFavorite = () => false,
-  onToggleFavorite = null
+  onToggleFavorite = null,
+  onStatusChange = null,
+  autoFocusRef = null   // page can mirror this to DrawerShell's onVisibleFocus
 }) => {
+  // `filter` is the live input value. It does double duty:
+  //   - while typing: client-side narrowing of the visible rows
+  //   - on Enter: triggers onSearch(filter) which re-queries the
+  //     backend and replaces `candidates` (loadingstate handled by
+  //     parent)
+  // The two roles share one input because that's how every halfway
+  // decent search UI works (Spotlight, VSCode command palette, etc.)
+  // — type to scope, Enter to commit.
   const [filter, setFilter] = useState('');
   const [pickingId, setPickingId] = useState(null);
   // Per-row pending heart toggle keyed by `${sourceId}::${channelId}`,
@@ -66,32 +78,67 @@ const ChannelPickerModal = ({
   // user is browsing with no candidates and has favorites saved.
   const [activeTab, setActiveTab] = useState('results');
 
+  // First-mount: pre-fill the input with the current backend query
+  // so the user can immediately edit + press Enter to re-search
+  // (e.g. "nhl" → tweak to "nhl network") instead of typing from
+  // scratch. Choose default tab once on mount.
   useEffect(() => {
     if (!isOpen) return;
-    setFilter('');
+    setFilter(currentQuery || '');
     setPickingId(null);
     setPendingFavKey(null);
-    // Default-tab heuristic. We pick once at open time; the user can
-    // freely flip after — we don't want the tab snapping under their
-    // hand as candidates trickle in.
     const shouldShowFavoritesFirst =
       candidates.length === 0 && !loading && favorites.length > 0;
     setActiveTab(shouldShowFavoritesFirst ? 'favorites' : 'results');
-    const t = setTimeout(() => inputRef.current?.focus(), 50);
-    return () => clearTimeout(t);
-    // We only want this to run on open transitions — not when candidates
-    // arrive mid-life, otherwise the tab would jump.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  // When a fresh backend search lands (currentQuery changes — e.g.,
+  // the user submits a new query from the TopBar while the drawer
+  // is docked), sync the filter input to match. We unconditionally
+  // overwrite the local filter because the alternative ("preserve
+  // mid-typing") leaves the input out of sync with the results
+  // permanently when the user searches from outside the drawer
+  // — which was the bug report.
   useEffect(() => {
-    if (!isOpen) return undefined;
-    const onKey = (e) => {
-      if (e.key === 'Escape') onClose?.();
+    if (!currentQuery) return;
+    setFilter(currentQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentQuery]);
+
+  // Visible→true (open OR restore): refocus the filter input so the
+  // user can start typing immediately after popping the drawer back.
+  useEffect(() => {
+    if (!isVisible) return;
+    const t = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => clearTimeout(t);
+  }, [isVisible]);
+
+  // Expose the focus method to the parent so DrawerShell can refocus
+  // on restore (this is the bridge between the drawer wrapper and
+  // the input deep inside the modal body).
+  useEffect(() => {
+    if (!autoFocusRef) return;
+    autoFocusRef.current = {
+      focus: () => inputRef.current?.focus()
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, onClose]);
+  }, [autoFocusRef]);
+
+  // Report status to the dock. Deliberately omit `onStatusChange` from
+  // the deps — the parent passes an inline arrow that has a fresh
+  // identity every render, which would trigger an infinite loop here
+  // (the effect fires → setStatus → parent re-renders → new callback
+  // identity → effect re-fires). The setStatus implementation in
+  // usePanelManager is idempotent so calling it with the same payload
+  // multiple times is harmless.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!onStatusChange) return;
+    if (loading) onStatusChange({ kind: 'working', text: 'Searching…' });
+    else if (error) onStatusChange({ kind: 'error', text: 'Error' });
+    else if (candidates.length > 0) onStatusChange({ kind: 'idle', text: `${candidates.length} results` });
+    else onStatusChange({ kind: 'idle', text: favorites.length ? `${favorites.length} favs` : 'Idle' });
+  }, [loading, error, candidates.length, favorites.length]);
 
   // Normalize a favorite row into the same channel shape `onPick`
   // expects. Lets us use ONE click handler for both tabs.
@@ -133,7 +180,9 @@ const ChannelPickerModal = ({
     setPickingId(key);
     try {
       const ok = await onPick(channel);
-      if (ok) onClose?.();
+      // Successful play → minimize (parent's call). The drawer stays
+      // mounted so a follow-up search is one keystroke away.
+      if (ok) onAfterPick?.();
     } finally {
       setPickingId(null);
     }
@@ -390,86 +439,61 @@ const ChannelPickerModal = ({
   const tabTotal = isFavoritesTab ? favorites.length : candidates.length;
   const tabShown = tabRows.length;
 
+  // Submit a new backend search. Only fires when:
+  //   - onSearch is wired (not in alt-sources-only mode)
+  //   - the input has ≥2 chars
+  //   - the value actually differs from currentQuery (no point
+  //     re-querying for the same string)
+  // Also clears the local filter so the new results show in full
+  // (filter is preserved across the round-trip otherwise feels stale).
+  const submitSearch = () => {
+    if (!onSearch) return;
+    const q = filter.trim();
+    if (q.length < 2) return;
+    if (currentQuery && q.toLowerCase() === currentQuery.toLowerCase()) {
+      // Same query — no-op to avoid burning a backend cycle; refocus
+      // the input so the user can keep editing.
+      inputRef.current?.focus();
+      return;
+    }
+    onSearch(q);
+  };
+
+  const hasFilterDivergence =
+    onSearch &&
+    filter.trim().length >= 2 &&
+    currentQuery &&
+    filter.trim().toLowerCase() !== currentQuery.toLowerCase();
+
   return (
-    <div
-      className="fixed inset-0 z-[10000] flex items-start justify-center px-4 pt-16 backdrop-blur-md bg-slate-950/80"
-      onClick={onClose}
-      style={{
-        backgroundImage:
-          'radial-gradient(ellipse at center top, rgba(15,23,42,0.55), rgba(2,6,23,0.85) 70%)'
-      }}
-    >
-      <div
-        className="relative w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/95 shadow-[0_30px_80px_-15px_rgba(0,0,0,0.7),0_0_0_1px_rgba(148,163,184,0.05)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-500/60 to-transparent" />
-
-        {/* Header */}
-        <div className="flex items-start justify-between gap-4 px-6 pt-5 pb-4 border-b border-slate-800/80">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-300/90 bg-cyan-500/10 border border-cyan-500/20">
-                <span className="relative inline-flex h-1.5 w-1.5">
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-60 animate-ping" />
-                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-cyan-300" />
-                </span>
-                Picker
-              </span>
-              <h2 className="text-[15px] font-semibold text-slate-100 leading-none">
-                {title}
-              </h2>
-            </div>
-            {subtitle && (
-              <p className="mt-2 text-xs text-slate-400 truncate">{subtitle}</p>
-            )}
+    <div className="flex-1 min-h-0 flex flex-col">
+        {subtitle && (
+          <div className="flex-shrink-0 px-4 py-2 border-b border-slate-800/60">
+            <p className="text-[11px] text-slate-400 truncate" title={subtitle}>{subtitle}</p>
           </div>
-          <button
-            onClick={onClose}
-            className="group/close p-1.5 rounded-lg text-slate-500 hover:bg-slate-800/80 hover:text-slate-100 transition"
-            title="Close"
-          >
-            <svg className="w-4 h-4 transition group-hover/close:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+        )}
 
-        {/* Tab strip + filter input. Tabs are slim segmented controls
-            with mono counts; selecting a tab does NOT clear the filter,
-            so a query like "reelz" filters both views. */}
-        <div className="px-6 pt-4 pb-3 flex items-center gap-3 flex-wrap">
-          <div className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900/60 p-0.5">
-            <TabButton
-              active={!isFavoritesTab}
-              onClick={() => setActiveTab('results')}
-              label="Results"
-              count={candidates.length}
-              loading={loading}
-              accentColor="cyan"
-            />
-            <TabButton
-              active={isFavoritesTab}
-              onClick={() => setActiveTab('favorites')}
-              label="Favorites"
-              count={favorites.length}
-              loading={favoritesLoading}
-              accentColor="amber"
-              icon={
-                <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor">
-                  <path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" />
-                </svg>
-              }
-            />
-          </div>
-
-          <div className={`relative group/filter flex-1 min-w-[180px] rounded-xl border transition ${
-            filter
-              ? 'border-cyan-500/40 bg-slate-900 shadow-[0_0_0_3px_rgba(34,211,238,0.07)]'
-              : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
+        {/* ── SEARCH + FILTER BAR ──────────────────────────────────
+            One input, two roles. Typing narrows the visible rows
+            client-side; pressing Enter (or clicking the ↵ button)
+            re-queries the backend with the input value. The little
+            "↵ to search" chip lights up when the input has diverged
+            from the active backend query, so the user can see
+            they're about to commit a new search. */}
+        <div className="flex-shrink-0 px-4 pt-3 pb-2.5 border-b border-slate-800/60 space-y-2">
+          <div className={`relative group/filter rounded-xl border transition ${
+            hasFilterDivergence
+              ? 'border-amber-500/50 bg-slate-900 shadow-[0_0_0_3px_rgba(251,191,36,0.08)]'
+              : filter
+                ? 'border-cyan-500/40 bg-slate-900 shadow-[0_0_0_3px_rgba(34,211,238,0.07)]'
+                : 'border-slate-800 bg-slate-900/60 hover:border-slate-700'
           }`}>
             <svg className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 transition ${
-              filter ? 'text-cyan-300' : 'text-slate-500 group-hover/filter:text-slate-400'
+              hasFilterDivergence
+                ? 'text-amber-300'
+                : filter
+                  ? 'text-cyan-300'
+                  : 'text-slate-500 group-hover/filter:text-slate-400'
             }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
@@ -478,12 +502,24 @@ const ChannelPickerModal = ({
               type="text"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder={isFavoritesTab
-                ? 'Filter favorites by name, host, or account…'
-                : 'Filter by name, host, account, MAC, or category…'}
-              className="w-full bg-transparent pl-10 pr-24 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && onSearch) {
+                  e.preventDefault();
+                  submitSearch();
+                }
+              }}
+              placeholder={
+                onSearch
+                  ? (isFavoritesTab
+                      ? 'Filter favorites · ⏎ to search all channels'
+                      : 'Type to filter · ⏎ to search the backend')
+                  : (isFavoritesTab
+                      ? 'Filter favorites by name, host, or account…'
+                      : 'Filter by name, host, account, MAC, or category…')
+              }
+              className="w-full bg-transparent pl-10 pr-32 py-2.5 text-sm text-slate-200 placeholder-slate-500 focus:outline-none"
             />
-            <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
               {filter && (
                 <button
                   type="button"
@@ -491,24 +527,90 @@ const ChannelPickerModal = ({
                     setFilter('');
                     inputRef.current?.focus();
                   }}
-                  className="p-0.5 rounded text-slate-500 hover:text-slate-200 transition"
-                  title="Clear filter"
+                  className="p-1 rounded text-slate-500 hover:text-slate-200 transition"
+                  title="Clear input"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
               )}
-              <span className="font-mono text-[10px] text-slate-500 tabular-nums">
+              <span className="font-mono text-[10px] text-slate-500 tabular-nums px-1">
                 {tabLoading ? '—' : (filter ? `${tabShown}/${tabTotal}` : tabTotal)}
               </span>
+              {onSearch && (
+                <button
+                  type="button"
+                  onClick={submitSearch}
+                  disabled={!hasFilterDivergence && (!filter || filter.trim().length < 2)}
+                  title="Search the backend (Enter)"
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] transition ${
+                    hasFilterDivergence
+                      ? 'border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/15 shadow-[0_0_8px_-2px_rgba(251,191,36,0.5)] mv-anim-led-breath'
+                      : filter && filter.trim().length >= 2
+                        ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-200 hover:bg-cyan-500/15'
+                        : 'border-slate-800 bg-slate-900/40 text-slate-600 cursor-not-allowed'
+                  }`}
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                  Search
+                </button>
+              )}
             </div>
+          </div>
+
+          {/* Tab strip + active-query chip. The chip shows what the
+              CURRENT backend results are for; when the input has
+              diverged from it, the chip dims and the Search button
+              lights up to invite a re-query. */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900/60 p-0.5">
+              <TabButton
+                active={!isFavoritesTab}
+                onClick={() => setActiveTab('results')}
+                label="Results"
+                count={candidates.length}
+                loading={loading}
+                accentColor="cyan"
+              />
+              <TabButton
+                active={isFavoritesTab}
+                onClick={() => setActiveTab('favorites')}
+                label="Favorites"
+                count={favorites.length}
+                loading={favoritesLoading}
+                accentColor="amber"
+                icon={
+                  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="currentColor">
+                    <path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" />
+                  </svg>
+                }
+              />
+            </div>
+
+            {currentQuery && !isFavoritesTab && (
+              <span
+                className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border font-mono text-[10px] tracking-tight transition ${
+                  hasFilterDivergence
+                    ? 'border-slate-800 bg-slate-900/40 text-slate-600'
+                    : 'border-cyan-500/25 bg-cyan-500/[0.06] text-cyan-200/90'
+                }`}
+                title={`Current backend results are for "${currentQuery}"`}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-2.5 h-2.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <span className="truncate max-w-[160px]">"{currentQuery}"</span>
+              </span>
+            )}
           </div>
         </div>
 
-        {/* Body */}
+        {/* Body — fills the remaining drawer height. */}
         <div
-          className="max-h-[60vh] overflow-y-auto px-3 pb-3 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]"
+          className="flex-1 overflow-y-auto px-3 pb-3 pt-2 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]"
           style={{ WebkitOverflowScrolling: 'touch' }}
         >
           {tabLoading ? (
@@ -529,8 +631,8 @@ const ChannelPickerModal = ({
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-800/80 flex items-center justify-between text-[10px] uppercase tracking-[0.16em] text-slate-500">
-          <span className="font-mono normal-case tracking-normal text-[11px] text-slate-500">
+        <div className="flex-shrink-0 px-4 py-2 border-t border-slate-800/80 flex items-center justify-between text-[10px] uppercase tracking-[0.16em] text-slate-500">
+          <span className="font-mono normal-case tracking-normal text-[11px] text-slate-500 truncate">
             {tabLoading
               ? (isFavoritesTab ? 'Loading favorites…' : 'Scanning your sources…')
               : tabTotal === 0
@@ -539,14 +641,13 @@ const ChannelPickerModal = ({
               ? `${tabShown} of ${tabTotal} match`
               : `${tabTotal} ${isFavoritesTab ? (tabTotal === 1 ? 'favorite' : 'favorites') : (tabTotal === 1 ? 'channel' : 'channels')}`}
           </span>
-          <span className="flex items-center gap-2">
-            <kbd className="px-1.5 py-0.5 rounded border border-slate-700 bg-slate-900 font-mono text-[10px] text-slate-400 normal-case tracking-normal">
+          <span className="flex items-center gap-1.5 flex-shrink-0">
+            <kbd className="px-1 py-px rounded border border-slate-800 bg-slate-900 font-mono text-[9px] text-slate-500 normal-case tracking-normal">
               Esc
             </kbd>
-            <span className="text-slate-600 normal-case tracking-normal">to close</span>
+            <span className="text-slate-700 normal-case tracking-normal">min</span>
           </span>
         </div>
-      </div>
     </div>
   );
 };
@@ -667,4 +768,9 @@ const EmptyState = ({ scope, filtered, totalCount }) => {
   );
 };
 
-export default ChannelPickerModal;
+// React.memo prevents needless re-renders when the parent
+// re-renders for unrelated reasons (commercial-orchestrator ticks,
+// keystrokes in the topbar, panel-manager status updates on other
+// drawers). The parent passes stable callbacks now, so the default
+// shallow prop comparison is sufficient.
+export default React.memo(ChannelPickerModal);

@@ -50,12 +50,60 @@
   100% { transform: translateY(0); opacity: 1; }
 }
 
-.mv-anim-heart-pop   { animation: heart-pop 360ms cubic-bezier(0.34, 1.56, 0.64, 1); }
-.mv-anim-heart-ring  { animation: heart-ring 500ms ease-out forwards; }
-.mv-anim-heart-spark { animation: heart-spark 460ms ease-out forwards; }
-.mv-anim-panel-in    { animation: mv-panel-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
-.mv-anim-palette-in  { animation: mv-palette-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
-.mv-anim-osd-in      { animation: mv-osd-bottom-in 120ms ease-out both; }
+/* Drawer modules slide in from the rail's right edge with a slight
+   "rack-slot" snap — overshoot at the front of the curve, settle back.
+   The opacity ramp is faster than the transform so the spine accent
+   reads early. */
+@keyframes mv-drawer-in {
+  0%   { transform: translateX(-18px); opacity: 0; }
+  60%  { transform: translateX(1px);   opacity: 1; }
+  100% { transform: translateX(0);     opacity: 1; }
+}
+
+/* Minimized → restored: same arc but slightly snappier so restoring
+   from a taskbar chip feels distinct from a fresh open. */
+@keyframes mv-drawer-restore {
+  0%   { transform: translateX(-10px) scale(0.985); opacity: 0; }
+  100% { transform: translateX(0)     scale(1);     opacity: 1; }
+}
+
+/* Chip pops into the dock from below. Faint overshoot so it feels
+   like the module just clicked into a rack slot. */
+@keyframes mv-chip-in {
+  0%   { transform: translateY(10px) scale(0.85); opacity: 0; }
+  55%  { transform: translateY(-2px) scale(1.04); opacity: 1; }
+  100% { transform: translateY(0)    scale(1);    opacity: 1; }
+}
+
+/* LED-style breathing pulse for the "working" status dot on chips.
+   Cyan signals an in-flight query that's still doing useful work. */
+@keyframes mv-led-breath {
+  0%, 100% { opacity: 1;    box-shadow: 0 0 6px rgba(34,211,238,0.7); }
+  50%      { opacity: 0.55; box-shadow: 0 0 2px rgba(34,211,238,0.3); }
+}
+
+.mv-anim-heart-pop      { animation: heart-pop 360ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+.mv-anim-heart-ring     { animation: heart-ring 500ms ease-out forwards; }
+.mv-anim-heart-spark    { animation: heart-spark 460ms ease-out forwards; }
+.mv-anim-panel-in       { animation: mv-panel-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.mv-anim-palette-in     { animation: mv-palette-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.mv-anim-osd-in         { animation: mv-osd-bottom-in 120ms ease-out both; }
+.mv-anim-drawer-in      { animation: mv-drawer-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.mv-anim-drawer-restore { animation: mv-drawer-restore 180ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+.mv-anim-chip-in        { animation: mv-chip-in 280ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.mv-anim-led-breath     { animation: mv-led-breath 1.4s ease-in-out infinite; }
+
+/* Indeterminate progress stripe — diagonal bands that translate
+   continuously to signal "still working" without committing to a
+   percentage. Used by the MyIPTVs refresh banner. */
+@keyframes mv-refresh-stripe {
+  0%   { background-position: 0 0; }
+  100% { background-position: 68px 0; }
+}
+.mv-refresh-stripe { animation: mv-refresh-stripe 800ms linear infinite; }
+/* Light variant for cases where the stripe sits on a colored fill
+   (vs a transparent surface). Same motion, lighter overlay. */
+.mv-refresh-stripe-light { position: relative; }
 
 /* Diagonal-hash texture used by empty preset slots. Evokes the
    "deactivated channel" silkscreen on broadcast equipment. */

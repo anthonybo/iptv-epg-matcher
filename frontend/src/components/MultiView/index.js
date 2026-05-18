@@ -16,3 +16,6 @@ export { default as TileOSD } from './TileOSD';
 export { default as FavoritesPanel } from './FavoritesPanel';
 export { default as LayoutPanel } from './LayoutPanel';
 export { default as CommandPalette } from './CommandPalette';
+export { default as AdBreakChip } from './AdBreakChip';
+export { default as DrawerShell } from './DrawerShell';
+export { default as MultiViewTaskBar } from './MultiViewTaskBar';

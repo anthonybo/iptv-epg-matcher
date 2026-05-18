@@ -56,6 +56,10 @@ export function useChannelPicker({
   // with a "Now playing" badge.
   const [currentChannelId, setCurrentChannelId] = useState(null);
   const [currentSourceId, setCurrentSourceId] = useState(null);
+  // The query string that produced the current `candidates`. The
+  // modal reads this to label the active-query chip and detect
+  // "input has diverged → invite re-search" state.
+  const [currentQuery, setCurrentQuery] = useState(null);
 
   const close = useCallback(() => {
     setIsOpen(false);
@@ -68,6 +72,7 @@ export function useChannelPicker({
       setSwapTarget(null);
       setCurrentChannelId(null);
       setCurrentSourceId(null);
+      setCurrentQuery(null);
     }, 50);
   }, []);
 
@@ -127,6 +132,7 @@ export function useChannelPicker({
     setTitle('Pick a channel');
     setSubtitle('Browse favorites or type to search');
     setCandidates([]);
+    setCurrentQuery(null);
     setError(null);
     setLoading(false);
     setIsOpen(true);
@@ -153,6 +159,7 @@ export function useChannelPicker({
     setTitle('Pick a channel to add');
     setSubtitle(`Matches for "${q}"`);
     setCandidates([]);
+    setCurrentQuery(q);
     setError(null);
     setLoading(true);
     setIsOpen(true);
@@ -205,6 +212,7 @@ export function useChannelPicker({
     setTitle('Switch source');
     setSubtitle(`Showing channels matching "${q}"`);
     setCandidates([]);
+    setCurrentQuery(q);
     setError(null);
     setLoading(true);
     setIsOpen(true);
@@ -326,6 +334,7 @@ export function useChannelPicker({
       error,
       candidates,
       onPick,
+      currentQuery,
       currentChannelId,
       currentSourceId
     },

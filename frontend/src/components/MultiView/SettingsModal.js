@@ -96,7 +96,6 @@ const Toggle = ({ active, onToggle, label, hint }) => (
 
 const SettingsModal = ({
   isOpen,
-  onClose,
   streams,
   autoFillSettings,
   setAutoFillSettings
@@ -110,14 +109,6 @@ const SettingsModal = ({
     (patch) => setAutoFillSettings((prev) => ({ ...prev, ...patch })),
     [setAutoFillSettings]
   );
-
-  // Escape closes the modal.
-  useEffect(() => {
-    if (!isOpen) return;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, onClose]);
 
   // Scroll-spy: highlight the section the user is currently looking at.
   // The rootMargin puts the active band roughly between 30%–45% from
@@ -160,58 +151,15 @@ const SettingsModal = ({
 
   return (
     <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center p-6"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="settings-modal-title"
+      className="relative flex-1 min-h-0 grid grid-rows-[1fr_auto] bg-slate-950"
+      style={{
+        backgroundImage:
+          'radial-gradient(ellipse 600px 400px at top left, rgba(16,185,129,0.06) 0%, transparent 70%), radial-gradient(ellipse 600px 400px at bottom right, rgba(99,102,241,0.05) 0%, transparent 70%)'
+      }}
     >
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md" />
-
-      {/* Modal panel */}
-      <div
-        className="relative w-full max-w-5xl max-h-[85vh] grid grid-rows-[auto_1fr_auto] rounded-2xl border border-slate-800/80 bg-slate-950 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.7)] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          // Subtle two-tone atmosphere; reads more like control-room
-          // glass than a flat slate sheet.
-          backgroundImage:
-            'radial-gradient(ellipse 600px 400px at top left, rgba(16,185,129,0.06) 0%, transparent 70%), radial-gradient(ellipse 600px 400px at bottom right, rgba(99,102,241,0.05) 0%, transparent 70%)'
-        }}
-      >
-        {/* Top accent rule */}
-        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-emerald-500/50 to-transparent" />
-
-        {/* HEADER */}
-        <header className="px-8 py-5 border-b border-slate-800/60 flex items-start justify-between gap-6">
-          <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-[0.3em] text-emerald-400/80 font-mono">
-              Multi-View · Settings
-            </div>
-            <h2
-              id="settings-modal-title"
-              className="mt-1.5 text-2xl font-semibold text-slate-50 tracking-tight"
-            >
-              Configure your control deck
-            </h2>
-            <p className="mt-1 text-sm text-slate-400">
-              Auto-fill behaviour, player engine, and display options for the multi-view grid.
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="h-9 w-9 shrink-0 flex items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 text-slate-500 hover:text-slate-200 hover:border-slate-700 transition"
-            aria-label="Close settings"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </header>
-
-        {/* BODY: section rail + scrollable content */}
-        <div className="grid grid-cols-[220px_1fr] overflow-hidden">
+        {/* BODY: section rail + scrollable content. Drawer width ≥520
+            keeps the two-column layout readable. */}
+        <div className="grid grid-cols-[160px_1fr] overflow-hidden min-h-0">
           {/* Left rail */}
           <nav className="border-r border-slate-800/60 px-4 py-6 overflow-y-auto">
             <div className="text-[10px] uppercase tracking-[0.3em] text-slate-600 font-mono mb-3 px-2">
@@ -493,6 +441,40 @@ const SettingsModal = ({
                 label="Live scores ticker"
                 hint="Scrolling sports ticker at the bottom of the screen"
               />
+
+              {/* Commercial auto-skip — Phase 1 audio + Phase 2 visual
+                  detection. Master toggle gates the whole feature;
+                  sub-toggles let the user lean on just audio (best
+                  for sports) or include logo detection (best for
+                  cable shows). */}
+              <Toggle
+                active={Boolean(autoFillSettings.commercialAutoSkip)}
+                onToggle={() =>
+                  setSetting({ commercialAutoSkip: !autoFillSettings.commercialAutoSkip })
+                }
+                label="Commercial auto-skip"
+                hint="Mute when a break starts on the audible tile and unmute the next tile that isn't in a break"
+              />
+              {autoFillSettings.commercialAutoSkip && (
+                <div className="ml-4 pl-3 border-l border-slate-800/80 space-y-3">
+                  <Toggle
+                    active={autoFillSettings.commercialDetectAudio !== false}
+                    onToggle={() =>
+                      setSetting({ commercialDetectAudio: autoFillSettings.commercialDetectAudio === false })
+                    }
+                    label="Detect by audio"
+                    hint="Silence + loudness step at the break boundary. Best signal for live sports."
+                  />
+                  <Toggle
+                    active={autoFillSettings.commercialDetectLogo !== false}
+                    onToggle={() =>
+                      setSetting({ commercialDetectLogo: autoFillSettings.commercialDetectLogo === false })
+                    }
+                    label="Detect by logo + black frame"
+                    hint="Watches the channel bug in the corner; adds black-frame boundaries. Best for cable shows like Reelz."
+                  />
+                </div>
+              )}
             </section>
 
             {/* ─── 04 · LOCATION ──────────────────────────────────── */}
@@ -513,28 +495,20 @@ const SettingsModal = ({
           </div>
         </div>
 
-        {/* FOOTER */}
-        <footer className="px-8 py-4 border-t border-slate-800/60 bg-slate-950/60 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-[0.2em] text-slate-500">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              {streams.length}/{autoFillSettings.maxSlots} slots
-            </span>
-            <span className="text-slate-700">·</span>
-            <span>{activePlayer.title}</span>
-            <span className="text-slate-700">·</span>
-            <span>Ticker {autoFillSettings.showLiveScoresTicker ? 'on' : 'off'}</span>
-          </div>
-          <button
-            onClick={onClose}
-            className="px-5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-emerald-950 text-sm font-semibold tracking-tight shadow-[0_0_24px_-6px_rgba(16,185,129,0.6)] transition"
-          >
-            Done
-          </button>
+        {/* FOOTER — live read-out only. Closing is handled by the
+            DrawerShell's minimize/close buttons in the header. */}
+        <footer className="px-4 py-2.5 border-t border-slate-800/60 bg-slate-950/60 flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.18em] text-slate-500">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            {streams.length}/{autoFillSettings.maxSlots} slots
+          </span>
+          <span className="text-slate-700">·</span>
+          <span>{activePlayer.title}</span>
+          <span className="text-slate-700">·</span>
+          <span>Ticker {autoFillSettings.showLiveScoresTicker ? 'on' : 'off'}</span>
         </footer>
-      </div>
     </div>
   );
 };
 
-export default SettingsModal;
+export default React.memo(SettingsModal);

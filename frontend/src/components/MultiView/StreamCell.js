@@ -1,8 +1,9 @@
-import React, { memo } from 'react';
+import React, { memo, useCallback } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import IPTVPlayer from '../../IPTVPlayer';
 import TileOSD from './TileOSD';
+import AdBreakChip from './AdBreakChip';
 
 /**
  * StreamCellInner — the actual tile.
@@ -35,6 +36,8 @@ const StreamCellInner = memo(({
   quality,
   isFindingAlternative,
   isFavorited,
+  isAutoMuted = false,
+  adSignals = [],
   playerType = 'mpegts-player',
   onToggleMute,
   onVolumeChange,
@@ -46,6 +49,8 @@ const StreamCellInner = memo(({
   onBlacklist,
   onRemove,
   onToggleFavorite,
+  onUndoAdMute,
+  onVideoElement,
   onQualityDetected,
   dragHandleProps
 }) => {
@@ -57,6 +62,14 @@ const StreamCellInner = memo(({
           : 'rounded-xl border border-slate-800/70 bg-slate-900/70 shadow-2xl shadow-slate-950/40'
       }`}
     >
+      {/* Ad-break chip — appears when the commercial detector has
+          muted this tile. Undo button logs a false-positive and
+          unmutes. Mounted above the OSD's title strip vertically so
+          it doesn't get covered by it. */}
+      {!isTheatreMode && isAutoMuted && (
+        <AdBreakChip signals={adSignals} onUndo={onUndoAdMute} />
+      )}
+
       {/* On-screen-display overlay. Always-on title strip + hover
           control strip. The strip absorbs all pointer events for its
           own area; everywhere else clicks pass through to the player. */}
@@ -93,6 +106,7 @@ const StreamCellInner = memo(({
           volume={volume}
           onQualityDetected={onQualityDetected}
           onStreamDead={onStreamDead}
+          onVideoElement={onVideoElement}
           useResilientProxy={true}
         />
       </div>
@@ -111,6 +125,8 @@ const StreamCellInner = memo(({
     prevProps.quality?.resolution === nextProps.quality?.resolution &&
     prevProps.isFindingAlternative === nextProps.isFindingAlternative &&
     prevProps.isFavorited === nextProps.isFavorited &&
+    prevProps.isAutoMuted === nextProps.isAutoMuted &&
+    prevProps.adSignals === nextProps.adSignals &&
     prevProps.playerType === nextProps.playerType
   );
 });
@@ -129,6 +145,8 @@ export const SortableStreamCell = ({
   quality,
   isFindingAlternative,
   isFavorited,
+  isAutoMuted = false,
+  adSignals = [],
   playerType = 'mpegts-player',
   onToggleMute,
   onVolumeChange,
@@ -140,6 +158,8 @@ export const SortableStreamCell = ({
   onBlacklist,
   onRemove,
   onToggleFavorite,
+  onUndoAdMute,
+  onVideoElement,
   onQualityDetected
 }) => {
   const {
@@ -173,9 +193,13 @@ export const SortableStreamCell = ({
         quality={quality}
         isFindingAlternative={isFindingAlternative}
         isFavorited={isFavorited}
+        isAutoMuted={isAutoMuted}
+        adSignals={adSignals}
         playerType={playerType}
         onToggleMute={onToggleMute}
         onVolumeChange={onVolumeChange}
+        onUndoAdMute={onUndoAdMute}
+        onVideoElement={onVideoElement}
         onRefresh={onRefresh}
         onFindAlternative={onFindAlternative}
         onFindDifferentGame={onFindDifferentGame}

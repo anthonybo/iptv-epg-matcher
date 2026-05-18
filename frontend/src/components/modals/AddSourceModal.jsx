@@ -8,16 +8,17 @@ import iptvSourcesService from '../../services/iptvSourcesService';
  * Global Add-IPTV-Source modal.
  *
  * Lives in <AppLayout> rather than inside the MyIPTVs page so a
- * bulk-add can be minimized and survive page navigation. Previously the
- * modal (including the BulkAddSources orchestrator + its EventSource
- * subscriptions + the queue pump) was rendered inside MyIPTVs, so the
- * moment you switched away from that page the entire bulk-add died and
- * any queued sources evaporated.
+ * bulk-add can be minimized and survive page navigation. Previously
+ * the modal (including BulkAddSources + EventSources + queue pump)
+ * was rendered inside MyIPTVs, so switching away killed everything.
  *
- * State + visibility comes from AppContext:
- *   - showAddModal           — true = visible, false = invisible (but DOM-mounted while loading)
- *   - backgroundLoadings     — keeps the modal alive when minimized
- *   - sourceListRevision     — bumped on every change so MyIPTVs / userSources refresh
+ * Layout: max-w-4xl when bulk-add is running (more rows visible),
+ * max-w-2xl otherwise. The modal header is its own band with a
+ * live status chip + two clearly distinct buttons:
+ *   - Minimize  (when bg work is active)  -> keeps loading alive
+ *   - Close     (always)                   -> closes the modal
+ *     The two buttons are visually different so the user can't
+ *     accidentally tear down a 5-minute bulk-add.
  */
 export default function AddSourceModal() {
   const {
@@ -30,9 +31,6 @@ export default function AddSourceModal() {
     loadingError,
   } = useAppContext();
 
-  // Keep `userSources` in AppContext fresh whenever something changes.
-  // Same fetch the App.js handler used to do — wired here directly so
-  // the modal doesn't need a callback prop from App.js.
   const refreshUserSources = async () => {
     try {
       const sources = await iptvSourcesService.getUserSources();
@@ -42,72 +40,122 @@ export default function AddSourceModal() {
     }
   };
 
-  // Render the modal whenever it's explicitly visible OR there's any
-  // background-load entry (single-source or 'bulk-add'). Keeps the
-  // BulkAddSources component mounted while minimized — that's what
-  // preserves the EventSources + queue across page navigation.
   if (!showAddModal && backgroundLoadings.size === 0) return null;
 
-  const minimized = !showAddModal;
+  const bulkActive = backgroundLoadings.has?.('bulk-add');
+  const anyActive = backgroundLoadings.size > 0;
+
+  // Modal sizes up to 4xl while a bulk-add is running so the user can
+  // see 12-15 source rows at once instead of 5-6.
+  const modalWidth = bulkActive ? 'max-w-4xl' : 'max-w-2xl';
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 transition-opacity duration-200 ${
+      className={`fixed inset-0 z-50 flex items-center justify-center p-4 transition-opacity duration-200 ${
         showAddModal ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
       }`}
+      style={{
+        // Subtle two-tone vignette so the modal reads as floating
+        // glass rather than a flat sheet over solid black.
+        background:
+          'radial-gradient(ellipse at center top, rgba(15,23,42,0.78) 0%, rgba(0,0,0,0.88) 70%)'
+      }}
     >
       <div
-        className={`bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col transition-transform duration-200 ${
+        className={`relative w-full ${modalWidth} max-h-[92vh] bg-slate-950 border border-slate-800/80 rounded-2xl shadow-[0_30px_80px_-15px_rgba(0,0,0,0.8),0_0_0_1px_rgba(148,163,184,0.04)] overflow-hidden flex flex-col transition-transform duration-200 ${
           showAddModal ? 'scale-100' : 'scale-95'
         }`}
       >
-        {/* Modal Header */}
-        <div className="bg-slate-800 px-6 py-4 border-b border-slate-700 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h3 className="text-xl font-semibold text-slate-100">Add IPTV Source</h3>
-            {backgroundLoadings.has?.('bulk-add') && (
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-[0.14em] text-blue-300 bg-blue-500/15 border border-blue-500/30">
-                <span className="relative flex h-1.5 w-1.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-70" />
-                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-blue-400" />
+        {/* Top accent hairline — cyan when work is in flight,
+            emerald when idle. The visual at-a-glance "is this thing
+            doing something" cue. */}
+        <span
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 top-0 h-px ${
+            anyActive
+              ? 'bg-gradient-to-r from-transparent via-cyan-400/70 to-transparent'
+              : 'bg-gradient-to-r from-transparent via-emerald-400/60 to-transparent'
+          }`}
+        />
+
+        {/* ── HEADER ─────────────────────────────────────────────── */}
+        <header className="flex-shrink-0 flex items-center justify-between gap-3 px-5 py-3.5 border-b border-slate-800/80 bg-slate-950">
+          <div className="flex items-center gap-3 min-w-0">
+            {/* Module marker — small square icon tile, identity for the modal */}
+            <span className="flex-shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md border border-cyan-500/30 bg-cyan-500/10 text-cyan-300">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+              </svg>
+            </span>
+            <div className="min-w-0">
+              <div className="font-mono text-[9px] uppercase tracking-[0.22em] text-slate-600 leading-tight">
+                IPTV Sources
+              </div>
+              <h3 className="text-[15px] font-bold text-slate-100 leading-tight">
+                Add IPTV Source
+              </h3>
+            </div>
+
+            {/* Live status chip — pulsing LED + mono label. Stronger
+                than the prior washed-out blue pill: amber while
+                fetching/loading, distinct enough to read at a glance. */}
+            {bulkActive && (
+              <span className="ml-2 inline-flex items-center gap-2 px-2 py-1 rounded-md border border-amber-500/40 bg-amber-500/[0.08] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                <span className="relative inline-flex h-2 w-2">
+                  <span className="absolute inset-0 rounded-full bg-amber-400 animate-ping opacity-70" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_6px_rgba(251,191,36,0.7)]" />
                 </span>
-                Loading in background
+                <span className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-amber-200">
+                  Loading
+                </span>
               </span>
             )}
           </div>
-          <button
-            onClick={() => setShowAddModal(false)}
-            className="inline-flex items-center gap-1.5 text-slate-400 hover:text-slate-200 transition-colors px-2 py-1 hover:bg-slate-700 rounded-lg"
-            title={
-              backgroundLoadings.size > 0
-                ? 'Minimize — loading continues in the background'
-                : 'Close'
-            }
-          >
-            {backgroundLoadings.size > 0 ? (
-              <>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 13H5" />
-                </svg>
-                <span className="text-xs">Minimize</span>
-              </>
-            ) : (
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            )}
-          </button>
-        </div>
 
-        {/* Modal Content */}
-        <div className="flex-1 overflow-y-auto p-6">
+          {/* Right-side action cluster. Two visually distinct buttons:
+              MINIMIZE (cyan-toned, keeps work alive) and CLOSE
+              (rose-on-hover, destroys the modal state). When no
+              background work, only Close shows. */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            {anyActive && (
+              <button
+                type="button"
+                onClick={() => setShowAddModal(false)}
+                title="Minimize — loading continues in the background. Reopen from the menu."
+                className="group inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border border-cyan-500/30 bg-cyan-500/[0.06] text-cyan-200 hover:bg-cyan-500/10 hover:border-cyan-500/40 transition"
+              >
+                <svg className="w-3.5 h-3.5 transition group-hover:-translate-y-px" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 19h14" />
+                </svg>
+                <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em]">
+                  Minimize
+                </span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                // When work is in flight, Close still just minimizes
+                // (we never want to silently tear down a queue). The
+                // user can fully exit by canceling from the bulk-add
+                // panel itself.
+                setShowAddModal(false);
+              }}
+              title={anyActive ? 'Close the window (loading continues)' : 'Close'}
+              className="group inline-flex items-center justify-center h-8 w-8 rounded-md border border-slate-800 bg-slate-900/60 text-slate-400 hover:bg-rose-500/15 hover:border-rose-500/40 hover:text-rose-200 transition"
+            >
+              <svg className="w-3.5 h-3.5 transition group-hover:rotate-90" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        {/* ── BODY ───────────────────────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto p-5 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
           <Configuration
             embedded
             onSourceCompleted={async () => {
-              // A bulk-added source just finished — refresh the user
-              // source list so MyIPTVs (if mounted) sees it. Even when
-              // minimized this still fires because BulkAddSources is
-              // alive in this always-mounted modal.
               bumpSourceListRevision();
               await refreshUserSources();
             }}
@@ -129,7 +177,6 @@ export default function AddSourceModal() {
                 return;
               }
 
-              // Single-source (xtream/stalker) load completed.
               setShowAddModal(false);
               setBackgroundLoadings(new Map());
               bumpSourceListRevision();
@@ -145,9 +192,6 @@ export default function AddSourceModal() {
             allowedTabs={['xtream', 'stalker', 'bulk']}
             onLoadingChange={(isLoading, sessionId, status, variant) => {
               if (isLoading && sessionId) {
-                // The synthetic 'bulk-add' session represents the entire
-                // batch (not a single source), so label it explicitly
-                // instead of trying to extract a hostname.
                 let sourceName = sessionId === 'bulk-add' ? 'Bulk Add' : 'IPTV Source';
                 if (status && sessionId !== 'bulk-add') {
                   const portalMatch = status.match(/portal[:\s]+([^\s,]+)/i);

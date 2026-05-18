@@ -14,6 +14,751 @@ const statusStyles = {
   error: 'border-rose-500/40 bg-rose-500/15 text-rose-200',
 };
 
+// ─── Provider-card sub-components ──────────────────────────────────
+// All module-level so they don't re-create on every Configuration
+// render. Self-contained state for UI affordances (paste-flash,
+// eye-toggle, fallback drawer); the "real" data lives in the parent.
+
+const ICONS = {
+  globe: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <circle cx="12" cy="12" r="9" />
+      <path strokeLinecap="round" d="M3 12h18M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18" />
+    </svg>
+  ),
+  user: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <circle cx="12" cy="8" r="3.5" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 20c1.5-3.5 4.2-5 7-5s5.5 1.5 7 5" />
+    </svg>
+  ),
+  key: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <circle cx="8" cy="14" r="3" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 12L21 3m-3 0l3 3m-7 4l3 3" />
+    </svg>
+  ),
+  portal: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 7.54a5 5 0 010 7.07" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  ),
+  mac: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <rect x="3" y="6" width="18" height="12" rx="2" />
+      <path strokeLinecap="round" d="M7 12h10M9 9v6M15 9v6" />
+    </svg>
+  ),
+  eyeOn: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M2.5 12s3.5-7 9.5-7 9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ),
+  eyeOff: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3 3l18 18M10.6 6.1A9.5 9.5 0 0112 6c6 0 9.5 6.5 9.5 6.5a14.7 14.7 0 01-3.4 4M6.1 6.6A14.7 14.7 0 002.5 12s3.5 7 9.5 7c1.5 0 2.9-.3 4.1-.8M9.9 9.9a3 3 0 104.2 4.2" />
+    </svg>
+  ),
+  clipboard: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-full h-full">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+    </svg>
+  )
+};
+
+// Sky for Xtream, violet for Stalker. Centralised so every part of
+// the card pulls from a single source of truth.
+const PROVIDER_THEMES = {
+  xtream: {
+    label: 'Xtream',
+    spineGrad: 'from-sky-300/70 via-sky-400/20 to-transparent',
+    spineSolid: 'bg-sky-300',
+    spineGlow: 'rgba(56,189,248,0.55)',
+    moduleTile: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+    accentText: 'text-sky-300',
+    accentRing: 'focus-within:border-sky-500/40 focus-within:shadow-[0_0_0_3px_rgba(56,189,248,0.08)]'
+  },
+  stalker: {
+    label: 'Stalker',
+    spineGrad: 'from-violet-300/70 via-violet-400/20 to-transparent',
+    spineSolid: 'bg-violet-300',
+    spineGlow: 'rgba(167,139,250,0.55)',
+    moduleTile: 'border-violet-500/30 bg-violet-500/10 text-violet-300',
+    accentText: 'text-violet-300',
+    accentRing: 'focus-within:border-violet-500/40 focus-within:shadow-[0_0_0_3px_rgba(167,139,250,0.08)]'
+  }
+};
+
+/** Pure URL parser — returns `{ ok, host, port, protocol }` or null. */
+const parseProviderUrl = (raw) => {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return null;
+  try {
+    const u = new URL(trimmed.match(/^https?:\/\//i) ? trimmed : `http://${trimmed}`);
+    if (!u.host) return null;
+    return {
+      ok: true,
+      host: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? '443' : '80'),
+      protocol: u.protocol.replace(':', '')
+    };
+  } catch {
+    return null;
+  }
+};
+
+/** Format MAC for display: strip non-hex, group into 6 colon-separated
+ *  pairs, uppercased. Returns possibly-partial display while typing. */
+const formatMacDisplay = (raw) => {
+  const hex = (raw || '').toUpperCase().replace(/[^0-9A-F]/g, '').slice(0, 12);
+  const pairs = [];
+  for (let i = 0; i < hex.length; i += 2) pairs.push(hex.slice(i, i + 2));
+  return pairs.join(':');
+};
+
+const isValidMac = (raw) => {
+  const hex = (raw || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  return hex.length === 12;
+};
+
+/**
+ * IconTile — 28×28 slate tile with a faint border, hosting one of
+ * the ICONS svgs. Used as a label affordance to the left of each
+ * input field so the form reads as a rack of modules.
+ */
+const IconTile = ({ icon, color = 'slate', size = 'md' }) => {
+  const COLORS = {
+    slate:  'border-slate-800 bg-slate-900 text-slate-400',
+    sky:    'border-sky-500/30 bg-sky-500/10 text-sky-300',
+    violet: 'border-violet-500/30 bg-violet-500/10 text-violet-300',
+    cyan:   'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
+  };
+  const SIZES = {
+    sm: { box: 'w-6 h-6', svg: 'w-3 h-3' },
+    md: { box: 'w-7 h-7', svg: 'w-3.5 h-3.5' },
+    lg: { box: 'w-9 h-9', svg: 'w-4 h-4' }
+  };
+  const s = SIZES[size] || SIZES.md;
+  return (
+    <span className={`flex-shrink-0 ${s.box} inline-flex items-center justify-center rounded-md border ${COLORS[color] || COLORS.slate}`}>
+      <span className={s.svg}>{ICONS[icon]}</span>
+    </span>
+  );
+};
+
+/**
+ * PasteButton — small ghost button at the right of an input. Reads
+ * navigator.clipboard, calls onPaste(text), flashes "Pasted" for
+ * ~1.2s on success.
+ */
+const PasteButton = ({ onPaste, disabled }) => {
+  const [flashed, setFlashed] = useState(false);
+  const handle = async (e) => {
+    e.preventDefault();
+    if (disabled) return;
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        onPaste?.(text.trim());
+        setFlashed(true);
+        setTimeout(() => setFlashed(false), 1200);
+      }
+    } catch {
+      /* user denied / unsupported */
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={handle}
+      disabled={disabled}
+      title="Paste from clipboard"
+      className={`inline-flex items-center gap-1 h-7 px-2 rounded-md border text-[10px] font-mono uppercase tracking-[0.16em] transition ${
+        flashed
+          ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+          : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+      } disabled:opacity-40 disabled:cursor-not-allowed`}
+    >
+      {flashed ? (
+        <>
+          <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+          Pasted
+        </>
+      ) : (
+        <>
+          <span className="w-2.5 h-2.5">{ICONS.clipboard}</span>
+          Paste
+        </>
+      )}
+    </button>
+  );
+};
+
+/**
+ * EyeToggle — sits absolutely inside the password input's right
+ * edge. Slate when masked, cyan-tinted when revealed.
+ */
+const EyeToggle = ({ visible, onToggle, disabled }) => (
+  <button
+    type="button"
+    tabIndex={-1}
+    onClick={(e) => { e.preventDefault(); onToggle(); }}
+    disabled={disabled}
+    title={visible ? 'Hide password' : 'Show password'}
+    className={`absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-6 h-6 rounded transition ${
+      visible
+        ? 'text-cyan-300 hover:bg-cyan-500/10'
+        : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800'
+    } disabled:opacity-40 disabled:cursor-not-allowed`}
+  >
+    <span className="w-3.5 h-3.5">{visible ? ICONS.eyeOn : ICONS.eyeOff}</span>
+  </button>
+);
+
+/**
+ * ProviderCard — the credential-form wrapper. Colored spine on the
+ * top edge + LED, mono caps section header, optional "RESTORED"
+ * status chip on the right when fields are pre-filled.
+ */
+const ProviderCard = ({ kind, restored, onClearRestored, children }) => {
+  const theme = PROVIDER_THEMES[kind] || PROVIDER_THEMES.xtream;
+  return (
+    <div className="relative rounded-xl border border-slate-800/80 bg-slate-950 overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_8px_24px_-12px_rgba(0,0,0,0.6)]">
+      {/* Top-edge identity spine */}
+      <span
+        aria-hidden
+        className={`pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r ${theme.spineGrad}`}
+      />
+      <span
+        aria-hidden
+        className={`pointer-events-none absolute left-4 top-0 h-px w-6 ${theme.spineSolid}`}
+        style={{ boxShadow: `0 0 8px ${theme.spineGlow}` }}
+      />
+
+      {/* Header — module marker + restored chip */}
+      <header className="flex items-center justify-between gap-3 px-4 pt-4 pb-3 border-b border-slate-800/60">
+        <div className="flex items-center gap-2.5">
+          <IconTile icon={kind === 'stalker' ? 'portal' : 'globe'} color={kind === 'stalker' ? 'violet' : 'sky'} />
+          <div className="leading-tight">
+            <div className="font-mono text-[9px] font-bold uppercase tracking-[0.22em] text-slate-500">
+              Provider Credentials
+            </div>
+            <div className={`mt-0.5 font-mono text-[11px] font-bold uppercase tracking-[0.2em] ${theme.accentText}`}>
+              {theme.label}
+            </div>
+          </div>
+        </div>
+        {restored && (
+          <button
+            type="button"
+            onClick={onClearRestored}
+            title="Clear the saved credentials"
+            className="group inline-flex items-center gap-1.5 h-6 px-2 rounded-md border border-cyan-500/30 bg-cyan-500/[0.06] text-cyan-200 hover:bg-cyan-500/10 hover:border-cyan-500/40 transition"
+          >
+            <span className="relative inline-flex h-1.5 w-1.5">
+              <span className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-60" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-cyan-300" />
+            </span>
+            <span className="font-mono text-[9px] font-bold uppercase tracking-[0.18em]">
+              Restored
+            </span>
+            <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-cyan-400/60 group-hover:text-cyan-300 transition">
+              · Clear
+            </span>
+          </button>
+        )}
+      </header>
+
+      {/* Body */}
+      <div className="p-4 space-y-3">{children}</div>
+
+      {/* Footer note */}
+      <div className="px-4 py-2 border-t border-slate-800/60 bg-slate-900/30">
+        <div className="flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.2em] text-slate-600">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-2.5 h-2.5">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 11c0 3.5-2.5 6.5-6 7.5C2.5 17.5 0 14.5 0 11V5l6-2 6 2v6z" transform="translate(6, 0)" />
+          </svg>
+          Credentials persist locally in this browser only
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * FieldRow — icon tile + label + input + (optional) right adornment +
+ * inline validation row. The pattern every credentials field uses.
+ */
+const FieldRow = ({
+  icon,
+  iconColor = 'slate',
+  label,
+  hint,
+  validationOk,
+  validationMessage,
+  validationTone = 'emerald',
+  rightAdornment,
+  inputRef,
+  className = '',
+  inputClassName = '',
+  ...inputProps
+}) => {
+  const showValidation = validationMessage != null;
+  const validTone = {
+    emerald: { text: 'text-emerald-300', dot: 'bg-emerald-400' },
+    rose:    { text: 'text-rose-300',    dot: 'bg-rose-400' },
+    slate:   { text: 'text-slate-500',   dot: 'bg-slate-500' }
+  }[validationTone] || { text: 'text-slate-500', dot: 'bg-slate-500' };
+
+  return (
+    <div className={`space-y-1 ${className}`}>
+      <div className="flex items-center gap-2.5">
+        <IconTile icon={icon} color={iconColor} />
+        <div className="min-w-0 flex-1">
+          <label className="font-mono text-[9px] font-bold uppercase tracking-[0.22em] text-slate-500 block">
+            {label}
+          </label>
+          <div className="relative mt-0.5 flex items-center gap-2">
+            <div className={`relative flex-1 rounded-md border border-slate-800 bg-slate-900/70 transition focus-within:border-cyan-500/40 focus-within:shadow-[0_0_0_3px_rgba(34,211,238,0.06)] ${inputClassName}`}>
+              <input
+                ref={inputRef}
+                {...inputProps}
+                className="w-full bg-transparent px-3 py-2 pr-8 font-mono text-[12.5px] text-slate-100 placeholder:text-slate-600 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              {/* Right adornment INSIDE the input (eye toggle, etc.) */}
+              {rightAdornment && (
+                <div className="absolute inset-y-0 right-0 flex items-center pr-1">
+                  {rightAdornment}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Validation / hint row — always reserves space when shown so
+          the form doesn't jump as the user types. */}
+      {(showValidation || hint) && (
+        <div className="pl-[2.375rem] flex items-center gap-1.5 min-h-[14px]">
+          {showValidation ? (
+            <>
+              <span className={`inline-flex h-1.5 w-1.5 rounded-full ${validTone.dot}`} />
+              <span className={`font-mono text-[10px] tabular-nums ${validTone.text}`}>
+                {validationMessage}
+              </span>
+            </>
+          ) : (
+            <span className="font-mono text-[10px] text-slate-600 truncate">{hint}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * M3UFallback — collapsible footer band. At rest it's a thin slate
+ * strip with a "+ Add an M3U fallback" toggle; expanded it shows
+ * the URL field + the dropzone in a compact card. M3U is the
+ * SECONDARY path on the Xtream tab; demoting it visually reflects
+ * that priority.
+ */
+const M3UFallback = ({ m3uUrl, setM3uUrl, m3uFile, setM3uFile, disabled, Dropzone, hasContent }) => {
+  // Auto-open if the user has previously entered an M3U URL or
+  // picked a file (so a returning user doesn't have to re-discover
+  // the drawer to see what's stored).
+  const [open, setOpen] = useState(hasContent);
+  return (
+    <div className="rounded-md border border-slate-800/80 bg-slate-900/40 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-slate-900/70 transition text-left"
+      >
+        <svg
+          className={`flex-shrink-0 w-3 h-3 text-slate-500 transition ${open ? 'rotate-90' : ''}`}
+          fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+          M3U Fallback
+        </span>
+        <span className="font-mono text-[9.5px] uppercase tracking-[0.16em] text-slate-600">
+          {hasContent ? '· configured' : '· optional — use a playlist URL or file instead'}
+        </span>
+        {hasContent && (
+          <span className="ml-auto inline-flex h-1.5 w-1.5 rounded-full bg-cyan-400" />
+        )}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-1 border-t border-slate-800/60 space-y-2 mv-anim-palette-in">
+          <div className="flex items-center gap-2">
+            <IconTile icon="globe" color="slate" size="sm" />
+            <input
+              type="text"
+              placeholder="https://example.com/playlist.m3u"
+              value={m3uUrl}
+              onChange={(e) => setM3uUrl(e.target.value)}
+              disabled={disabled}
+              className="flex-1 rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5 font-mono text-[12px] text-slate-100 placeholder:text-slate-600 focus:border-cyan-500/40 focus:outline-none disabled:opacity-50"
+            />
+          </div>
+          <Dropzone onDrop={(acceptedFiles) => setM3uFile(acceptedFiles[0])} disabled={disabled}>
+            {({ getRootProps, getInputProps }) => {
+              const cls = [
+                'flex items-center gap-2.5 px-3 py-2 rounded-md border border-dashed transition',
+                disabled
+                  ? 'border-slate-800 bg-slate-900/40 cursor-not-allowed opacity-50'
+                  : 'border-slate-700 bg-slate-900/40 hover:border-cyan-500/40 hover:bg-slate-900/60 cursor-pointer'
+              ].join(' ');
+              return (
+                <div {...getRootProps({ className: cls })}>
+                  <input {...getInputProps()} />
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="w-3.5 h-3.5 text-slate-500 flex-shrink-0">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.9 5 5 0 019.55-1.65A4.5 4.5 0 0118 16M12 11v6m0-6l-3 3m3-3l3 3" />
+                  </svg>
+                  {m3uFile ? (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-emerald-300">Loaded</span>
+                      <span className="font-mono text-[11px] text-slate-300 truncate">{m3uFile.name}</span>
+                      <span className="font-mono text-[9.5px] text-slate-600">· click to replace</span>
+                    </div>
+                  ) : (
+                    <span className="font-mono text-[10.5px] uppercase tracking-[0.18em] text-slate-500">
+                      Drop M3U file here or click to browse
+                    </span>
+                  )}
+                </div>
+              );
+            }}
+          </Dropzone>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * PrimaryLoadButton — the GO button at the footer. Emerald with
+ * inner glow when enabled; flat slate outline when disabled.
+ * Matches the Parse button in BulkAddSources visually so the app's
+ * primary-action vocabulary stays consistent.
+ */
+const PrimaryLoadButton = ({ label, onClick, disabled, loading }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    disabled={disabled || loading}
+    className={`inline-flex items-center gap-2 h-10 px-5 rounded-md border transition ${
+      loading
+        ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200 cursor-wait'
+        : disabled
+          ? 'border-slate-800 bg-slate-900/40 text-slate-700 cursor-not-allowed'
+          : 'border-emerald-500/50 bg-emerald-500/[0.12] text-emerald-100 hover:bg-emerald-500/20 hover:border-emerald-400/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_18px_-4px_rgba(16,185,129,0.5)]'
+    }`}
+  >
+    {loading ? (
+      <>
+        <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={4} />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em]">Loading…</span>
+      </>
+    ) : (
+      <>
+        <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em]">{label}</span>
+        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+        </svg>
+      </>
+    )}
+  </button>
+);
+
+/**
+ * XtreamPanel — the Xtream Login tab body. A single Provider Card
+ * holds the credential trio (Server URL · Username · Password) with
+ * icon-tile labels, inline URL validation, and a paste/eye toggle
+ * pair on the relevant fields. Below the card, the M3U fallback
+ * lives in a collapsible single-row drawer so the primary path
+ * (credentials → Load) gets visual priority.
+ */
+const XtreamPanel = ({
+  xtreamServer, xtreamUsername, xtreamPassword,
+  setXtreamServer, setXtreamUsername, setXtreamPassword,
+  m3uUrl, setM3uUrl, m3uFile, setM3uFile,
+  isLoading, onLoad, Dropzone
+}) => {
+  // Detect "restored from localStorage" — we infer it from the
+  // initial mount state: if any field is pre-filled when the panel
+  // first renders, the user is returning. The chip is dismissible
+  // and never reappears until next mount.
+  const initialFilledRef = useRef(
+    Boolean((xtreamServer || '').trim() || (xtreamUsername || '').trim() || (xtreamPassword || '').trim())
+  );
+  const [restored, setRestored] = useState(initialFilledRef.current);
+  const [passwordVisible, setPasswordVisible] = useState(false);
+
+  const clearRestored = () => {
+    setXtreamServer(''); setXtreamUsername(''); setXtreamPassword('');
+    setRestored(false);
+  };
+
+  // URL validation — show a parsed host:port preview when valid, a
+  // rose hint when content is present but malformed.
+  const urlParsed = parseProviderUrl(xtreamServer);
+  const urlInvalid = xtreamServer.trim().length > 0 && !urlParsed;
+
+  const canLoad = Boolean(
+    !isLoading
+    && xtreamServer.trim()
+    && xtreamUsername.trim()
+    && xtreamPassword
+  );
+
+  return (
+    <div className="mt-6 space-y-4">
+      <ProviderCard
+        kind="xtream"
+        restored={restored}
+        onClearRestored={clearRestored}
+      >
+        {/* Server URL */}
+        <FieldRow
+          icon="globe"
+          iconColor="sky"
+          label="Server URL"
+          type="text"
+          placeholder="http://example.com:8080"
+          value={xtreamServer}
+          onChange={(e) => setXtreamServer(e.target.value)}
+          disabled={isLoading}
+          spellCheck={false}
+          autoComplete="off"
+          validationMessage={
+            urlParsed ? `${urlParsed.host}:${urlParsed.port} · ${urlParsed.protocol}`
+            : urlInvalid ? 'Looks malformed — expected http://host:port'
+            : null
+          }
+          validationTone={urlParsed ? 'emerald' : urlInvalid ? 'rose' : 'slate'}
+          hint="Paste the URL your provider gave you. Port defaults to 80/443."
+        />
+        {/* Paste affordance is rendered as a sibling row beneath since
+            embedding inside the input would crowd the validation. */}
+        <div className="pl-[2.375rem] -mt-0.5 flex justify-end">
+          <PasteButton
+            disabled={isLoading}
+            onPaste={(text) => {
+              // Try to auto-extract URL + credentials when the user
+              // pastes an M3U-style URL like
+              //   http://host/get.php?username=X&password=Y&type=...
+              // — saves them from manually splitting it.
+              const trimmed = text.trim();
+              try {
+                const u = new URL(trimmed);
+                const user = u.searchParams.get('username');
+                const pass = u.searchParams.get('password');
+                if (user || pass) {
+                  setXtreamServer(`${u.protocol}//${u.host}`);
+                  if (user) setXtreamUsername(user);
+                  if (pass) setXtreamPassword(pass);
+                  return;
+                }
+              } catch { /* not a URL with auth — just fall through */ }
+              setXtreamServer(trimmed);
+            }}
+          />
+        </div>
+
+        {/* Username */}
+        <FieldRow
+          icon="user"
+          iconColor="slate"
+          label="Username"
+          type="text"
+          placeholder="Your Xtream username"
+          value={xtreamUsername}
+          onChange={(e) => setXtreamUsername(e.target.value)}
+          disabled={isLoading}
+          autoComplete="username"
+          hint=""
+        />
+
+        {/* Password */}
+        <FieldRow
+          icon="key"
+          iconColor="slate"
+          label="Password"
+          type={passwordVisible ? 'text' : 'password'}
+          placeholder="Your Xtream password"
+          value={xtreamPassword}
+          onChange={(e) => setXtreamPassword(e.target.value)}
+          disabled={isLoading}
+          autoComplete="current-password"
+          rightAdornment={
+            <EyeToggle
+              visible={passwordVisible}
+              onToggle={() => setPasswordVisible((v) => !v)}
+              disabled={isLoading}
+            />
+          }
+          hint=""
+        />
+      </ProviderCard>
+
+      {/* M3U fallback — collapsed drawer at the bottom of the panel.
+          The Xtream tab's primary affordance is the credentials
+          above; M3U is the alternative path. */}
+      <M3UFallback
+        m3uUrl={m3uUrl}
+        setM3uUrl={setM3uUrl}
+        m3uFile={m3uFile}
+        setM3uFile={setM3uFile}
+        disabled={isLoading}
+        Dropzone={Dropzone}
+        hasContent={Boolean((m3uUrl || '').trim() || m3uFile)}
+      />
+
+      {/* Footer action band — Test connection (placeholder) on the
+          left, primary Load button on the right. */}
+      <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/60">
+        <button
+          type="button"
+          disabled
+          title="Coming soon — quick credentials check without a full load"
+          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border border-slate-800 bg-slate-900/40 text-slate-600 cursor-not-allowed"
+        >
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em]">
+            Test connection · soon
+          </span>
+        </button>
+
+        <PrimaryLoadButton
+          label="Load Xtream Channels"
+          loading={isLoading}
+          disabled={!canLoad}
+          onClick={onLoad}
+        />
+      </div>
+    </div>
+  );
+};
+
+/**
+ * StalkerPanel — twin of XtreamPanel for the MAG/Stalker tab. Same
+ * Provider Card chrome with a violet spine + LED. The MAC field
+ * normalises display (uppercase + colons every 2 chars) and shows
+ * a green LED once the value resolves to 6 hex octets.
+ */
+const StalkerPanel = ({
+  stalkerPortalUrl, stalkerMacAddress,
+  setStalkerPortalUrl, setStalkerMacAddress,
+  isLoading, onLoad
+}) => {
+  const initialFilledRef = useRef(
+    Boolean((stalkerPortalUrl || '').trim() || (stalkerMacAddress || '').trim())
+  );
+  const [restored, setRestored] = useState(initialFilledRef.current);
+
+  const clearRestored = () => {
+    setStalkerPortalUrl(''); setStalkerMacAddress('');
+    setRestored(false);
+  };
+
+  const urlParsed = parseProviderUrl(stalkerPortalUrl);
+  const urlInvalid = stalkerPortalUrl.trim().length > 0 && !urlParsed;
+  const macDisplay = formatMacDisplay(stalkerMacAddress);
+  const macValid = isValidMac(stalkerMacAddress);
+  const macHasContent = stalkerMacAddress.trim().length > 0;
+
+  const canLoad = Boolean(!isLoading && stalkerPortalUrl.trim() && macValid);
+
+  return (
+    <div className="mt-6 space-y-4">
+      <ProviderCard
+        kind="stalker"
+        restored={restored}
+        onClearRestored={clearRestored}
+      >
+        {/* Portal URL */}
+        <FieldRow
+          icon="portal"
+          iconColor="violet"
+          label="Portal URL"
+          type="text"
+          placeholder="http://portal.url/stalker_portal/"
+          value={stalkerPortalUrl}
+          onChange={(e) => setStalkerPortalUrl(e.target.value)}
+          disabled={isLoading}
+          spellCheck={false}
+          autoComplete="off"
+          validationMessage={
+            urlParsed ? `${urlParsed.host}:${urlParsed.port} · ${urlParsed.protocol}`
+            : urlInvalid ? 'Looks malformed — expected http://host:port/'
+            : null
+          }
+          validationTone={urlParsed ? 'emerald' : urlInvalid ? 'rose' : 'slate'}
+          hint="The portal endpoint your MAG box would normally connect to."
+        />
+
+        {/* MAC Address */}
+        <FieldRow
+          icon="mac"
+          iconColor="violet"
+          label="MAC Address"
+          type="text"
+          placeholder="00:1A:79:XX:XX:XX"
+          value={macDisplay}
+          onChange={(e) => setStalkerMacAddress(e.target.value)}
+          disabled={isLoading}
+          spellCheck={false}
+          autoComplete="off"
+          maxLength={17}
+          validationMessage={
+            macValid ? 'Valid MAC · 6 octets'
+            : macHasContent ? `Incomplete · ${macDisplay.replace(/:/g, '').length}/12 hex chars`
+            : null
+          }
+          validationTone={macValid ? 'emerald' : macHasContent ? 'rose' : 'slate'}
+          hint="Paste any format — we'll normalise to UPPER:CASE:WITH:COLONS."
+        />
+      </ProviderCard>
+
+      <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/60">
+        <button
+          type="button"
+          disabled
+          title="Coming soon — quick portal handshake test"
+          className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border border-slate-800 bg-slate-900/40 text-slate-600 cursor-not-allowed"
+        >
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em]">
+            Test connection · soon
+          </span>
+        </button>
+
+        <PrimaryLoadButton
+          label="Load MAG/Stalker Channels"
+          loading={isLoading}
+          disabled={!canLoad}
+          onClick={onLoad}
+        />
+      </div>
+    </div>
+  );
+};
+
 const Configuration = ({
   onLoad,
   error,
@@ -469,159 +1214,32 @@ const Configuration = ({
         )}
 
         {isXtreamAllowed && activeTab === 'xtream' && (
-          <div className="mt-8 space-y-10">
-            <section className="space-y-4">
-              <h3 className="text-lg font-semibold text-slate-100">Provider Credentials</h3>
-              <div className="grid gap-6 md:grid-cols-2">
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-semibold text-slate-200">Server URL</span>
-                  <input
-                    type="text"
-                    placeholder="http://example.com:8080"
-                    value={xtreamServer}
-                    onChange={(e) => setXtreamServer(e.target.value)}
-                    disabled={isLoading}
-                    className={inputClasses}
-                  />
-                </label>
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-semibold text-slate-200">Username</span>
-                  <input
-                    type="text"
-                    placeholder="Your Xtream username"
-                    value={xtreamUsername}
-                    onChange={(e) => setXtreamUsername(e.target.value)}
-                    disabled={isLoading}
-                    className={inputClasses}
-                  />
-                </label>
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-semibold text-slate-200">Password</span>
-                  <input
-                    type="password"
-                    placeholder="Your Xtream password"
-                    value={xtreamPassword}
-                    onChange={(e) => setXtreamPassword(e.target.value)}
-                    disabled={isLoading}
-                    className={inputClasses}
-                  />
-                </label>
-              </div>
-              <p className="text-xs text-slate-400">
-                Credentials stay in your browser&apos;s storage so you can reload quickly next time.
-              </p>
-            </section>
-
-            <section className="space-y-4">
-              <h3 className="text-lg font-semibold text-slate-100">Playlist Options (Optional)</h3>
-              <label className="flex flex-col gap-2">
-                <span className="text-sm font-semibold text-slate-200">M3U URL</span>
-                <input
-                  type="text"
-                  placeholder="https://example.com/playlist.m3u"
-                  value={m3uUrl}
-                  onChange={(e) => setM3uUrl(e.target.value)}
-                  disabled={isLoading}
-                  className={inputClasses}
-                />
-                <p className="text-xs text-slate-400">
-                  Provide a playlist URL if you want to load channels from an M3U feed instead of Xtream.
-                </p>
-              </label>
-
-              <Dropzone onDrop={(acceptedFiles) => setM3uFile(acceptedFiles[0])} disabled={isLoading}>
-                {({ getRootProps, getInputProps }) => {
-                  const dropzoneClasses = [
-                    'w-full rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-all duration-150',
-                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950',
-                    isLoading
-                      ? 'cursor-not-allowed border-slate-800/60 bg-slate-900/50 opacity-60'
-                      : 'cursor-pointer border-slate-700 bg-slate-900/60 hover:-translate-y-0.5 hover:border-blue-400/70 hover:bg-slate-900',
-                  ].join(' ');
-
-                  return (
-                    <section {...getRootProps({ className: dropzoneClasses })}>
-                      <input {...getInputProps()} />
-                      {m3uFile ? (
-                        <div className="flex flex-col items-center gap-2 text-sm">
-                          <span className="font-semibold text-slate-200">Selected file</span>
-                          <span className="rounded-full bg-slate-900/70 px-3 py-1 text-xs font-medium text-blue-200">
-                            {m3uFile.name}
-                          </span>
-                          <span className="text-xs text-slate-500">Drop or click to replace the file.</span>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-center gap-2 text-sm text-slate-300">
-                          <span className="font-semibold">Drop M3U file here or click to browse</span>
-                          <span className="text-xs text-slate-500">
-                            We upload it securely when you start loading.
-                          </span>
-                        </div>
-                      )}
-                    </section>
-                  );
-                }}
-              </Dropzone>
-            </section>
-
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-blue-500 via-blue-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-900/40 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={handleXtreamLoad}
-                disabled={isLoading}
-              >
-                {isLoading ? 'Processing…' : 'Load Xtream Channels'}
-              </button>
-            </div>
-          </div>
+          <XtreamPanel
+            xtreamServer={xtreamServer}
+            xtreamUsername={xtreamUsername}
+            xtreamPassword={xtreamPassword}
+            setXtreamServer={setXtreamServer}
+            setXtreamUsername={setXtreamUsername}
+            setXtreamPassword={setXtreamPassword}
+            m3uUrl={m3uUrl}
+            setM3uUrl={setM3uUrl}
+            m3uFile={m3uFile}
+            setM3uFile={setM3uFile}
+            isLoading={isLoading}
+            onLoad={handleXtreamLoad}
+            Dropzone={Dropzone}
+          />
         )}
 
         {isStalkerAllowed && activeTab === 'stalker' && (
-          <div className="mt-8 space-y-10">
-            <section className="space-y-4">
-              <h3 className="text-lg font-semibold text-slate-100">MAG/Stalker Middleware</h3>
-              <div className="grid gap-6 md:grid-cols-2">
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-semibold text-slate-200">Portal URL</span>
-                  <input
-                    type="text"
-                    placeholder="http://portal.url/stalker_portal/"
-                    value={stalkerPortalUrl}
-                    onChange={(e) => setStalkerPortalUrl(e.target.value)}
-                    disabled={isLoading}
-                    className={inputClasses}
-                  />
-                </label>
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm font-semibold text-slate-200">MAC Address</span>
-                  <input
-                    type="text"
-                    placeholder="00:1A:79:CE:23:42"
-                    value={stalkerMacAddress}
-                    onChange={(e) => setStalkerMacAddress(e.target.value)}
-                    disabled={isLoading}
-                    className={inputClasses}
-                  />
-                </label>
-              </div>
-              <p className="text-xs text-slate-400">
-                Connect to your MAG/Stalker middleware portal using the portal URL and MAC address.
-                Credentials are stored in your browser for quick access.
-              </p>
-            </section>
-
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-purple-500 via-purple-600 to-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-purple-900/40 transition-all hover:shadow-xl hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={handleStalkerLoad}
-                disabled={isLoading}
-              >
-                {isLoading ? 'Processing…' : 'Load MAG/Stalker Channels'}
-              </button>
-            </div>
-          </div>
+          <StalkerPanel
+            stalkerPortalUrl={stalkerPortalUrl}
+            stalkerMacAddress={stalkerMacAddress}
+            setStalkerPortalUrl={setStalkerPortalUrl}
+            setStalkerMacAddress={setStalkerMacAddress}
+            isLoading={isLoading}
+            onLoad={handleStalkerLoad}
+          />
         )}
 
         {isBulkAllowed && activeTab === 'bulk' && (

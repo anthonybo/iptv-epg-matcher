@@ -127,7 +127,7 @@ const FONT_DISPLAY = "'Anton', 'Bebas Neue', sans-serif";
 const FONT_BODY    = "'DM Sans', system-ui, sans-serif";
 const FONT_MONO    = "'JetBrains Mono', ui-monospace, 'SF Mono', monospace";
 
-const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
+const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatusChange }) => {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -236,11 +236,11 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
     setPicking({ id: event.event_id, controller, kind: 'event' });
     try {
       const ok = await Promise.resolve(onPick && onPick(event, controller.signal));
-      if (ok) onClose();
+      if (ok) onAfterPick?.();
     } finally {
       setPicking(null);
     }
-  }, [picking, onPick, onClose]);
+  }, [picking, onPick, onAfterPick]);
 
   // Click on a broadcaster chip → brand-mode search for that channel.
   // Same pipeline as the Coverage modal's per-row Test button. The
@@ -267,109 +267,69 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
     }
   }, [picking]);
 
+  // Report live status to the dock chip. Don't depend on
+  // `onStatusChange` — it's an inline arrow whose identity changes
+  // every render, which would loop with the setStatus side-effect.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!onStatusChange) return;
+    if (loading) onStatusChange({ kind: 'working', text: 'Loading slate…' });
+    else if (error) onStatusChange({ kind: 'error', text: 'Error' });
+    else {
+      const live = events.filter((e) => statusKindOf(e) === 'live').length;
+      const total = events.length;
+      onStatusChange({
+        kind: 'idle',
+        text: live > 0 ? `${live} live · ${total} today` : `${total} today`
+      });
+    }
+  }, [loading, error, events]);
+
   if (!isOpen) return null;
 
   return (
     <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+      className="flex-1 min-h-0 flex flex-col relative"
       style={{
-        // Dramatic backdrop — deeper than a flat black/60. Subtle
-        // radial vignette focuses attention on the card.
-        background: 'radial-gradient(ellipse at center, rgba(7,10,17,0.85) 0%, rgba(0,0,0,0.92) 100%)',
+        background: 'linear-gradient(180deg, #0d1119 0%, #0a0d14 100%)',
         fontFamily: FONT_BODY
       }}
-      onClick={onClose}
     >
+      {/* Subtle scanline texture overlay — broadcast CRT vibe.
+          Pointer-events:none so it never interferes. */}
       <div
-        onClick={(ev) => ev.stopPropagation()}
-        className="relative w-full max-w-5xl max-h-[88vh] overflow-hidden flex flex-col"
+        aria-hidden="true"
+        className="absolute inset-0 pointer-events-none"
         style={{
-          background: 'linear-gradient(180deg, #0d1119 0%, #0a0d14 100%)',
-          border: '1px solid #1f2632',
-          borderRadius: '4px',
-          boxShadow: '0 30px 80px -20px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.02) inset'
+          backgroundImage:
+            'repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px)',
+          mixBlendMode: 'overlay'
         }}
-      >
-        {/* Subtle scanline texture overlay — broadcast CRT vibe.
-            Pointer-events:none so it never interferes. */}
-        <div
-          aria-hidden="true"
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            backgroundImage:
-              'repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px)',
-            mixBlendMode: 'overlay'
-          }}
-        />
+      />
 
-        {/* ── HEADER ──────────────────────────────────────────────── */}
+        {/* ── FILTERS HEADER ─────────────────────────────────────── */}
         <div
-          className="relative flex-shrink-0 px-6 pt-5 pb-4"
+          className="relative flex-shrink-0 px-4 pt-3 pb-3"
           style={{ borderBottom: '1px solid #1f2632' }}
         >
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex items-baseline gap-3">
-                {/* Live red dot in the masthead — broadcast convention */}
-                <span className="relative flex h-2.5 w-2.5">
-                  <span
-                    className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-60"
-                    style={{ background: '#ef4444' }}
-                  />
-                  <span
-                    className="relative inline-flex rounded-full h-2.5 w-2.5"
-                    style={{ background: '#ef4444', boxShadow: '0 0 12px rgba(239,68,68,0.7)' }}
-                  />
-                </span>
-                <h2
-                  className="text-3xl tracking-[0.02em] leading-none"
-                  style={{
-                    fontFamily: FONT_DISPLAY,
-                    color: '#f8fafc',
-                    letterSpacing: '0.04em'
-                  }}
-                >
-                  TODAY&rsquo;S SLATE
-                </h2>
-                <span
-                  className="text-xs uppercase tracking-[0.25em] pb-1"
-                  style={{ fontFamily: FONT_MONO, color: '#94a3b8' }}
-                >
-                  {new Date(today + 'T00:00:00').toLocaleDateString(undefined, {
-                    weekday: 'short',
-                    month: 'short',
-                    day: 'numeric'
-                  })}
-                </span>
-              </div>
-              <p className="mt-2 text-[13px] leading-snug" style={{ color: '#94a3b8' }}>
-                Every event for today &mdash; <span style={{ color: '#f1f5f9' }}>live, upcoming, and final</span>. Click a game or broadcaster chip to run the ticker-click pipeline. Works on finished games for testing.
-              </p>
-            </div>
-            <button
-              onClick={onClose}
-              aria-label="Close"
-              className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded transition"
-              style={{
-                background: 'rgba(255,255,255,0.04)',
-                border: '1px solid #1f2632',
-                color: '#cbd5e1'
-              }}
-              onMouseEnter={(ev) => {
-                ev.currentTarget.style.background = 'rgba(239,68,68,0.12)';
-                ev.currentTarget.style.borderColor = 'rgba(239,68,68,0.4)';
-                ev.currentTarget.style.color = '#fee2e2';
-              }}
-              onMouseLeave={(ev) => {
-                ev.currentTarget.style.background = 'rgba(255,255,255,0.04)';
-                ev.currentTarget.style.borderColor = '#1f2632';
-                ev.currentTarget.style.color = '#cbd5e1';
-              }}
+          {/* Date strip — small accent showing what slate we're looking at */}
+          <div className="flex items-baseline gap-3 mb-3">
+            <span
+              className="text-[11px] uppercase tracking-[0.28em]"
+              style={{ fontFamily: FONT_MONO, color: '#475569' }}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
+              {new Date(today + 'T00:00:00').toLocaleDateString(undefined, {
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric'
+              })}
+            </span>
+            <span
+              className="text-[10px] tracking-[0.18em]"
+              style={{ fontFamily: FONT_MONO, color: '#334155' }}
+            >
+              &mdash; live, scheduled, and final
+            </span>
           </div>
 
           {/* Search input — broadcaster console style, scanline-toned
@@ -1067,9 +1027,8 @@ const AllGamesModal = ({ isOpen, onClose, onPick, onPickBroadcaster }) => {
             <span style={{ color: '#334155' }}>EVENTS</span>
           </span>
         </div>
-      </div>
     </div>
   );
 };
 
-export default AllGamesModal;
+export default React.memo(AllGamesModal);

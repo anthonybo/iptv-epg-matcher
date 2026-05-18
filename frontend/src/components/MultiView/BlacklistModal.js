@@ -1,83 +1,76 @@
 import React from 'react';
 
+/**
+ * BlacklistModal — drawer content for managing the blacklist.
+ *
+ * Renders only the inner content (filter empty-state + list). The
+ * parent wraps it in <DrawerShell> which owns the title bar, close,
+ * minimize, and slide-in motion. The `isOpen` prop is kept so the
+ * page can short-circuit rendering when the panel isn't in the
+ * drawer stack at all.
+ */
 const BlacklistModal = ({
   isOpen,
-  onClose,
-  blacklistedChannels,
+  blacklistedChannels = [],
   onRemoveFromBlacklist
 }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-700">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-slate-100">Blacklisted Channels</h2>
-            <button
-              onClick={onClose}
-              className="text-slate-400 hover:text-slate-200 transition-colors"
-            >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          <p className="mt-1 text-sm text-slate-400">
-            These channels will be excluded from random stream searches
-          </p>
-        </div>
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Subhead */}
+      <div className="flex-shrink-0 px-4 py-2.5 border-b border-slate-800/60 flex items-center justify-between">
+        <p className="text-[10.5px] text-slate-500 leading-tight">
+          Channels excluded from random fill &amp; autoplay.
+        </p>
+        <span className="font-mono text-[10px] text-slate-600 tabular-nums">
+          {String(blacklistedChannels.length).padStart(2, '0')} entries
+        </span>
+      </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {blacklistedChannels.length === 0 ? (
-            <div className="text-center py-12">
-              <svg className="w-16 h-16 mx-auto text-slate-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      {/* List */}
+      <div className="flex-1 overflow-y-auto p-3 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
+        {blacklistedChannels.length === 0 ? (
+          <div className="px-4 py-12 flex flex-col items-center gap-3 text-center">
+            <div className="w-10 h-10 rounded-full bg-rose-500/10 ring-1 ring-rose-500/25 flex items-center justify-center">
+              <svg className="w-5 h-5 text-rose-300/80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
               </svg>
-              <p className="text-slate-400">No blacklisted channels</p>
-              <p className="text-sm text-slate-500 mt-1">
-                Click the ban icon on a stream to blacklist it
-              </p>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {blacklistedChannels.map((channelName, index) => (
-                <div
-                  key={index}
-                  className="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-800/50 border border-slate-700 hover:border-slate-600 transition-colors"
-                >
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <svg className="w-5 h-5 text-yellow-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-                    </svg>
-                    <span className="text-sm text-slate-200 truncate">{channelName}</span>
-                  </div>
-                  <button
-                    onClick={() => onRemoveFromBlacklist(channelName)}
-                    className="flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-lg border border-emerald-700 bg-emerald-900/20 text-emerald-300 hover:bg-emerald-900/40 transition-colors"
-                  >
-                    Unblock
-                  </button>
+            <p className="text-sm text-slate-300">No blacklisted channels</p>
+            <p className="text-xs text-slate-500 max-w-xs">
+              Click the ban icon on any tile&apos;s overflow menu to add it here.
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-1">
+            {blacklistedChannels.map((channelName, index) => (
+              <li
+                key={index}
+                className="group/row flex items-center gap-2 p-2.5 rounded-lg bg-slate-900/50 border border-slate-800 hover:border-slate-700 hover:bg-slate-900 transition"
+              >
+                <span aria-hidden className="w-[2px] self-stretch rounded bg-gradient-to-b from-rose-400 to-rose-600 opacity-70 group-hover/row:opacity-100" />
+                <div className="min-w-0 flex-1 flex items-center gap-2">
+                  <svg className="flex-shrink-0 w-3.5 h-3.5 text-rose-300/80" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                  </svg>
+                  <span className="text-[12.5px] text-slate-200 truncate">{channelName}</span>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-700 bg-slate-900/50">
-          <button
-            onClick={onClose}
-            className="w-full px-4 py-2 text-sm font-semibold rounded-lg border border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 transition-colors"
-          >
-            Close
-          </button>
-        </div>
+                <button
+                  type="button"
+                  onClick={() => onRemoveFromBlacklist?.(channelName)}
+                  className="flex-shrink-0 px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-[0.14em] rounded border border-emerald-700/60 bg-emerald-900/20 text-emerald-300 hover:bg-emerald-900/40 hover:border-emerald-600 transition"
+                  title="Unblock this channel"
+                >
+                  Unblock
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );
 };
 
-export default BlacklistModal;
+export default React.memo(BlacklistModal);

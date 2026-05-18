@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import useTrendingChannels from '../../hooks/useTrendingChannels';
 
 /**
@@ -144,7 +144,7 @@ function SignalBadge({ name, raw }) {
   );
 }
 
-const TrendingModal = ({ isOpen, onClose, onPick }) => {
+const TrendingModal = ({ isOpen, onPick, onAfterPick, onStatusChange }) => {
   const [region, setRegion] = useState('');
   const [category, setCategory] = useState('');
   // The channel whose Add button has been clicked but whose
@@ -169,11 +169,11 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
     setAdding({ id: channel.id, controller });
     try {
       const ok = await Promise.resolve(onPick && onPick(channel, controller.signal));
-      if (ok) onClose();
+      if (ok) onAfterPick?.();
     } finally {
       setAdding(null);
     }
-  }, [adding, onPick, onClose]);
+  }, [adding, onPick, onAfterPick]);
 
   const handleCancel = useCallback(() => {
     if (adding?.controller) {
@@ -200,111 +200,94 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
     return out;
   }, [sourcesEnabled]);
 
+  // Report live status to the dock so the chip shows
+  // "Loading…" / "42 channels" while minimized. Don't depend on
+  // `onStatusChange` — it's a fresh inline arrow each render from
+  // the parent and including it here triggers a render loop.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!onStatusChange) return;
+    if (loading) onStatusChange({ kind: 'working', text: 'Loading…' });
+    else if (error) onStatusChange({ kind: 'error', text: 'Error' });
+    else if (channels.length > 0) onStatusChange({ kind: 'idle', text: `${channels.length} channels` });
+    else onStatusChange({ kind: 'idle', text: 'No data' });
+  }, [loading, error, channels.length]);
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-700">
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <h2 className="text-xl font-semibold text-slate-100 flex items-center gap-2">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
-                </span>
-                Trending Now
-              </h2>
-              <p className="mt-1 text-xs text-slate-400">
-                Composite live signal · YouTube concurrent + Twitch restreams + Reddit velocity + Bluesky mentions
-              </p>
-            </div>
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Filters strip + freshness — sits at the top of the body. */}
+      <div className="flex-shrink-0 px-4 py-2.5 border-b border-slate-800/60 space-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-600 mr-1">Region</span>
+          {REGION_OPTIONS.map((opt) => (
             <button
-              onClick={onClose}
-              className="text-slate-400 hover:text-slate-200 transition-colors"
-              aria-label="Close"
+              key={opt.id}
+              onClick={() => setRegion(opt.id)}
+              className={`px-2 py-0.5 text-[10.5px] font-medium rounded transition ${
+                region === opt.id
+                  ? 'bg-indigo-900/60 text-indigo-200 border border-indigo-700'
+                  : 'bg-slate-900/40 text-slate-400 border border-slate-800 hover:bg-slate-800/70'
+              }`}
             >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              {opt.label}
             </button>
-          </div>
-
-          {/* Filters */}
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1">
-              <span className="text-[11px] text-slate-500 uppercase tracking-wider mr-1">Region</span>
-              {REGION_OPTIONS.map((opt) => (
-                <button
-                  key={opt.id}
-                  onClick={() => setRegion(opt.id)}
-                  className={`px-2 py-1 text-[11px] font-medium rounded transition ${
-                    region === opt.id
-                      ? 'bg-indigo-900/60 text-indigo-200 border border-indigo-700'
-                      : 'bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-            <div className="w-px h-5 bg-slate-700 mx-1" />
-            <div className="flex items-center gap-1">
-              <span className="text-[11px] text-slate-500 uppercase tracking-wider mr-1">Category</span>
-              {CATEGORY_OPTIONS.map((opt) => (
-                <button
-                  key={opt.id}
-                  onClick={() => setCategory(opt.id)}
-                  className={`px-2 py-1 text-[11px] font-medium rounded transition ${
-                    category === opt.id
-                      ? 'bg-emerald-900/60 text-emerald-200 border border-emerald-700'
-                      : 'bg-slate-800 text-slate-400 border border-slate-700 hover:bg-slate-700'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Source / freshness strip */}
-          <div className="mt-3 flex items-center gap-2 flex-wrap">
-            {sourceChips.map((s) => (
-              <span
-                key={s.name}
-                title={s.enabled ? (s.active ? 'Contributing this tick' : 'Enabled, no data this tick') : 'Disabled (missing API key)'}
-                className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide rounded border ${
-                  s.active
-                    ? 'bg-emerald-900/40 text-emerald-200 border-emerald-700'
-                    : s.enabled
-                      ? 'bg-slate-800 text-slate-500 border-slate-700'
-                      : 'bg-slate-900 text-slate-600 border-slate-800'
-                }`}
-              >
-                <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.active ? 'bg-emerald-400' : s.enabled ? 'bg-slate-500' : 'bg-slate-700'}`} />
-                {s.name}
-              </span>
-            ))}
-            <span className="ml-auto text-[11px] text-slate-500">
-              {loading && !generatedAt ? 'Loading…' : (
-                <>
-                  Updated {formatRelative(generatedAt)}
-                  {stale && <span className="text-amber-400 ml-1">(stale)</span>}
-                  <button
-                    onClick={refresh}
-                    className="ml-2 text-indigo-300 hover:text-indigo-200 underline-offset-2 hover:underline"
-                  >
-                    refresh
-                  </button>
-                </>
-              )}
-            </span>
-          </div>
+          ))}
         </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-slate-600 mr-1">Topic</span>
+          {CATEGORY_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setCategory(opt.id)}
+              className={`px-2 py-0.5 text-[10.5px] font-medium rounded transition ${
+                category === opt.id
+                  ? 'bg-emerald-900/60 text-emerald-200 border border-emerald-700'
+                  : 'bg-slate-900/40 text-slate-400 border border-slate-800 hover:bg-slate-800/70'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        {/* Source / freshness strip */}
+        <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-800/40">
+          {sourceChips.map((s) => (
+            <span
+              key={s.name}
+              title={s.enabled ? (s.active ? 'Contributing this tick' : 'Enabled, no data this tick') : 'Disabled (missing API key)'}
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide rounded border ${
+                s.active
+                  ? 'bg-emerald-900/40 text-emerald-200 border-emerald-700'
+                  : s.enabled
+                    ? 'bg-slate-900/40 text-slate-500 border-slate-800'
+                    : 'bg-slate-900 text-slate-600 border-slate-800'
+              }`}
+            >
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${s.active ? 'bg-emerald-400' : s.enabled ? 'bg-slate-500' : 'bg-slate-700'}`} />
+              {s.name}
+            </span>
+          ))}
+          <span className="ml-auto text-[10px] text-slate-500">
+            {loading && !generatedAt ? 'Loading…' : (
+              <>
+                Updated {formatRelative(generatedAt)}
+                {stale && <span className="text-amber-400 ml-1">(stale)</span>}
+                <button
+                  onClick={refresh}
+                  className="ml-2 text-indigo-300 hover:text-indigo-200 underline-offset-2 hover:underline"
+                >
+                  refresh
+                </button>
+              </>
+            )}
+          </span>
+        </div>
+      </div>
 
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto px-4 py-3">
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto px-3 py-3 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
           {missingPaidSources.length > 0 && (
             <div className="mb-3 mx-2 p-3 rounded-lg border border-amber-800/60 bg-amber-950/30">
               <div className="flex items-start gap-2">
@@ -442,18 +425,9 @@ const TrendingModal = ({ isOpen, onClose, onPick }) => {
               ))}
             </ol>
           )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-3 border-t border-slate-700 bg-slate-900/60">
-          <p className="text-[11px] text-slate-500 leading-relaxed">
-            Ranking is a derived "live attention" proxy across public real-time signals — not Nielsen.
-            Channels without an IPTV match in your sources will fall back to a search; if no working stream is found you'll get a toast.
-          </p>
-        </div>
       </div>
     </div>
   );
 };
 
-export default TrendingModal;
+export default React.memo(TrendingModal);

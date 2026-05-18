@@ -152,7 +152,17 @@ const MyIPTVs = ({
     }
   };
 
+  // Second line of defence against duplicate deletes — the row's own
+  // isDeleting flag is the primary lock, but if React batches an
+  // event burst weirdly, this ref-backed Set keeps a per-source
+  // in-flight marker so the same DELETE can't go out 6 times in the
+  // same second (which is what the backend logs caught when the
+  // button had no in-flight feedback).
+  const deletingRef = React.useRef(new Set());
+
   const handleDelete = async (sourceId) => {
+    if (deletingRef.current.has(sourceId)) return;
+    deletingRef.current.add(sourceId);
     try {
       await iptvSourcesService.deleteSource(sourceId);
       // Remove from local state
@@ -173,6 +183,8 @@ const MyIPTVs = ({
         message: errorMsg
       });
       setTimeout(() => setNotification(null), 5000);
+    } finally {
+      deletingRef.current.delete(sourceId);
     }
   };
 
@@ -183,34 +195,170 @@ const MyIPTVs = ({
   };
 
   const handleRefreshAccountInfo = async (sourceId) => {
-    try {
-      const result = await iptvSourcesService.refreshAccountInfo(sourceId);
+    // Mark this row as loading so the row-level status banner +
+    // visible spinner kick in. Previously the per-row Refresh icon
+    // started the request but never updated this state, so the only
+    // feedback was a tiny rotating SVG inside a button that was
+    // hover-hidden — users (rightly) thought it was frozen.
+    setSourceRefreshStatus(prev => ({ ...prev, [sourceId]: 'loading' }));
 
-      if (result.success) {
-        setNotification({
-          type: 'success',
-          message: `Successfully refreshed! Loaded ${result.channelCount} channels and ${result.categoryCount} categories.`
-        });
-        setTimeout(() => setNotification(null), 5000);
+    // Capture the source's pre-refresh state so the poller below
+    // can tell when the DB row has actually been updated. We compare
+    // against last_refresh_attempt to detect ANY backend write (the
+    // backend stamps that field on success, rate_limit, AND error
+    // paths — it's only a "the backend tried" marker). The real
+    // outcome lives in last_refresh_status, which the poller reads
+    // separately.
+    const beforeSource = sources.find(s => s.id === sourceId);
+    const beforeAttempt = beforeSource?.last_refresh_attempt || null;
+    const refreshStartedAt = Date.now();
 
-        // Update the source in local state with fresh data from backend
-        if (result.source) {
-          setSources(prev => prev.map(s => s.id === sourceId ? result.source : s));
+    // Map backend's last_refresh_status to the UI's row-status dot.
+    // 'success' → green, 'rate_limited' → amber/warn, anything else
+    // including null/undefined → red error.
+    const classifyOutcome = (statusStr) => {
+      if (statusStr === 'success') return 'success';
+      if (statusStr === 'rate_limited') return 'warn';
+      return 'error';
+    };
+
+    // Poll the source list in parallel with the POST. The poller
+    // returns `{ source, list, outcome }` where `outcome` is the
+    // mapped row-status, so the caller can ALWAYS trust this object
+    // — no inference required. Previously the poller returned the
+    // updated row but the caller assumed "any update == success",
+    // which fooled it into reporting 500s as successful refreshes.
+    let pollCancelled = false;
+    let pollHitTimeout = false;
+    const POLL_INTERVAL_MS = 2500;
+    const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 min ceiling
+    const pollCompletion = async () => {
+      while (!pollCancelled) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+        if (pollCancelled) return null;
+        if (Date.now() - refreshStartedAt > POLL_TIMEOUT_MS) {
+          pollHitTimeout = true;
+          return null;
+        }
+        try {
+          const list = await iptvSourcesService.getUserSources();
+          const updated = list.find(s => s.id === sourceId);
+          if (!updated) return null;
+          // Did the backend's stamp move forward?
+          const newAttempt = updated.last_refresh_attempt;
+          if (newAttempt && newAttempt !== beforeAttempt) {
+            return {
+              source: updated,
+              list,
+              outcome: classifyOutcome(updated.last_refresh_status),
+              errorMessage: updated.last_refresh_error || null
+            };
+          }
+        } catch (e) {
+          // Transient — try again on next tick. Don't kill the loop.
+          console.debug('[Refresh poller]', e?.message);
         }
       }
+      return null;
+    };
 
-      // Also reload all sources to be safe
-      await loadSources();
-      bumpSourceListRevision();
+    // Race the POST against the poller. Whichever finishes first wins.
+    // - POST resolves with success: happy path.
+    // - POST rejects (500, network drop, etc.): wait for poller; if
+    //   poller returned a stamp update, classify by last_refresh_status
+    //   (NOT by "the stamp changed").
+    // - Poller resolves first (socket dropped before POST returned):
+    //   classify by last_refresh_status.
+    const pollPromise = pollCompletion();
+    let usedPoller = false;
+    let finalStatus = 'error';
+    let finalMessage = null;
+    let finalType = 'error';
+
+    const applyPollOutcome = (poll) => {
+      if (!poll) return false;
+      const { source: updated, outcome, errorMessage } = poll;
+      setSources(prev => prev.map(s => s.id === sourceId ? updated : s));
+      finalStatus = outcome; // 'success' | 'warn' | 'error'
+      if (outcome === 'success') {
+        finalType = 'success';
+        finalMessage = `Refreshed${usedPoller ? ' (recovered via poll)' : ''}: ${(updated.channel_count || 0).toLocaleString()} channels are now in the database.`;
+      } else if (outcome === 'warn') {
+        finalType = 'warning';
+        finalMessage = `Provider rate-limited the refresh. Existing channels were preserved. ${errorMessage ? `(${errorMessage})` : ''}`;
+      } else {
+        finalType = 'error';
+        finalMessage = `Refresh failed: ${errorMessage || 'see backend logs for details'}`;
+      }
+      return true;
+    };
+
+    try {
+      const result = await Promise.race([
+        iptvSourcesService.refreshAccountInfo(sourceId).then(r => ({ kind: 'post', r })),
+        pollPromise.then(r => ({ kind: 'poll', r })),
+      ]);
+
+      if (result?.kind === 'poll' && result.r) {
+        usedPoller = true;
+        pollCancelled = true;
+        applyPollOutcome(result.r);
+      } else if (result?.kind === 'post' && result.r?.success) {
+        pollCancelled = true;
+        const post = result.r;
+        finalStatus = post.rateLimited ? 'warn' : 'success';
+        finalType = post.rateLimited ? 'warning' : 'success';
+        finalMessage = post.rateLimited
+          ? 'Provider rate-limited the refresh. Existing channels were preserved.'
+          : `Successfully refreshed! Loaded ${post.channelCount} channels and ${post.categoryCount} categories.`;
+        if (post.source) {
+          setSources(prev => prev.map(s => s.id === sourceId ? post.source : s));
+        }
+      } else if (pollHitTimeout) {
+        pollCancelled = true;
+        finalStatus = 'error';
+        finalType = 'error';
+        finalMessage = 'Refresh timed out — check the backend logs and try again.';
+      } else {
+        pollCancelled = true;
+        // POST resolved with success=false. Trust the response body.
+        finalStatus = 'error';
+        finalType = 'error';
+        finalMessage = result?.r?.error || 'Refresh failed.';
+      }
     } catch (err) {
-      console.error('Error refreshing source:', err);
-      const errorMsg = err.response?.data?.error || 'Failed to refresh source data';
-      setNotification({
-        type: 'error',
-        message: errorMsg
-      });
-      setTimeout(() => setNotification(null), 5000);
+      // POST rejected (500, network error, axios timeout, etc.).
+      // Give the poller a chance to deliver the backend's stamped
+      // outcome — but trust last_refresh_status this time, not the
+      // mere fact that the timestamp moved.
+      const settled = await pollPromise;
+      pollCancelled = true;
+      if (settled) {
+        usedPoller = true;
+        applyPollOutcome(settled);
+      } else {
+        // No poll signal either — the POST error is all we have to
+        // go on. Treat as a hard failure.
+        console.error('Error refreshing source:', err);
+        finalStatus = 'error';
+        finalType = 'error';
+        finalMessage = err.response?.data?.error || err.message || 'Failed to refresh source data';
+      }
     }
+
+    setSourceRefreshStatus(prev => ({ ...prev, [sourceId]: finalStatus }));
+    setNotification({ type: finalType, message: finalMessage });
+    setTimeout(() => setNotification(null), finalStatus === 'success' ? 5000 : 8000);
+
+    // Reload everything to pick up any related changes (channel_count,
+    // last_successful_refresh, etc.) — same as before. Cheap because
+    // it hits the user's row list, not the channel data.
+    await loadSources();
+    bumpSourceListRevision();
+    // Surface in console so we can correlate UI behaviour with logs.
+    console.info(
+      `[Refresh] Source ${sourceId} finished — status=${finalStatus}${usedPoller ? ' (via poll)' : ''}: ${finalMessage}`
+    );
   };
 
   // Set of source IDs with an in-flight manual stream test. Lets us:
