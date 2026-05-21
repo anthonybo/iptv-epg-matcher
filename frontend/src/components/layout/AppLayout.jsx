@@ -26,6 +26,7 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
     showServerStatus,
     setShowServerStatus,
     backgroundLoadings,
+    setBackgroundLoadings,
     showLoadingPicker,
     setShowLoadingPicker,
     showAddModal,
@@ -34,6 +35,20 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
     isTheatreMode,
     selectedChannel,
   } = useAppContext();
+
+  // Drop a single stuck "loading" entry. Used by the bubble's
+  // hover-popup dismiss buttons. The backend may or may not still
+  // be working in the background — we only clear our local tracking,
+  // which is what was making the bubble appear forever after the
+  // SSE pipe dropped a 'complete' event.
+  const clearBackgroundLoading = (sessionIdToClear) => {
+    setBackgroundLoadings((prev) => {
+      const next = new Map(prev);
+      next.delete(sessionIdToClear);
+      return next;
+    });
+  };
+  const clearAllBackgroundLoading = () => setBackgroundLoadings(new Map());
 
   const { user, isAuthenticated: authIsAuthenticated } = useAuth();
 
@@ -179,23 +194,63 @@ export function AppLayout({ children, fetchCategoriesFromApi, onExitTheatre, onE
                 </div>
               )}
 
-              <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-72">
-                <div className="bg-slate-800 text-white text-xs rounded-lg shadow-xl p-3 border border-slate-600 max-h-64 overflow-y-auto">
-                  <div className="font-semibold mb-2">
-                    {backgroundLoadings.size === 1 ? 'Background Loading' : `${backgroundLoadings.size} Sources Loading`}
+              {/* Hover popover — bumped to group-hover/focus-within
+                  so the dismiss buttons inside don't dismiss the
+                  popup the moment the mouse leaves the bubble. */}
+              <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block w-80 pointer-events-auto">
+                <div className="bg-slate-800 text-white text-xs rounded-lg shadow-xl border border-slate-600 max-h-80 overflow-hidden flex flex-col">
+                  {/* Header strip — title + global dismiss-all when
+                      more than one entry is stuck. */}
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700/80 bg-slate-900/40">
+                    <div className="font-semibold text-[12px]">
+                      {backgroundLoadings.size === 1 ? 'Background Loading' : `${backgroundLoadings.size} Sources Loading`}
+                    </div>
+                    {backgroundLoadings.size > 1 && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); clearAllBackgroundLoading(); }}
+                        title="Dismiss all tracking — work may still be running in the background"
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-[0.14em] text-slate-400 hover:bg-rose-500/15 hover:text-rose-200 transition"
+                      >
+                        Dismiss all
+                      </button>
+                    )}
                   </div>
 
-                  <div className="space-y-2">
+                  {/* Per-entry list. Each row has a small × that
+                      drops just that sessionId so the user can
+                      surgically clear a single stuck entry. */}
+                  <div className="px-3 py-2 space-y-2 overflow-y-auto">
                     {Array.from(backgroundLoadings.values()).map((loading) => (
-                      <div key={loading.sessionId} className="border-t border-slate-700 pt-2 first:border-t-0 first:pt-0">
-                        <div className="font-medium text-blue-300 mb-0.5">{loading.sourceName}</div>
-                        <div className="text-slate-300 text-[11px]">{loading.status || 'Processing...'}</div>
+                      <div
+                        key={loading.sessionId}
+                        className="group/row flex items-start gap-2 border-t border-slate-700/60 pt-2 first:border-t-0 first:pt-0"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-blue-300 mb-0.5 truncate">{loading.sourceName}</div>
+                          <div className="text-slate-300 text-[11px] break-words">
+                            {loading.status || 'Processing…'}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); clearBackgroundLoading(loading.sessionId); }}
+                          title="Dismiss this loading indicator. The backend may still be working — this just clears the UI bubble."
+                          className="flex-shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-slate-500 hover:bg-rose-500/15 hover:text-rose-200 transition"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
                       </div>
                     ))}
                   </div>
 
-                  <div className="mt-2 text-slate-400 text-[10px] border-t border-slate-700 pt-2">
-                    {backgroundLoadings.size === 1 ? 'Click to view details' : 'Click to select which source to view'}
+                  {/* Footer hint */}
+                  <div className="px-3 py-2 text-slate-400 text-[10px] border-t border-slate-700 leading-relaxed">
+                    {backgroundLoadings.size === 1
+                      ? 'Click bubble to view details. Click × to dismiss if it\'s stuck.'
+                      : 'Click bubble to pick a source. Click × on a row to dismiss it.'}
                   </div>
                   <div className="absolute top-full right-6 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-slate-800"></div>
                 </div>
