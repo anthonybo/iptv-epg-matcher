@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import vodService from '../../services/vodService';
+import PosterFallback from './PosterFallback';
 
 /**
  * VodDetail — single movie OR single series detail page. Triggered
@@ -291,18 +292,25 @@ const VodDetail = ({ kind, id, onBack }) => {
         </button>
 
         <div className="flex flex-col md:flex-row gap-6">
-          {/* Poster */}
+          {/* Poster — fallback layered BEHIND the <img> so it shows
+              through when the image is missing OR 404s mid-load. Same
+              designed empty state used in the grid for consistency. */}
           <div className="flex-shrink-0 w-40 md:w-56">
-            {row.poster_url ? (
-              <img src={row.poster_url} alt="" className="w-full rounded-lg border border-slate-800 shadow-lg" />
-            ) : (
-              <div className="w-full aspect-[2/3] rounded-lg border border-slate-800 bg-slate-900/60 flex items-center justify-center text-slate-700">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.2} className="w-12 h-12">
-                  <rect x="2" y="4" width="20" height="16" rx="2" />
-                  <path d="M2 8h20M2 16h20M7 4v16M17 4v16" />
-                </svg>
-              </div>
-            )}
+            <div className="relative w-full aspect-[2/3] rounded-lg overflow-hidden border border-slate-800 shadow-lg">
+              <PosterFallback
+                kind={kind}
+                title={row.title}
+                year={row.year}
+              />
+              {row.poster_url && (
+                <img
+                  src={row.poster_url}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-cover"
+                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                />
+              )}
+            </div>
           </div>
 
           {/* Metadata */}

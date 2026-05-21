@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import vodService from '../../services/vodService';
+import PosterFallback from './PosterFallback';
 
 /**
  * VodBrowse — shared poster-grid browse page used for both
@@ -98,94 +99,9 @@ const FmtRatingPlaceholder = () => (
   </span>
 );
 
-// Designed fallback for cards with no artwork. Treats the tile as a
-// minimal editorial poster / archive specimen card rather than a
-// 404 placeholder: title is the hero, surrounded by mono catalog
-// metadata + a hash-derived archive code. Rendered BEHIND the <img>
-// so it shows through when an image errors or hasn't loaded yet.
-const PosterFallback = ({ kind, title, year }) => {
-  // Deterministic identity per title — same hash drives the accent
-  // color AND the archive code so each card reads as a unique
-  // catalog entry rather than a generic empty state.
-  const hash = (title || '').split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 0);
-  const archiveId = '0x' + Math.abs(hash).toString(16).toUpperCase().slice(0, 4).padStart(4, '0');
-
-  // Tonal palette — bar (top marker + title spine), bullet (kicker
-  // dot), vignette (soft background atmosphere). All four tones live
-  // in the app's existing accent vocabulary.
-  const tones = [
-    { bar: 'bg-cyan-400',    spine: 'bg-cyan-400/70',    bullet: 'bg-cyan-400',    vignette: 'rgba(34,211,238,0.08)' },
-    { bar: 'bg-violet-400',  spine: 'bg-violet-400/70',  bullet: 'bg-violet-400',  vignette: 'rgba(167,139,250,0.08)' },
-    { bar: 'bg-amber-400',   spine: 'bg-amber-400/70',   bullet: 'bg-amber-400',   vignette: 'rgba(251,191,36,0.08)' },
-    { bar: 'bg-emerald-400', spine: 'bg-emerald-400/70', bullet: 'bg-emerald-400', vignette: 'rgba(52,211,153,0.08)' }
-  ][Math.abs(hash) % 4];
-
-  return (
-    <div className="absolute inset-0 rounded-md overflow-hidden bg-slate-950">
-      {/* Atmospheric radial — barely-there tint from the bottom-left
-          corner. Each card gets depth without competing visually
-          with real posters in the surrounding grid. */}
-      <div
-        aria-hidden
-        className="absolute inset-0"
-        style={{
-          background: `radial-gradient(circle at 0% 100%, ${tones.vignette} 0%, transparent 55%)`
-        }}
-      />
-
-      {/* Top marker — short colored stripe, left-aligned. Reads as a
-          typographic accent (like a Criterion spine), not as chrome.
-          The hairline below it runs full-width as a structural
-          divider, picking up the rest of the slate-800 vocabulary. */}
-      <div className={`absolute top-0 left-0 h-[2px] w-2/5 ${tones.bar}`} />
-      <div className="absolute top-[2px] inset-x-0 h-px bg-slate-800/60" />
-
-      {/* Content stack — inset enough to clear the source-count badge
-          (top-left), enrichment LED (top-right), and NR chip
-          (bottom-right) overlays that PosterCard renders on top. */}
-      <div className="relative h-full flex flex-col px-3.5 pt-7 pb-3">
-        {/* Kicker — medium + year. Bullet dot in the accent tone
-            anchors the kind label. */}
-        <div className="flex items-center justify-between font-mono text-[8.5px] uppercase tracking-[0.24em] text-slate-500">
-          <span className="flex items-center gap-1.5">
-            <span className={`w-[5px] h-[5px] rounded-full ${tones.bullet}`} />
-            {kind === 'series' ? 'TV Series' : 'Feature'}
-          </span>
-          {year && <span className="tabular-nums text-slate-600">{year}</span>}
-        </div>
-
-        {/* Title — the art. The 3px vertical accent spine to the left
-            gives it the gravity of a pull-quote, and tightens the
-            visual hierarchy so the title reads as confident even at
-            small grid sizes. Centered vertically so short titles feel
-            composed; long titles fill the card via line-clamp-5. */}
-        <div className="flex-1 flex items-center my-3 min-h-0">
-          <div className="flex items-stretch gap-2.5 w-full">
-            <div className={`w-[3px] flex-shrink-0 rounded-full ${tones.spine}`} />
-            <h3
-              className="text-[19px] font-bold text-slate-50 leading-[1.08] line-clamp-5"
-              style={{ letterSpacing: '-0.015em' }}
-              title={title}
-            >
-              {title || 'Untitled'}
-            </h3>
-          </div>
-        </div>
-
-        {/* Footer — archive code in mono caps. The short hairline
-            above mirrors the top divider for top-bottom balance like
-            a printed catalog card. Sitting bottom-left keeps it well
-            clear of the NR rating chip that renders bottom-right. */}
-        <div className="space-y-1.5">
-          <div className="h-px w-10 bg-slate-800/60" />
-          <div className="font-mono text-[8.5px] uppercase tracking-[0.22em] text-slate-600 tabular-nums">
-            {archiveId}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
+// PosterFallback now lives in its own module (./PosterFallback) so
+// the detail page can render the same designed empty state when its
+// hero poster is missing.
 
 const PosterCard = ({ item, onOpen, kind }) => {
   const hasPoster = Boolean(item.poster_url);
