@@ -23,7 +23,10 @@ import vodService from '../../services/vodService';
  * stays presentation-only and the parent owns navigation.
  */
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 30;
+// First-paint skeleton count — matches a 6-col grid x ~3 rows so the
+// page never looks empty during the initial 200-400ms fetch.
+const SKELETON_COUNT = 18;
 
 const SORT_OPTIONS = [
   { id: 'recent', label: 'Recently added' },
@@ -95,6 +98,95 @@ const FmtRatingPlaceholder = () => (
   </span>
 );
 
+// Designed fallback for cards with no artwork. Treats the tile as a
+// minimal editorial poster / archive specimen card rather than a
+// 404 placeholder: title is the hero, surrounded by mono catalog
+// metadata + a hash-derived archive code. Rendered BEHIND the <img>
+// so it shows through when an image errors or hasn't loaded yet.
+const PosterFallback = ({ kind, title, year }) => {
+  // Deterministic identity per title — same hash drives the accent
+  // color AND the archive code so each card reads as a unique
+  // catalog entry rather than a generic empty state.
+  const hash = (title || '').split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 0);
+  const archiveId = '0x' + Math.abs(hash).toString(16).toUpperCase().slice(0, 4).padStart(4, '0');
+
+  // Tonal palette — bar (top marker + title spine), bullet (kicker
+  // dot), vignette (soft background atmosphere). All four tones live
+  // in the app's existing accent vocabulary.
+  const tones = [
+    { bar: 'bg-cyan-400',    spine: 'bg-cyan-400/70',    bullet: 'bg-cyan-400',    vignette: 'rgba(34,211,238,0.08)' },
+    { bar: 'bg-violet-400',  spine: 'bg-violet-400/70',  bullet: 'bg-violet-400',  vignette: 'rgba(167,139,250,0.08)' },
+    { bar: 'bg-amber-400',   spine: 'bg-amber-400/70',   bullet: 'bg-amber-400',   vignette: 'rgba(251,191,36,0.08)' },
+    { bar: 'bg-emerald-400', spine: 'bg-emerald-400/70', bullet: 'bg-emerald-400', vignette: 'rgba(52,211,153,0.08)' }
+  ][Math.abs(hash) % 4];
+
+  return (
+    <div className="absolute inset-0 rounded-md overflow-hidden bg-slate-950">
+      {/* Atmospheric radial — barely-there tint from the bottom-left
+          corner. Each card gets depth without competing visually
+          with real posters in the surrounding grid. */}
+      <div
+        aria-hidden
+        className="absolute inset-0"
+        style={{
+          background: `radial-gradient(circle at 0% 100%, ${tones.vignette} 0%, transparent 55%)`
+        }}
+      />
+
+      {/* Top marker — short colored stripe, left-aligned. Reads as a
+          typographic accent (like a Criterion spine), not as chrome.
+          The hairline below it runs full-width as a structural
+          divider, picking up the rest of the slate-800 vocabulary. */}
+      <div className={`absolute top-0 left-0 h-[2px] w-2/5 ${tones.bar}`} />
+      <div className="absolute top-[2px] inset-x-0 h-px bg-slate-800/60" />
+
+      {/* Content stack — inset enough to clear the source-count badge
+          (top-left), enrichment LED (top-right), and NR chip
+          (bottom-right) overlays that PosterCard renders on top. */}
+      <div className="relative h-full flex flex-col px-3.5 pt-7 pb-3">
+        {/* Kicker — medium + year. Bullet dot in the accent tone
+            anchors the kind label. */}
+        <div className="flex items-center justify-between font-mono text-[8.5px] uppercase tracking-[0.24em] text-slate-500">
+          <span className="flex items-center gap-1.5">
+            <span className={`w-[5px] h-[5px] rounded-full ${tones.bullet}`} />
+            {kind === 'series' ? 'TV Series' : 'Feature'}
+          </span>
+          {year && <span className="tabular-nums text-slate-600">{year}</span>}
+        </div>
+
+        {/* Title — the art. The 3px vertical accent spine to the left
+            gives it the gravity of a pull-quote, and tightens the
+            visual hierarchy so the title reads as confident even at
+            small grid sizes. Centered vertically so short titles feel
+            composed; long titles fill the card via line-clamp-5. */}
+        <div className="flex-1 flex items-center my-3 min-h-0">
+          <div className="flex items-stretch gap-2.5 w-full">
+            <div className={`w-[3px] flex-shrink-0 rounded-full ${tones.spine}`} />
+            <h3
+              className="text-[19px] font-bold text-slate-50 leading-[1.08] line-clamp-5"
+              style={{ letterSpacing: '-0.015em' }}
+              title={title}
+            >
+              {title || 'Untitled'}
+            </h3>
+          </div>
+        </div>
+
+        {/* Footer — archive code in mono caps. The short hairline
+            above mirrors the top divider for top-bottom balance like
+            a printed catalog card. Sitting bottom-left keeps it well
+            clear of the NR rating chip that renders bottom-right. */}
+        <div className="space-y-1.5">
+          <div className="h-px w-10 bg-slate-800/60" />
+          <div className="font-mono text-[8.5px] uppercase tracking-[0.22em] text-slate-600 tabular-nums">
+            {archiveId}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PosterCard = ({ item, onOpen, kind }) => {
   const hasPoster = Boolean(item.poster_url);
   return (
@@ -104,7 +196,12 @@ const PosterCard = ({ item, onOpen, kind }) => {
       className="group/card text-left flex flex-col gap-1.5 focus:outline-none"
     >
       <div className="relative aspect-[2/3] rounded-md overflow-hidden border border-slate-800 bg-slate-900/60 transition group-hover/card:border-cyan-500/40 group-hover/card:shadow-[0_0_0_3px_rgba(34,211,238,0.06)]">
-        {hasPoster ? (
+        {/* Fallback always sits behind the img so it remains visible
+            if the image is hidden by onError (broken Cinemeta URL,
+            CORS, etc.) or hasn't loaded yet. */}
+        <PosterFallback kind={kind} title={item.title} year={item.year} />
+
+        {hasPoster && (
           <img
             src={item.poster_url}
             alt={item.title || 'poster'}
@@ -112,33 +209,17 @@ const PosterCard = ({ item, onOpen, kind }) => {
             className="absolute inset-0 w-full h-full object-cover"
             onError={(e) => { e.currentTarget.style.display = 'none'; }}
           />
-        ) : (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 text-slate-700">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.2} className="w-8 h-8">
-              {kind === 'series' ? (
-                <>
-                  <rect x="2" y="5" width="20" height="14" rx="2" />
-                  <path d="M8 21h8M12 17v4M8 12h8" />
-                </>
-              ) : (
-                <>
-                  <rect x="2" y="4" width="20" height="16" rx="2" />
-                  <path d="M2 8h20M2 16h20M7 4v16M17 4v16" />
-                </>
-              )}
-            </svg>
-            <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-slate-700">No poster yet</span>
-          </div>
         )}
+
         {/* Enrichment indicator — emerald dot when canonical row
-            has TMDB data, slate when still bare provider info. */}
+            has IMDb/Cinemeta data, slate when still bare provider info. */}
         {item.enriched && (
           <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.7)]" title="Enriched" />
         )}
         {/* Source count badge when this title appears on multiple sources */}
-        {item.sources && item.sources.length > 1 && (
+        {(item.source_count > 1 || (item.sources && item.sources.length > 1)) && (
           <span className="absolute top-1.5 left-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.14em] px-1.5 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/20 text-cyan-100">
-            ×{item.sources.length}
+            ×{item.source_count || item.sources.length}
           </span>
         )}
         <FmtRatingOverlay rating={item.rating} enriched={item.enriched} />
@@ -188,25 +269,37 @@ const VodBrowse = ({ kind, onOpen }) => {
   const [sort, setSort] = useState('recent');
   const [sourceId, setSourceId] = useState('');
   const [categoryId, setCategoryId] = useState('');
-  const [page, setPage] = useState(1);
 
   const [items, setItems] = useState([]);
-  const [total, setTotal] = useState(0);
+  // `cursor` is the opaque base64 token the server returns. null means
+  // "load page 1 from scratch". Bumped only by the IntersectionObserver
+  // when the user reaches the bottom of the loaded set.
+  const [cursor, setCursor] = useState(null);
+  // `nextCursor` is what the server told us to use NEXT. When we hit
+  // the sentinel we promote it to `cursor` to trigger the fetch.
+  const [nextCursor, setNextCursor] = useState(null);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState(null);
   const [categories, setCategories] = useState([]);
   const requestSeqRef = useRef(0);
+  const sentinelRef = useRef(null);
 
-  // Debounce search input. 250ms is short enough to feel live, long
-  // enough to avoid hammering the trgm index per keystroke on a
-  // 50k-row movie_streams table.
+  // Debounce search input.
   useEffect(() => {
-    const t = setTimeout(() => {
-      setDebouncedSearch(search.trim());
-      setPage(1);
-    }, 250);
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(t);
   }, [search]);
+
+  // Reset when filters change — clear cursor + items so the next fetch
+  // is a fresh first-page load.
+  useEffect(() => {
+    setCursor(null);
+    setNextCursor(null);
+    setItems([]);
+    setHasMore(false);
+  }, [kind, debouncedSearch, sort, sourceId, categoryId]);
 
   // Fetch categories ONCE per kind.
   useEffect(() => {
@@ -218,38 +311,57 @@ const VodBrowse = ({ kind, onOpen }) => {
     return () => { cancelled = true; };
   }, [kind]);
 
-  // Fetch the actual list whenever filters change.
+  // Cursor-paginated fetch. cursor === null → fresh load (replace);
+  // cursor set → append. The server tells us whether there's more and
+  // gives us the next cursor.
   useEffect(() => {
     const seq = ++requestSeqRef.current;
-    setLoading(true);
+    if (cursor == null) setLoading(true);
+    else setLoadingMore(true);
     setError(null);
     const fetcher = kind === 'movie' ? vodService.getMovies : vodService.getSeriesList;
     fetcher({
       search: debouncedSearch,
       sourceId: sourceId || undefined,
       categoryId: categoryId || undefined,
-      page,
+      cursor,
       pageSize: PAGE_SIZE,
       sort
     })
       .then((data) => {
         if (requestSeqRef.current !== seq) return; // stale
-        if (kind === 'movie') {
-          setItems(data.movies || []);
-        } else {
-          setItems(data.series || []);
-        }
-        setTotal(data.total || 0);
+        const incoming = kind === 'movie' ? (data.movies || []) : (data.series || []);
+        setItems((prev) => (cursor == null ? incoming : [...prev, ...incoming]));
+        setHasMore(Boolean(data.hasMore));
+        setNextCursor(data.nextCursor || null);
         setLoading(false);
+        setLoadingMore(false);
       })
       .catch((err) => {
         if (requestSeqRef.current !== seq) return;
         setError(err.response?.data?.error || err.message || 'Failed to load');
         setLoading(false);
+        setLoadingMore(false);
       });
-  }, [kind, debouncedSearch, sort, sourceId, categoryId, page]);
+  }, [kind, debouncedSearch, sort, sourceId, categoryId, cursor]);
 
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // Infinite scroll — when the sentinel scrolls into view (with a
+  // 400px pre-load margin so the next batch is requested before the
+  // user actually reaches the bottom), promote nextCursor → cursor.
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node) return undefined;
+    if (!hasMore || !nextCursor || loading || loadingMore) return undefined;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) setCursor(nextCursor);
+      },
+      { rootMargin: '400px 0px' }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasMore, nextCursor, loading, loadingMore]);
+
   const enrichedCount = items.filter((i) => i.enriched).length;
 
   // Source list extracted from the categories list (categories are
@@ -284,18 +396,21 @@ const VodBrowse = ({ kind, onOpen }) => {
           </div>
           <h1 className="text-2xl font-bold text-slate-100">
             {kind === 'movie' ? 'Movies' : 'TV Series'}
-            <span className="ml-3 font-mono text-base tabular-nums text-slate-500 font-normal">
-              {total.toLocaleString()}
-            </span>
+            {items.length > 0 && (
+              <span className="ml-3 font-mono text-base tabular-nums text-slate-500 font-normal">
+                {items.length.toLocaleString()}
+                {hasMore && <span className="text-slate-700">+</span>}
+              </span>
+            )}
           </h1>
         </div>
-        {/* Live enrichment count — visible signal that TMDB worker
-            is filling in metadata in the background. */}
-        {enrichedCount > 0 && total > 0 && (
+        {/* Live enrichment count — visible signal that the enrichment
+            worker is filling in metadata in the background. */}
+        {enrichedCount > 0 && items.length > 0 && (
           <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">
             <span className="text-emerald-400 tabular-nums">{enrichedCount}</span>
             <span className="text-slate-700"> / </span>
-            <span className="tabular-nums">{items.length}</span> on this page enriched
+            <span className="tabular-nums">{items.length}</span> loaded enriched
           </div>
         )}
       </header>
@@ -317,7 +432,7 @@ const VodBrowse = ({ kind, onOpen }) => {
 
         <select
           value={sort}
-          onChange={(e) => { setSort(e.target.value); setPage(1); }}
+          onChange={(e) => setSort(e.target.value)}
           className="h-9 px-2 rounded-md border border-slate-800 bg-slate-900/60 text-slate-200 font-mono text-[11px] focus:outline-none focus:border-cyan-500/40"
         >
           {SORT_OPTIONS.map((o) => (
@@ -328,7 +443,7 @@ const VodBrowse = ({ kind, onOpen }) => {
         {sources.length > 1 && (
           <select
             value={sourceId}
-            onChange={(e) => { setSourceId(e.target.value); setCategoryId(''); setPage(1); }}
+            onChange={(e) => { setSourceId(e.target.value); setCategoryId(''); }}
             className="h-9 px-2 rounded-md border border-slate-800 bg-slate-900/60 text-slate-200 font-mono text-[11px] focus:outline-none focus:border-cyan-500/40"
           >
             <option value="">All sources</option>
@@ -341,7 +456,7 @@ const VodBrowse = ({ kind, onOpen }) => {
         {visibleCategories.length > 0 && sourceId && (
           <select
             value={categoryId}
-            onChange={(e) => { setCategoryId(e.target.value); setPage(1); }}
+            onChange={(e) => setCategoryId(e.target.value)}
             className="h-9 px-2 rounded-md border border-slate-800 bg-slate-900/60 text-slate-200 font-mono text-[11px] focus:outline-none focus:border-cyan-500/40 max-w-[260px] truncate"
           >
             <option value="">All categories</option>
@@ -354,8 +469,20 @@ const VodBrowse = ({ kind, onOpen }) => {
 
       {/* ── BODY ─────────────────────────────────────────────── */}
       {loading && items.length === 0 ? (
-        <div className="flex items-center justify-center py-20 font-mono text-[11px] uppercase tracking-[0.22em] text-slate-600">
-          Loading {kind === 'movie' ? 'movies' : 'series'}…
+        // Skeleton placeholders — render the grid shell immediately so
+        // the page never looks blank during the initial fetch. The
+        // shimmer is a CSS-only animated gradient; no JS work, no
+        // layout shift when the real cards swap in.
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+          {Array.from({ length: SKELETON_COUNT }, (_, i) => (
+            <div key={i} className="flex flex-col gap-1.5">
+              <div className="relative aspect-[2/3] rounded-md overflow-hidden border border-slate-800/60 bg-slate-900/40">
+                <div className="absolute inset-0 animate-pulse bg-gradient-to-br from-slate-900/0 via-slate-800/30 to-slate-900/0" />
+              </div>
+              <div className="h-3 w-3/4 rounded bg-slate-900/60 animate-pulse" />
+              <div className="h-2 w-1/3 rounded bg-slate-900/40 animate-pulse" />
+            </div>
+          ))}
         </div>
       ) : error ? (
         <div className="px-4 py-3 rounded-md border border-rose-500/40 bg-rose-500/10 text-rose-200 font-mono text-[12px]">
@@ -370,33 +497,23 @@ const VodBrowse = ({ kind, onOpen }) => {
               <PosterCard key={item.id} item={item} kind={kind} onOpen={onOpen} />
             ))}
           </div>
-          {totalPages > 1 && (
-            <div className="mt-6 flex items-center justify-between font-mono text-[11px]">
-              <div className="text-slate-500 uppercase tracking-[0.18em]">
-                Page <span className="tabular-nums text-slate-300">{page}</span>
-                <span className="text-slate-700"> / </span>
-                <span className="tabular-nums">{totalPages}</span>
-                <span className="text-slate-700"> · </span>
-                <span className="tabular-nums">{total.toLocaleString()}</span> total
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1}
-                  className="h-8 px-3 rounded-md border border-slate-800 bg-slate-900/60 text-slate-300 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition"
-                >
-                  ← Prev
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page >= totalPages}
-                  className="h-8 px-3 rounded-md border border-slate-800 bg-slate-900/60 text-slate-300 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-40 disabled:cursor-not-allowed transition"
-                >
-                  Next →
-                </button>
-              </div>
+
+          {/* Infinite-scroll sentinel — invisible 1px marker that the
+              IntersectionObserver effect watches for entering the
+              viewport (plus a 300px pre-load margin), bumping page and
+              triggering the next fetch. */}
+          {hasMore && <div ref={sentinelRef} aria-hidden className="h-1 w-full" />}
+
+          {loadingMore && (
+            <div className="mt-6 py-3 flex items-center justify-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.22em] text-slate-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+              Loading more…
+            </div>
+          )}
+
+          {!hasMore && !loading && items.length > 0 && (
+            <div className="mt-8 mb-4 text-center font-mono text-[10px] uppercase tracking-[0.24em] text-slate-700">
+              End of results · {items.length.toLocaleString()} {kind === 'movie' ? 'movies' : 'series'}
             </div>
           )}
         </>

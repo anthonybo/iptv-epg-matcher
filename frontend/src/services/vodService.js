@@ -17,7 +17,8 @@ async function getCategories(kind) {
 }
 
 /**
- * Paginated movie browse. opts: { search, sourceId, categoryId, page, pageSize, sort }
+ * Cursor-paginated movie browse. opts: { search, sourceId, categoryId, cursor, pageSize, sort }
+ * Returns: { movies, hasMore, nextCursor, pageSize }
  */
 async function getMovies(opts = {}) {
   const r = await apiClient.get('/vod/movies', {
@@ -25,8 +26,8 @@ async function getMovies(opts = {}) {
       search: opts.search || undefined,
       sourceId: opts.sourceId || undefined,
       categoryId: opts.categoryId || undefined,
-      page: opts.page || 1,
-      pageSize: opts.pageSize || 50,
+      cursor: opts.cursor || undefined,
+      pageSize: opts.pageSize || 30,
       sort: opts.sort || 'recent'
     }
   });
@@ -54,8 +55,8 @@ async function getSeriesList(opts = {}) {
       search: opts.search || undefined,
       sourceId: opts.sourceId || undefined,
       categoryId: opts.categoryId || undefined,
-      page: opts.page || 1,
-      pageSize: opts.pageSize || 50,
+      cursor: opts.cursor || undefined,
+      pageSize: opts.pageSize || 30,
       sort: opts.sort || 'recent'
     }
   });

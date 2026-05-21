@@ -29,8 +29,26 @@ router.use(authMiddleware);
  * "sources" array describing every account that carries them.
  */
 
-const PAGE_DEFAULT = 50;
-const PAGE_MAX = 200;
+const PAGE_DEFAULT = 30;
+const PAGE_MAX = 100;
+
+// Encode/decode a keyset-pagination cursor. We pack the two values
+// the sort uses (a sort key + the group id) into a base64-URL string
+// so the client treats it as opaque. Keeping it opaque means we can
+// change the cursor format later without breaking the client.
+function encodeCursor(sortKey, id) {
+  const raw = JSON.stringify({ k: sortKey, i: id });
+  return Buffer.from(raw, 'utf8').toString('base64url');
+}
+function decodeCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const json = Buffer.from(String(cursor), 'base64url').toString('utf8');
+    const obj = JSON.parse(json);
+    if (obj && obj.k != null && obj.i != null) return obj;
+  } catch (_) { /* ignore */ }
+  return null;
+}
 
 // Shared helper to scope a query to "movies/series belonging to a
 // source this user owns." All VOD reads go through this.
@@ -102,12 +120,12 @@ router.get('/movies', requireAuth, async (req, res) => {
     const search = (req.query.search || '').trim();
     const sourceId = req.query.sourceId ? parseInt(req.query.sourceId, 10) : null;
     const categoryId = req.query.categoryId || null;
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(PAGE_MAX, Math.max(5, parseInt(req.query.pageSize, 10) || PAGE_DEFAULT));
-    const offset = (page - 1) * pageSize;
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
+    const cursor = decodeCursor(req.query.cursor);
 
-    // Build dynamic WHERE
+    // Build dynamic WHERE. Same shape as before — joins, scoping,
+    // filters; just no longer does COUNT(*) or runtime JSONB extract.
     const params = [userId];
     const whereParts = [`ms.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
     if (sourceId) {
@@ -120,95 +138,82 @@ router.get('/movies', requireAuth, async (req, res) => {
     }
     if (search && search.length >= 2) {
       params.push(`%${search}%`);
-      // Match against canonical title when present, fall back to provider name
-      whereParts.push(`(
-        COALESCE(m.title, ms.provider_name) ILIKE $${params.length}
-      )`);
+      whereParts.push(`(COALESCE(m.title, ms.provider_name) ILIKE $${params.length})`);
     }
 
-    // Group key: canonical movie_id when present, otherwise a synthetic
-    // key based on movie_streams.id so unenriched rows stay distinct
-    // per source.
     const groupKey = `COALESCE('m:' || m.id::text, 'ms:' || ms.id::text)`;
-    const sortColumn = {
-      recent: 'MAX(ms.added_at) DESC NULLS LAST',
-      title:  'MIN(COALESCE(m.title, ms.provider_name)) ASC',
-      rating: 'MAX(COALESCE(m.rating_tmdb, ms.rating)) DESC NULLS LAST'
-    }[sortKey];
 
-    // 1. count distinct titles for pagination
-    const countSql = `
-      SELECT COUNT(*)::int AS total FROM (
-        SELECT ${groupKey} AS k
-        FROM movie_streams ms
-        LEFT JOIN movies m ON m.id = ms.movie_id
-        WHERE ${whereParts.join(' AND ')}
-        GROUP BY ${groupKey}
-      ) sub
-    `;
-    const totalResult = await postgresService.query(countSql, params);
-    const total = totalResult.rows[0]?.total || 0;
+    // Sort + cursor logic. Each sort mode has its own keyset shape:
+    // recent  → (MAX(added_at), id) DESC
+    // title   → (MIN(title), id) ASC
+    // rating  → (MAX(rating), id) DESC NULLS LAST
+    let orderBy, havingCursor;
+    if (sortKey === 'title') {
+      orderBy = `MIN(COALESCE(m.title, ms.provider_name)) ASC, ${groupKey} ASC`;
+      if (cursor) {
+        params.push(cursor.k); params.push(cursor.i);
+        havingCursor = `(MIN(COALESCE(m.title, ms.provider_name)), ${groupKey}) > ($${params.length - 1}, $${params.length})`;
+      }
+    } else if (sortKey === 'rating') {
+      orderBy = `MAX(COALESCE(m.rating_tmdb, ms.rating, ms.rating_fallback)) DESC NULLS LAST, ${groupKey} DESC`;
+      if (cursor) {
+        params.push(cursor.k); params.push(cursor.i);
+        havingCursor = `(MAX(COALESCE(m.rating_tmdb, ms.rating, ms.rating_fallback)), ${groupKey}) < ($${params.length - 1}::numeric, $${params.length})`;
+      }
+    } else {
+      orderBy = `MAX(ms.added_at) DESC NULLS LAST, ${groupKey} DESC`;
+      if (cursor) {
+        params.push(cursor.k); params.push(cursor.i);
+        havingCursor = `(MAX(ms.added_at), ${groupKey}) < ($${params.length - 1}::timestamptz, $${params.length})`;
+      }
+    }
 
-    // 2. fetch page of grouped rows with aggregated sources array
-    // poster_url falls back to the provider's own stream_icon
-    // (extracted from raw_meta JSONB) when canonical TMDB poster
-    // isn't populated yet. Without this, posters stayed blank for
-    // every row until the TMDB worker ran — which never happens
-    // when TMDB_API_KEY isn't configured.
+    // pageSize + 1 lets us know if there's another page without
+    // running a separate COUNT(*) — if the over-fetch returns N+1
+    // rows, we trim the last and emit a next_cursor.
     const dataSql = `
       SELECT
         ${groupKey} AS id,
         COALESCE(MIN(m.title), MIN(ms.provider_name)) AS title,
         MIN(m.year) AS year,
-        COALESCE(
-          MIN(m.poster_url),
-          MIN(NULLIF(ms.raw_meta->>'stream_icon', '')),      -- Xtream
-          MIN(NULLIF(ms.raw_meta->>'screenshot_uri', '')),   -- Stalker
-          MIN(NULLIF(ms.raw_meta->>'cover_big', '')),        -- Xtream alt
-          MIN(NULLIF(ms.raw_meta->>'cover', '')),            -- generic
-          MIN(NULLIF(ms.raw_meta->>'pic', '')),              -- some MAG portals
-          MIN(NULLIF(ms.raw_meta->>'movie_image', ''))       -- Xtream alt
-        ) AS poster_url,
-        MIN(m.overview) AS overview,
-        MAX(COALESCE(
-          m.rating_tmdb,
-          ms.rating,
-          -- Stalker portals expose extra rating fields (rating_imdb,
-          -- rating_kinopoisk) that the live ms.rating column does not
-          -- pull from. Guard each cast with a regex so a non-numeric
-          -- value does not blow up the whole query.
-          CASE WHEN ms.raw_meta->>'rating_imdb' ~ '^[0-9]+(\.[0-9]+)?$'
-               THEN (ms.raw_meta->>'rating_imdb')::numeric END,
-          CASE WHEN ms.raw_meta->>'rating_kinopoisk' ~ '^[0-9]+(\.[0-9]+)?$'
-               THEN (ms.raw_meta->>'rating_kinopoisk')::numeric END
-        )) AS rating,
+        COALESCE(MIN(m.poster_url), MIN(ms.poster_fallback)) AS poster_url,
+        MAX(COALESCE(m.rating_tmdb, ms.rating, ms.rating_fallback)) AS rating,
         BOOL_OR(m.id IS NOT NULL) AS enriched,
-        json_agg(json_build_object(
-          'movie_stream_id', ms.id,
-          'source_id', ms.source_id,
-          'source_name', s.name,
-          'source_nickname', s.nickname,
-          'provider_stream_id', ms.provider_stream_id,
-          'provider_category_id', ms.provider_category_id,
-          'container_extension', ms.container_extension,
-          'added_at', ms.added_at
-        ) ORDER BY ms.added_at DESC NULLS LAST) AS sources
+        COUNT(*)::int AS source_count,
+        MAX(ms.added_at) AS sort_added,
+        MIN(COALESCE(m.title, ms.provider_name)) AS sort_title
       FROM movie_streams ms
-      JOIN iptv_sources s ON s.id = ms.source_id
       LEFT JOIN movies m ON m.id = ms.movie_id
       WHERE ${whereParts.join(' AND ')}
       GROUP BY ${groupKey}
-      ORDER BY ${sortColumn}
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      ${havingCursor ? `HAVING ${havingCursor}` : ''}
+      ORDER BY ${orderBy}
+      LIMIT $${params.length + 1}
     `;
-    const dataResult = await postgresService.query(dataSql, [...params, pageSize, offset]);
+    const dataResult = await postgresService.query(dataSql, [...params, pageSize + 1]);
+
+    const hasMore = dataResult.rows.length > pageSize;
+    const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
+
+    let nextCursor = null;
+    if (hasMore && rows.length > 0) {
+      const last = rows[rows.length - 1];
+      const keyValue = sortKey === 'title' ? last.sort_title
+        : sortKey === 'rating' ? (last.rating != null ? String(last.rating) : null)
+        : (last.sort_added ? new Date(last.sort_added).toISOString() : null);
+      if (keyValue != null) nextCursor = encodeCursor(keyValue, last.id);
+    }
+
+    // Strip the sort_* helper columns from the response — clients
+    // don't need them and they bloat the payload.
+    const movies = rows.map(({ sort_added, sort_title, ...rest }) => rest);
 
     res.json({
       success: true,
-      page,
       pageSize,
-      total,
-      movies: dataResult.rows
+      hasMore,
+      nextCursor,
+      movies
     });
   } catch (error) {
     logger.error(`[VOD movies] failed: ${error.message}`);
@@ -227,10 +232,9 @@ router.get('/series', requireAuth, async (req, res) => {
     const search = (req.query.search || '').trim();
     const sourceId = req.query.sourceId ? parseInt(req.query.sourceId, 10) : null;
     const categoryId = req.query.categoryId || null;
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.min(PAGE_MAX, Math.max(5, parseInt(req.query.pageSize, 10) || PAGE_DEFAULT));
-    const offset = (page - 1) * pageSize;
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
+    const cursor = decodeCursor(req.query.cursor);
 
     const params = [userId];
     const whereParts = [`ss.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
@@ -248,73 +252,69 @@ router.get('/series', requireAuth, async (req, res) => {
     }
 
     const groupKey = `COALESCE('s:' || sr.id::text, 'ss:' || ss.id::text)`;
-    const sortColumn = {
-      recent: 'MAX(ss.updated_at) DESC NULLS LAST',
-      title:  'MIN(COALESCE(sr.title, ss.provider_name)) ASC',
-      rating: 'MAX(sr.rating_tmdb) DESC NULLS LAST'
-    }[sortKey];
 
-    const countSql = `
-      SELECT COUNT(*)::int AS total FROM (
-        SELECT ${groupKey} AS k
-        FROM series_sources ss
-        LEFT JOIN series sr ON sr.id = ss.series_id
-        WHERE ${whereParts.join(' AND ')}
-        GROUP BY ${groupKey}
-      ) sub
-    `;
-    const totalResult = await postgresService.query(countSql, params);
-    const total = totalResult.rows[0]?.total || 0;
+    let orderBy, havingCursor;
+    if (sortKey === 'title') {
+      orderBy = `MIN(COALESCE(sr.title, ss.provider_name)) ASC, ${groupKey} ASC`;
+      if (cursor) {
+        params.push(cursor.k); params.push(cursor.i);
+        havingCursor = `(MIN(COALESCE(sr.title, ss.provider_name)), ${groupKey}) > ($${params.length - 1}, $${params.length})`;
+      }
+    } else if (sortKey === 'rating') {
+      orderBy = `MAX(sr.rating_tmdb) DESC NULLS LAST, ${groupKey} DESC`;
+      if (cursor) {
+        params.push(cursor.k); params.push(cursor.i);
+        havingCursor = `(MAX(sr.rating_tmdb), ${groupKey}) < ($${params.length - 1}::numeric, $${params.length})`;
+      }
+    } else {
+      orderBy = `MAX(ss.updated_at) DESC NULLS LAST, ${groupKey} DESC`;
+      if (cursor) {
+        params.push(cursor.k); params.push(cursor.i);
+        havingCursor = `(MAX(ss.updated_at), ${groupKey}) < ($${params.length - 1}::timestamptz, $${params.length})`;
+      }
+    }
 
     const dataSql = `
       SELECT
         ${groupKey} AS id,
         COALESCE(MIN(sr.title), MIN(ss.provider_name)) AS title,
         MIN(sr.year) AS year,
-        COALESCE(
-          MIN(sr.poster_url),
-          MIN(NULLIF(ss.raw_meta->>'cover', '')),            -- Xtream
-          MIN(NULLIF(ss.raw_meta->>'cover_big', '')),        -- Xtream alt
-          MIN(NULLIF(ss.raw_meta->>'screenshot_uri', '')),   -- Stalker
-          MIN(NULLIF(ss.raw_meta->>'pic', '')),              -- some MAG portals
-          MIN(NULLIF(ss.raw_meta->>'stream_icon', ''))       -- rare provider mixup
-        ) AS poster_url,
-        MIN(sr.overview) AS overview,
-        MAX(COALESCE(
-          sr.rating_tmdb,
-          CASE WHEN ss.raw_meta->>'rating' ~ '^[0-9]+(\.[0-9]+)?$'
-               THEN (ss.raw_meta->>'rating')::numeric END,
-          CASE WHEN ss.raw_meta->>'rating_imdb' ~ '^[0-9]+(\.[0-9]+)?$'
-               THEN (ss.raw_meta->>'rating_imdb')::numeric END,
-          CASE WHEN ss.raw_meta->>'rating_kinopoisk' ~ '^[0-9]+(\.[0-9]+)?$'
-               THEN (ss.raw_meta->>'rating_kinopoisk')::numeric END
-        )) AS rating,
+        COALESCE(MIN(sr.poster_url), MIN(ss.poster_fallback)) AS poster_url,
+        MAX(sr.rating_tmdb) AS rating,
         BOOL_OR(sr.id IS NOT NULL) AS enriched,
-        json_agg(json_build_object(
-          'series_source_id', ss.id,
-          'source_id', ss.source_id,
-          'source_name', s.name,
-          'source_nickname', s.nickname,
-          'provider_series_id', ss.provider_series_id,
-          'provider_category_id', ss.provider_category_id,
-          'last_episode_fetch', ss.last_episode_fetch
-        ) ORDER BY ss.updated_at DESC) AS sources
+        COUNT(*)::int AS source_count,
+        MAX(ss.updated_at) AS sort_updated,
+        MIN(COALESCE(sr.title, ss.provider_name)) AS sort_title
       FROM series_sources ss
-      JOIN iptv_sources s ON s.id = ss.source_id
       LEFT JOIN series sr ON sr.id = ss.series_id
       WHERE ${whereParts.join(' AND ')}
       GROUP BY ${groupKey}
-      ORDER BY ${sortColumn}
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+      ${havingCursor ? `HAVING ${havingCursor}` : ''}
+      ORDER BY ${orderBy}
+      LIMIT $${params.length + 1}
     `;
-    const dataResult = await postgresService.query(dataSql, [...params, pageSize, offset]);
+    const dataResult = await postgresService.query(dataSql, [...params, pageSize + 1]);
+
+    const hasMore = dataResult.rows.length > pageSize;
+    const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
+
+    let nextCursor = null;
+    if (hasMore && rows.length > 0) {
+      const last = rows[rows.length - 1];
+      const keyValue = sortKey === 'title' ? last.sort_title
+        : sortKey === 'rating' ? (last.rating != null ? String(last.rating) : null)
+        : (last.sort_updated ? new Date(last.sort_updated).toISOString() : null);
+      if (keyValue != null) nextCursor = encodeCursor(keyValue, last.id);
+    }
+
+    const series = rows.map(({ sort_updated, sort_title, ...rest }) => rest);
 
     res.json({
       success: true,
-      page,
       pageSize,
-      total,
-      series: dataResult.rows
+      hasMore,
+      nextCursor,
+      series
     });
   } catch (error) {
     logger.error(`[VOD series] failed: ${error.message}`);
