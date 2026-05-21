@@ -49,6 +49,8 @@ const postgresService = require('./postgresService');
 
 const IMDB_SUGGEST_BASE = 'https://v3.sg.media-imdb.com/suggestion';
 const CINEMETA_BASE = 'https://v3-cinemeta.strem.io/meta';
+const TVMAZE_LOOKUP_URL = 'https://api.tvmaze.com/lookup/shows';
+const TVMAZE_SHOWS_URL = 'https://api.tvmaze.com/shows';
 const THROTTLE_MS = 500;
 const BATCH_PER_TICK = 50;
 const TICK_INTERVAL_MS = 30 * 1000;
@@ -206,6 +208,35 @@ async function fetchCinemeta(kind, imdbId) {
   } catch (e) {
     logger.warn(`[enrich] Cinemeta ${kind}/${imdbId} failed: ${e.message}`);
     return null;
+  }
+}
+
+// Fetch full cast (with character names + headshot URLs) from
+// TVMaze for a TV series. Cinemeta only gives us cast names; TVMaze
+// has properly-keyed person records with portraits. Free, no key,
+// covers anything that aired on broadcast/cable/streaming.
+//
+// Returns an array of { name, character, image } objects, max 30
+// entries, in TVMaze's billing order. Empty array if the series
+// isn't in TVMaze (which happens for some non-English imports).
+async function fetchTvmazeCast(imdbId) {
+  if (!imdbId) return [];
+  try {
+    const lookup = await getJson(`${TVMAZE_LOOKUP_URL}?imdb=${encodeURIComponent(imdbId)}`);
+    if (!lookup?.id) return [];
+    const cast = await getJson(`${TVMAZE_SHOWS_URL}/${lookup.id}/cast`);
+    if (!Array.isArray(cast)) return [];
+    return cast
+      .map((c) => ({
+        name: c.person?.name || null,
+        character: c.character?.name || null,
+        image: c.person?.image?.original || c.person?.image?.medium || null
+      }))
+      .filter((c) => c.name)
+      .slice(0, 30);
+  } catch (e) {
+    logger.warn(`[enrich] TVMaze cast lookup for ${imdbId} failed: ${e.message}`);
+    return [];
   }
 }
 
@@ -395,8 +426,14 @@ async function enrichMovieRow(row) {
 
 // ─── Series ────────────────────────────────────────────────────────
 
-function buildSeriesRowFromCinemeta(suggestHit, meta) {
+function buildSeriesRowFromCinemeta(suggestHit, meta, tvmazeCast) {
   const m = meta || {};
+  // Prefer TVMaze cast — it has character names + headshot URLs.
+  // Fall back to Cinemeta's name-only list when TVMaze doesn't
+  // carry the show.
+  const cast = (Array.isArray(tvmazeCast) && tvmazeCast.length > 0)
+    ? tvmazeCast
+    : (Array.isArray(m.cast) ? m.cast.slice(0, 12).map((name) => ({ name })) : []);
   return {
     tmdb_id: null,
     imdb_id: suggestHit.id,
@@ -406,7 +443,7 @@ function buildSeriesRowFromCinemeta(suggestHit, meta) {
     poster_url: m.poster || null,
     backdrop_url: m.background || null,
     genres: Array.isArray(m.genres) ? m.genres : [],
-    cast_json: Array.isArray(m.cast) ? m.cast.slice(0, 12).map((name) => ({ name })) : [],
+    cast_json: cast,
     rating_tmdb: m.imdbRating ? parseFloat(m.imdbRating) || null : null,
     trailer_youtube_id: extractTrailerYtId(m)
   };
@@ -482,7 +519,11 @@ async function enrichSeriesRow(row) {
     return false;
   }
   const meta = await fetchCinemeta('series', best.id);
-  const seriesRow = buildSeriesRowFromCinemeta(best, meta);
+  // TVMaze cast — adds character names + headshots Cinemeta lacks.
+  // Best-effort; an empty array just means we fall back to Cinemeta's
+  // name-only cast list inside buildSeriesRowFromCinemeta.
+  const tvmazeCast = await fetchTvmazeCast(best.id);
+  const seriesRow = buildSeriesRowFromCinemeta(best, meta, tvmazeCast);
   if (!seriesRow.title) {
     inMemorySeriesCache.set(cacheKey, null);
     return false;
@@ -601,12 +642,33 @@ async function enrichMovieStreamId(movieStreamId) {
 
 async function enrichSeriesSourceId(seriesSourceId) {
   const r = await postgresService.query(
-    `SELECT id, provider_name, raw_meta, series_id FROM series_sources WHERE id = $1`,
+    `SELECT ss.id, ss.provider_name, ss.raw_meta, ss.series_id, s.imdb_id, s.cast_json
+     FROM series_sources ss
+     LEFT JOIN series s ON s.id = ss.series_id
+     WHERE ss.id = $1`,
     [seriesSourceId]
   );
   const row = r.rows[0];
   if (!row) return { ok: false, reason: 'not_found' };
-  if (row.series_id) return { ok: true, reason: 'already_enriched', seriesId: row.series_id };
+  // Already-enriched fast path: skip the IMDb+Cinemeta search but
+  // still backfill TVMaze cast when the existing cast_json doesn't
+  // carry character names / headshot images yet (old enrichments
+  // predate the TVMaze pass).
+  if (row.series_id) {
+    const castHasImages = Array.isArray(row.cast_json) && row.cast_json.some((c) => c?.image);
+    if (castHasImages || !row.imdb_id) {
+      return { ok: true, reason: 'already_enriched', seriesId: row.series_id };
+    }
+    const tvmazeCast = await fetchTvmazeCast(row.imdb_id);
+    if (tvmazeCast.length > 0) {
+      await postgresService.query(
+        `UPDATE series SET cast_json = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(tvmazeCast), row.series_id]
+      );
+      return { ok: true, reason: 'cast_refreshed', seriesId: row.series_id };
+    }
+    return { ok: true, reason: 'already_enriched', seriesId: row.series_id };
+  }
   const linked = await enrichSeriesRow(row);
   if (!linked) return { ok: false, reason: 'no_match' };
   const after = await postgresService.query(

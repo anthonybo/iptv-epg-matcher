@@ -18,6 +18,14 @@ import PosterFallback from './PosterFallback';
  * needed here (unlike live MPEG-TS).
  */
 
+// Tiny "external link" arrow appended to the IMDb / Wikipedia /
+// YouTube chips. Signals that the anchor opens off-site.
+const ArrowOutSvg = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} className="w-2.5 h-2.5 opacity-70">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M7 17L17 7M17 7H8M17 7V16" />
+  </svg>
+);
+
 const SourceChip = ({ source, active, onClick }) => (
   <button
     type="button"
@@ -140,6 +148,10 @@ const VodDetail = ({ kind, id, onBack }) => {
   // True while we're firing an on-demand enrichment for this row.
   const [enriching, setEnriching] = useState(false);
   const enrichTriedRef = useRef(false);
+  // Player area — used to scroll back to it when playback starts so
+  // a user scrolled down the episode list isn't left wondering
+  // whether their click did anything.
+  const playerSectionRef = useRef(null);
   // Series-only state
   const [episodesLoading, setEpisodesLoading] = useState(false);
   const [episodesError, setEpisodesError] = useState(null);
@@ -200,6 +212,18 @@ const VodDetail = ({ kind, id, onBack }) => {
     return () => { cancelled = true; };
   }, [loading, data, kind, id]);
 
+  // Scroll-back-to-player when playback starts. Without this, a user
+  // scrolled down into the episode list clicks Play and the video
+  // mounts at the top of the page with no visual feedback at the
+  // click point — they have no idea anything happened. This is the
+  // pattern Plex / Jellyfin use; Netflix-style modal takeovers are
+  // a larger UX shift we can layer in later if needed.
+  useEffect(() => {
+    if (!streamSrc && !trailerYtId) return;
+    if (!playerSectionRef.current) return;
+    playerSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [streamSrc, trailerYtId]);
+
   // Series episode lazy-fetch when the active source changes.
   useEffect(() => {
     if (kind !== 'series' || !data || !activeSourceId) return undefined;
@@ -227,6 +251,17 @@ const VodDetail = ({ kind, id, onBack }) => {
     return (data.sources || []).find((s) => s.source_id === activeSourceId) || (data.sources || [])[0] || null;
   }, [data, activeSourceId]);
 
+  // Resolve the playing episode object (with its season number) so
+  // the "Now Playing" pill can show S01E03 · Episode Title context.
+  const playingEpisode = useMemo(() => {
+    if (!playingEpisodeStreamId) return null;
+    for (const season of seasons) {
+      const ep = (season.episodes || []).find((e) => e.episode_stream_id === playingEpisodeStreamId);
+      if (ep) return { ...ep, seasonNumber: season.season_number };
+    }
+    return null;
+  }, [playingEpisodeStreamId, seasons]);
+
   const handlePlayMovie = () => {
     if (!activeSource) return;
     setStreamSrc(vodService.buildMovieStreamUrl(activeSource.movie_stream_id));
@@ -234,6 +269,11 @@ const VodDetail = ({ kind, id, onBack }) => {
 
   const handlePlayEpisode = (episode) => {
     if (!episode.episode_stream_id) return;
+    // Clear the trailer iframe — otherwise the player render branch
+    // (trailerYtId ? iframe : streamSrc ? video) keeps showing the
+    // trailer even though a new stream is being requested, making it
+    // look like clicking the episode did nothing.
+    setTrailerYtId(null);
     setPlayingEpisodeStreamId(episode.episode_stream_id);
     setStreamSrc(vodService.buildEpisodeStreamUrl(episode.episode_stream_id));
   };
@@ -341,14 +381,23 @@ const VodDetail = ({ kind, id, onBack }) => {
                     <span className="text-amber-300">★ {Number(row.rating_tmdb).toFixed(1)}</span>
                   </>
                 )}
-                {Array.isArray(row.genres) && row.genres.length > 0 && (
-                  <>
-                    <span className="text-slate-700">·</span>
-                    <span className="truncate">{row.genres.join(' · ')}</span>
-                  </>
-                )}
               </div>
             </div>
+
+            {/* Genre chips — pulled out of the inline meta line so they
+                read as classification tags rather than another bullet. */}
+            {Array.isArray(row.genres) && row.genres.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {row.genres.slice(0, 6).map((g) => (
+                  <span
+                    key={g}
+                    className="inline-flex items-center h-6 px-2.5 rounded-md border border-slate-800 bg-slate-900/50 text-slate-300 font-mono text-[10px] uppercase tracking-[0.16em]"
+                  >
+                    {g}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {!row.overview && !enriching && !row.enriched_at && (
               <p className="text-[12px] text-slate-500 italic max-w-3xl">
@@ -362,19 +411,138 @@ const VodDetail = ({ kind, id, onBack }) => {
               </p>
             )}
 
-            {row.director && (
-              <div className="text-[11.5px] text-slate-400">
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600 mr-2">Director</span>
-                {row.director}
+            {/* Trailer thumbnail tile — Plex-style visual entry point.
+                Clickable, opens the inline trailer player. Sits between
+                the description and the credits so it's a natural eye-
+                stop on the page. */}
+            {row.trailer_youtube_id && !trailerYtId && (
+              <button
+                type="button"
+                onClick={() => { setStreamSrc(null); setTrailerYtId(row.trailer_youtube_id); }}
+                className="group/trailer relative block w-full max-w-[280px] aspect-video rounded-md overflow-hidden border border-slate-800 hover:border-cyan-500/50 focus:outline-none focus:border-cyan-500/60 transition shadow-md"
+                title="Watch trailer"
+              >
+                <img
+                  src={`https://img.youtube.com/vi/${row.trailer_youtube_id}/mqdefault.jpg`}
+                  alt=""
+                  className="absolute inset-0 w-full h-full object-cover"
+                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/30 to-slate-950/10 group-hover/trailer:from-slate-950/60 transition" />
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="w-12 h-12 rounded-full bg-cyan-500/95 flex items-center justify-center shadow-[0_0_24px_-4px_rgba(34,211,238,0.8)] group-hover/trailer:scale-110 transition">
+                    <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5 ml-0.5">
+                      <polygon points="6 4 20 12 6 20 6 4" />
+                    </svg>
+                  </span>
+                </div>
+                <div className="absolute bottom-0 inset-x-0 px-2.5 py-1.5">
+                  <div className="font-mono text-[9.5px] font-bold uppercase tracking-[0.22em] text-slate-100">Watch trailer</div>
+                </div>
+              </button>
+            )}
+
+            {/* Credits — director + cast as person chips with letter
+                avatars, modeled on Plex's cast row. The avatar block
+                isn't a real photo, just a typographic initial, but it
+                gives the chip the right visual weight. */}
+            {(row.director || (Array.isArray(row.cast_json) && row.cast_json.length > 0)) && (
+              <div className="space-y-2">
+                {row.director && (
+                  <div>
+                    <div className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-600 mb-1.5">Director</div>
+                    <span className="inline-flex items-center gap-2 h-7 pl-1 pr-3 rounded-full border border-slate-800 bg-slate-900/60 text-[11.5px] text-slate-200">
+                      <span className="w-5 h-5 rounded-full bg-slate-800 text-[10px] font-bold text-slate-400 flex items-center justify-center uppercase">
+                        {row.director.slice(0, 1)}
+                      </span>
+                      {row.director}
+                    </span>
+                  </div>
+                )}
+                {Array.isArray(row.cast_json) && row.cast_json.length > 0 && (
+                  <div>
+                    <div className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-600 mb-1.5">
+                      Cast{row.cast_json.length > 12 ? ` · ${row.cast_json.length}` : ''}
+                    </div>
+                    {/* Two-line person chips when TVMaze cast (with photos +
+                        character names) is available, simple name chips when
+                        only Cinemeta name data is present. Same chip shell
+                        either way so the row reads consistently. */}
+                    <div className="flex items-start gap-2 flex-wrap">
+                      {row.cast_json.slice(0, 12).map((c, i) => (
+                        <span
+                          key={`${c.name}-${i}`}
+                          className="group/cast inline-flex items-center gap-2 h-12 pl-1 pr-3 rounded-full border border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900 transition"
+                          title={c.character ? `${c.name} as ${c.character}` : c.name}
+                        >
+                          {c.image ? (
+                            <img
+                              src={c.image}
+                              alt=""
+                              className="w-10 h-10 rounded-full object-cover bg-slate-800 ring-1 ring-slate-700"
+                              onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                              loading="lazy"
+                            />
+                          ) : (
+                            <span className="w-10 h-10 rounded-full bg-slate-800 text-[14px] font-bold text-slate-400 flex items-center justify-center uppercase ring-1 ring-slate-700">
+                              {(c.name || '?').slice(0, 1)}
+                            </span>
+                          )}
+                          <span className="flex flex-col leading-tight pr-1 min-w-0">
+                            <span className="text-[12px] font-semibold text-slate-100 truncate max-w-[14ch]">
+                              {c.name}
+                            </span>
+                            {c.character && (
+                              <span className="text-[10px] text-slate-500 truncate max-w-[14ch]">
+                                {c.character}
+                              </span>
+                            )}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
-            {Array.isArray(row.cast_json) && row.cast_json.length > 0 && (
-              <div className="text-[11.5px] text-slate-400">
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600 mr-2">Cast</span>
-                {row.cast_json.slice(0, 8).map((c) => c.name).join(' · ')}
+            {/* External links — IMDb, Wikipedia, YouTube. Anchors with
+                target=_blank + noreferrer. The IMDb chip wears its
+                amber accent for instant recognition; Wikipedia keeps
+                neutral slate; YouTube uses the app's cyan accent. */}
+            <div className="space-y-1.5">
+              <div className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-600">More info</div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {row.imdb_id && (
+                  <a
+                    href={`https://www.imdb.com/title/${encodeURIComponent(row.imdb_id)}/`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-amber-500/40 bg-amber-500/[0.08] text-amber-200 hover:bg-amber-500/15 hover:border-amber-400/60 transition font-mono text-[10px] font-bold uppercase tracking-[0.18em]"
+                  >
+                    IMDb
+                    <ArrowOutSvg />
+                  </a>
+                )}
+                <a
+                  href={`https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(row.title || '')}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-slate-100 hover:border-slate-700 transition font-mono text-[10px] font-bold uppercase tracking-[0.18em]"
+                >
+                  Wikipedia
+                  <ArrowOutSvg />
+                </a>
+                {row.trailer_youtube_id && (
+                  <a
+                    href={`https://www.youtube.com/watch?v=${encodeURIComponent(row.trailer_youtube_id)}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-cyan-500/40 bg-cyan-500/[0.08] text-cyan-200 hover:bg-cyan-500/15 hover:border-cyan-400/60 transition font-mono text-[10px] font-bold uppercase tracking-[0.18em]"
+                  >
+                    YouTube
+                    <ArrowOutSvg />
+                  </a>
+                )}
               </div>
-            )}
+            </div>
 
             {/* Source chips */}
             {sources.length > 0 && (
@@ -430,35 +598,63 @@ const VodDetail = ({ kind, id, onBack }) => {
 
         {/* Player area — trailer iframe takes precedence when active,
             stream player otherwise. Single shared region so switching
-            between Play and Trailer never doubles up the UI. */}
-        {trailerYtId ? (
-          <div className="mt-6">
-            <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-slate-800 bg-black">
-              <iframe
-                key={trailerYtId}
-                title="Trailer"
-                src={`https://www.youtube-nocookie.com/embed/${trailerYtId}?autoplay=1&rel=0&modestbranding=1`}
-                allow="autoplay; encrypted-media; picture-in-picture"
-                allowFullScreen
-                className="absolute inset-0 w-full h-full"
-                frameBorder="0"
-              />
+            between Play and Trailer never doubles up the UI. Wrapped
+            in a ref so we can scrollIntoView when playback starts. */}
+        {(trailerYtId || streamSrc) && (
+          <div ref={playerSectionRef} className="mt-6 scroll-mt-4">
+            {/* Now-Playing pill — gives immediate context after the
+                page scrolls. For series, surfaces the active S/E +
+                title; for movies + trailers, just the medium. */}
+            <div className="mb-3 flex items-center gap-2 flex-wrap">
+              <span className="inline-flex items-center gap-1.5 h-6 px-2 rounded-md border border-cyan-500/40 bg-cyan-500/[0.08] font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-cyan-200">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                {trailerYtId ? 'Trailer' : 'Now Playing'}
+              </span>
+              {streamSrc && playingEpisode && (
+                <span className="font-mono text-[11px] tabular-nums text-slate-400">
+                  S{String(playingEpisode.seasonNumber || 0).padStart(2, '0')}
+                  E{String(playingEpisode.episode_number || 0).padStart(2, '0')}
+                  <span className="text-slate-700 mx-1.5">·</span>
+                  <span className="text-slate-200 normal-case tracking-normal">
+                    {playingEpisode.title || `Episode ${playingEpisode.episode_number}`}
+                  </span>
+                </span>
+              )}
+              {streamSrc && kind === 'movie' && (
+                <span className="font-mono text-[11px] tabular-nums text-slate-400 normal-case tracking-normal">
+                  {row.title}
+                </span>
+              )}
             </div>
-            <div className="mt-2 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setTrailerYtId(null)}
-                className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500 hover:text-slate-200 transition"
-              >
-                Close trailer
-              </button>
-            </div>
+
+            {trailerYtId ? (
+              <>
+                <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-slate-800 bg-black">
+                  <iframe
+                    key={trailerYtId}
+                    title="Trailer"
+                    src={`https://www.youtube-nocookie.com/embed/${trailerYtId}?autoplay=1&rel=0&modestbranding=1`}
+                    allow="autoplay; encrypted-media; picture-in-picture"
+                    allowFullScreen
+                    className="absolute inset-0 w-full h-full"
+                    frameBorder="0"
+                  />
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setTrailerYtId(null)}
+                    className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500 hover:text-slate-200 transition"
+                  >
+                    Close trailer
+                  </button>
+                </div>
+              </>
+            ) : (
+              <StreamPlayer src={streamSrc} poster={row.backdrop_url || row.poster_url} />
+            )}
           </div>
-        ) : streamSrc ? (
-          <div className="mt-6">
-            <StreamPlayer src={streamSrc} poster={row.backdrop_url || row.poster_url} />
-          </div>
-        ) : null}
+        )}
 
         {/* SERIES — seasons + episodes */}
         {kind === 'series' && (
