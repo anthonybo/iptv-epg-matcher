@@ -87,6 +87,27 @@ const menuItems = [
     ),
   },
   {
+    id: 'movies',
+    label: 'Movies',
+    icon: (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="4" width="20" height="16" rx="2" />
+        <path d="M2 8h20M2 16h20M7 4v16M17 4v16" />
+      </svg>
+    ),
+  },
+  {
+    id: 'series',
+    label: 'TV Series',
+    icon: (
+      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="5" width="20" height="14" rx="2" />
+        <path d="M8 21h8M12 17v4" />
+        <path d="M8 12h8" />
+      </svg>
+    ),
+  },
+  {
     id: 'dashboard',
     label: 'Dashboard',
     icon: (

@@ -17,6 +17,7 @@ import MultiViewPage from './MultiViewPage';
 import DashboardView from './DashboardView';
 import EpgSourcesSummary from './components/Epg/EpgSourcesSummary';
 import MyIPTVs from './pages/MyIPTVs/MyIPTVs';
+import VodPage from './pages/VOD/VodPage';
 import iptvSourcesService from './services/iptvSourcesService';
 import apiClient from './utils/apiClient';
 
@@ -275,6 +276,12 @@ function AppContent() {
 
       case 'multiview':
         return <MultiViewPage sessionId={sessionId} />;
+
+      case 'movies':
+        return <VodPage kind="movie" />;
+
+      case 'series':
+        return <VodPage kind="series" />;
 
       case 'dashboard':
         return <DashboardView />;

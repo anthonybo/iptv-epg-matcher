@@ -744,13 +744,37 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         const updatedSource = await iptvDatabaseService.getUserSources(userId, null);
         const refreshedSource = updatedSource.find(s => s.id === parseInt(sourceId));
 
+        // ── VOD catalog ingest (Xtream + Stalker) ──────────────────
+        // Pull movies + series in the background. Wrapped in try/catch
+        // because providers vary wildly in whether they expose VOD —
+        // a sports-only IPTV with no VOD endpoints shouldn't make the
+        // whole refresh look like it failed. Logs but doesn't bubble.
+        let vodSummary = null;
+        if (!channelsResult?.staleFallback && (source.type === 'xtream' || source.type === 'stalker')) {
+            try {
+                const vodIngestService = require('../services/vodIngestService');
+                vodSummary = await vodIngestService.ingestVodForSource({
+                    id: parseInt(sourceId),
+                    type: source.type,
+                    url: source.url,
+                    username: source.username,
+                    password: source.password,
+                    mac_address: source.mac_address || source.mac
+                });
+            } catch (vodErr) {
+                logger.warn(`[REFRESH] Source ${sourceId}: VOD ingest failed (non-fatal): ${vodErr.message}`);
+            }
+        }
+
         // If the socket already died (Vite/StrictMode disconnect), the
         // DB write is the user's only signal that the refresh completed
         // — log the final outcome so it's visible in the log stream,
         // then try to respond. Express will silently no-op the write
         // when the response is detached.
         logger.info(
-            `[REFRESH] Source ${sourceId}: complete — ${dbChannels.length} channels, ${categories.length} categories${clientGone ? ' (client had disconnected; DB updated regardless)' : ''}`
+            `[REFRESH] Source ${sourceId}: complete — ${dbChannels.length} channels, ${categories.length} categories` +
+            (vodSummary && !vodSummary.skipped ? `, ${vodSummary.movies} movies, ${vodSummary.series} series` : '') +
+            (clientGone ? ' (client had disconnected; DB updated regardless)' : '')
         );
         if (!res.writableEnded) {
             try {
@@ -760,7 +784,8 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                     channelCount: dbChannels.length,
                     categoryCount: categories.length,
                     accountInfo,
-                    source: refreshedSource
+                    source: refreshedSource,
+                    vod: vodSummary || null
                 });
             } catch (e) {
                 // Socket gone — frontend is polling getUserSources()

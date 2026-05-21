@@ -407,6 +407,8 @@ const liveEventsRoutes = require('./routes/liveEvents');
 const multiviewRoutes = require('./routes/multiview');
 const favoritesRoutes = require('./routes/favorites');
 const commercialProfileRoutes = require('./routes/commercialProfile');
+const vodRoutes = require('./routes/vod');
+const vodStreamRoutes = require('./routes/vodStream');
 const metricsRoutes = require('./routes/metrics');
 const logsRoutes = require('./routes/logs');
 const userLocationsRoutes = require('./routes/userLocations');
@@ -467,6 +469,8 @@ app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 app.use('/api/multiview', multiviewRoutes); // Multiview streams management
 app.use('/api/favorites', favoritesRoutes); // Per-user channel favorites for fast multi-view tile fill
 app.use('/api/commercial-profile', commercialProfileRoutes); // Per-user, per-channel commercial detection profile + FP learning
+app.use('/api/vod', vodRoutes); // VOD browse: /movies, /series, /series/:id/episodes (lazy)
+app.use('/api/vod-stream', vodStreamRoutes); // VOD playback proxy: /movie/:id and /episode/:id with byte-range
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news
@@ -1155,6 +1159,13 @@ logger.info('Automatic live events refresh schedule configured successfully');
 // Start live scores background updates (every 30 seconds)
 const liveScoresService = require('./services/liveScoresService');
 liveScoresService.startBackgroundUpdates(30000); // 30 seconds
+
+// Start TMDB VOD enrichment worker. No-ops if TMDB_API_KEY isn't
+// set in env; otherwise polls unenriched movie_streams + series_sources
+// rows in small batches and backfills canonical movies/series with
+// posters, overviews, cast.
+const tmdbEnrichmentService = require('./services/tmdbEnrichmentService');
+tmdbEnrichmentService.start();
 logger.info('Live scores background updates started (30s interval)');
 
 // Team-alias registry: create the table if missing. Seeding from
