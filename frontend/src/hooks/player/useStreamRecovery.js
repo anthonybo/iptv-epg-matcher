@@ -82,11 +82,33 @@ export default function useStreamRecovery({
   const RECOVERY_WINDOW_MS = theatreMode ? 30000 : 60000;
   const MAX_RECOVERIES_IN_WINDOW = theatreMode ? 4 : 6;
   // Resilient proxy mode: backend has ~30-35s retry budget (20s stale
-  // threshold + 3 retries with backoff), so wait ~45s before promoting
-  // to dead. Non-resilient: frontend recovery is doing the work, so the
-  // 120s ceiling is just a safety net.
-  const MAX_STALE_TIME_MS = shouldUseResilientProxy ? 45000 : 120000;
+  // threshold + 3 retries with backoff). We've tightened this twice
+  // now — first 45s → 25s, then 25s → 15s after user reports of
+  // 30-60s freezes. 15s catches a dead backend pipe quickly enough
+  // that auto-refresh (via handleStreamDead → refreshStream in
+  // MultiViewPage) can fully restore the stream inside a 25-30s
+  // total window. Non-resilient mode keeps its 120s ceiling as a
+  // safety net because there's no separate backend retry layer.
+  const MAX_STALE_TIME_MS = shouldUseResilientProxy ? 15000 : 120000;
   const MAX_SOFT_RECOVERIES = 3;
+
+  // Playhead-nudge thresholds. Shorter than the soft-recovery escalation
+  // because a nudge is cheap (a sub-frame seek on the existing video
+  // element) — it never touches the backend connection, so we can try
+  // it aggressively. Three attempts before we let the heavier health-
+  // check tiers take over. Pattern borrowed from hls.js's
+  // nudgeOffset / nudgeMaxRetry.
+  //
+  // CRITICAL: nudging only helps when the MSE buffer has FUTURE data
+  // beyond currentTime (single-frame underrun gaps). If the buffer
+  // is fully drained (no future bytes), the freeze is caused by the
+  // backend pipe dropping and no amount of seeking helps. The health
+  // check guards against this by skipping the nudge tier when
+  // `videoEl.buffered` ends at or before currentTime — see the
+  // `hasFutureBuffer` check below.
+  const NUDGE_FREEZE_THRESHOLD_MS = 4000;
+  const NUDGE_AMOUNT_S = 0.1;
+  const MAX_NUDGES_PER_FREEZE = 2;
 
   const clearRecoveryState = (decrementActive = false) => {
     if (theatreMode && (isRecoveringRef.current || decrementActive)) {
@@ -494,13 +516,45 @@ export default function useStreamRecovery({
       clearInterval(healthCheckIntervalRef.current);
     }
 
-    // Theatre mode uses a coarse 10s tick so 6 concurrent health
-    // checks don't eat the main thread. Single view runs at 3s for
-    // faster feedback.
-    const checkInterval = theatreMode ? 10000 : 3000;
-    const freezeThreshold = theatreMode ? checkInterval * 2 : checkInterval * 3;
+    // Theatre mode: tightened from 10s to 5s, then 5s to 3s after
+    // user reports of slow recovery. Faster detection means earlier
+    // escalation to refresh, which is the only thing that fixes a
+    // dead backend pipe.
+    const checkInterval = theatreMode ? 3000 : 3000;
+    const freezeThreshold = theatreMode ? 8000 : checkInterval * 3;
+    // Nudge counter resets every time currentTime advances; tracked in
+    // this closure so it stays scoped to the current health-check run.
+    let nudgesThisFreeze = 0;
+    // Timestamp of the first health-check tick that observed a frozen
+    // playhead in the CURRENT freeze episode. Used purely for log
+    // timestamps so we can correlate the timeline of recovery
+    // decisions when debugging.
+    let freezeStartedAt = 0;
+    // Track previous tick time so we can detect timer throttling
+    // (Chrome throttles background-tab timers to 1Hz after 5min idle
+    // and 1/min after 30min). If we see >2× the expected interval
+    // between ticks, log it — this distinguishes "stream actually
+    // froze for N seconds" from "timer was paused for N seconds".
+    let lastTickAt = 0;
 
     healthCheckIntervalRef.current = setInterval(() => {
+      // Tick-interval anomaly detection. setInterval is supposed to
+      // fire every `checkInterval` ms; if the gap is >2× expected,
+      // the browser throttled us (almost always: tab in background).
+      // Log it so we can distinguish "stream genuinely froze" from
+      // "we just couldn't observe it".
+      const tickNow = Date.now();
+      if (lastTickAt > 0) {
+        const gap = tickNow - lastTickAt;
+        if (gap > checkInterval * 2) {
+          log(
+            'warn',
+            `[health] tick gap ${gap}ms (expected ~${checkInterval}ms) — likely tab-background throttling`
+          );
+        }
+      }
+      lastTickAt = tickNow;
+
       const videoEl = videoElementRef.current;
       if (!videoEl) return;
       if (videoEl.paused) return;
@@ -536,32 +590,106 @@ export default function useStreamRecovery({
       // case where the stream never started in the first place.
       if (currentTime === lastKnownTime) {
         const timeSinceLastPlaying = Date.now() - lastPlayingTimeRef.current;
+        if (freezeStartedAt === 0) {
+          freezeStartedAt = Date.now();
+          log(
+            'info',
+            `[health] freeze begins at currentTime=${currentTime.toFixed(2)}s (since-last-playing=${timeSinceLastPlaying}ms)`
+          );
+        }
+
+        // Compute "future buffer" — how much playable data sits AHEAD
+        // of the current playhead. When this is 0, the MSE buffer is
+        // drained and the freeze is caused by the network/backend
+        // stopping, NOT by an MSE underrun. Playhead nudges can't
+        // help in that case — seeking into nothing keeps you frozen
+        // — so we skip the nudge tier and escalate directly to the
+        // refresh path (notifyStreamDead → handleStreamDead in
+        // MultiViewPage → refreshStream).
+        let futureBufferS = 0;
+        try {
+          const tr = videoEl.buffered;
+          for (let i = 0; i < tr.length; i++) {
+            if (tr.start(i) <= currentTime && tr.end(i) > currentTime) {
+              futureBufferS = tr.end(i) - currentTime;
+              break;
+            }
+          }
+        } catch (_) { /* buffered ranges can throw before any data loads */ }
+        const hasFutureBuffer = futureBufferS > 0.1;
+
+        // Tier 0: playhead nudge — ONLY when there's future buffer.
+        // Most MSE single-frame underrun stalls are fixed by a tiny
+        // seek; backend-disconnect freezes are not (seeking into
+        // nothing stays frozen).
+        if (
+          hasFutureBuffer &&
+          timeSinceLastPlaying >= NUDGE_FREEZE_THRESHOLD_MS &&
+          timeSinceLastPlaying < freezeThreshold &&
+          nudgesThisFreeze < MAX_NUDGES_PER_FREEZE
+        ) {
+          try {
+            const before = videoEl.currentTime;
+            videoEl.currentTime = before + NUDGE_AMOUNT_S;
+            nudgesThisFreeze++;
+            log(
+              'info',
+              `[health] nudge ${nudgesThisFreeze}/${MAX_NUDGES_PER_FREEZE} (frozen ${timeSinceLastPlaying}ms at ${before.toFixed(2)}s, futureBuffer=${futureBufferS.toFixed(2)}s)`
+            );
+          } catch (e) {
+            log('warn', `[health] nudge failed: ${e.message}`);
+          }
+          return;
+        }
+
+        // Fast-path: buffer drained AND past freezeThreshold. No
+        // point sitting through the full MAX_STALE_TIME_MS waiting
+        // for a backend that already gave up — refresh now.
+        if (
+          shouldUseResilientProxy &&
+          !hasFutureBuffer &&
+          timeSinceLastPlaying >= freezeThreshold
+        ) {
+          log(
+            'error',
+            `[health] buffer drained + frozen ${timeSinceLastPlaying}ms — backend pipe dead, escalating to refresh now`,
+            { currentTime, futureBufferS }
+          );
+          clearInterval(healthCheckIntervalRef.current);
+          healthCheckIntervalRef.current = null;
+          streamUnstableRef.current = true;
+          cleanupPlayer();
+          setError('Stream unavailable. Refreshing…');
+          notifyStreamDead('buffer_drained');
+          return;
+        }
 
         if (timeSinceLastPlaying >= freezeThreshold) {
-          log('error', `Video frozen detected - no progress for ${timeSinceLastPlaying}ms at currentTime ${currentTime}s`, {
-            useResilientProxy: shouldUseResilientProxy
-          });
+          log(
+            'error',
+            `[health] video frozen ${timeSinceLastPlaying}ms at currentTime=${currentTime.toFixed(2)}s (futureBuffer=${futureBufferS.toFixed(2)}s)`,
+            { useResilientProxy: shouldUseResilientProxy }
+          );
           clearInterval(healthCheckIntervalRef.current);
           healthCheckIntervalRef.current = null;
 
           if (shouldUseResilientProxy) {
-            // Past 2min frozen the player is effectively dead; keeping
-            // mpegts.js running just loops its internal retry and can
-            // crash it. Stop cleanly and let the parent find an alt.
             if (timeSinceLastPlaying >= MAX_STALE_TIME_MS) {
-              log('error', `Stream dead for ${Math.round(timeSinceLastPlaying / 1000)}s - completely stopping player`);
+              log(
+                'error',
+                `[health] stream dead for ${Math.round(timeSinceLastPlaying / 1000)}s — stopping player, notifying parent for refresh`
+              );
               streamUnstableRef.current = true;
               cleanupPlayer();
-              setError('Stream unavailable. Finding alternative...');
+              setError('Stream unavailable. Refreshing…');
               notifyStreamDead('stale');
               return;
             }
 
-            if (timeSinceLastPlaying >= 30000) {
-              log('warn', `Stream frozen for ${Math.round(timeSinceLastPlaying / 1000)}s - still waiting for backend`);
-            } else {
-              log('info', 'Stream frozen but using resilient proxy - waiting for backend reconnect');
-            }
+            log(
+              'info',
+              `[health] frozen ${timeSinceLastPlaying}ms but resilient proxy may still recover — waiting (limit ${MAX_STALE_TIME_MS}ms)`
+            );
             // Restart so MAX_STALE_TIME_MS can fire next tick.
             startHealthCheck();
             return;
@@ -574,8 +702,18 @@ export default function useStreamRecovery({
         // timeupdate handler in initMpegts does this every second
         // already, but it stops firing during mpegts unload/load which
         // is exactly when we need this safety-net.
+        if (freezeStartedAt > 0) {
+          log(
+            'info',
+            `[health] freeze resolved after ${Date.now() - freezeStartedAt}ms (nudges used: ${nudgesThisFreeze})`
+          );
+          freezeStartedAt = 0;
+        }
         lastKnownCurrentTimeRef.current = currentTime;
         lastPlayingTimeRef.current = Date.now();
+        // Reset nudge budget — the stream is healthy again, give the
+        // next freeze its own full nudge quota.
+        nudgesThisFreeze = 0;
 
         if (isRecoveringRef.current) {
           isRecoveringRef.current = false;
@@ -588,7 +726,7 @@ export default function useStreamRecovery({
       }
     }, checkInterval);
 
-    log('info', `Health check started (interval: ${checkInterval}ms, freeze threshold: ${freezeThreshold}ms, resilientProxy: ${shouldUseResilientProxy})`);
+    log('info', `[health] started (interval=${checkInterval}ms, freezeThreshold=${freezeThreshold}ms, maxStale=${MAX_STALE_TIME_MS}ms, resilient=${shouldUseResilientProxy})`);
   };
 
   return {

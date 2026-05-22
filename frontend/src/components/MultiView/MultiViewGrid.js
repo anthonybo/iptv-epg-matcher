@@ -41,6 +41,7 @@ const MultiViewGrid = ({
   onToggleMute,
   onVolumeChange,
   onRefresh,
+  onStreamDead,
   onFindAlternative,
   onFindDifferentGame,
   onAlternateSources,
@@ -178,7 +179,14 @@ const MultiViewGrid = ({
                   onFindAlternative={() => onFindAlternative(stream, false)}
                   onFindDifferentGame={() => onFindDifferentGame(stream)}
                   onAlternateSources={onAlternateSources ? () => onAlternateSources(stream) : null}
-                  onStreamDead={() => onFindAlternative(stream, true)}
+                  onStreamDead={
+                    onStreamDead
+                      ? () => onStreamDead(stream)
+                      // Fallback for callers that haven't wired
+                      // onStreamDead: keep the old behavior of jumping
+                      // straight to find-alternative.
+                      : () => onFindAlternative(stream, true)
+                  }
                   onBlacklist={() => onBlacklist(stream.name)}
                   onRemove={() => onRemove(stream.id, stream.sourceId)}
                   onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(stream) : null}

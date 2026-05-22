@@ -133,17 +133,26 @@ const IPTVPlayer = ({
     // CRITICAL: Always log "Video playing" message even in theatre mode
     // This is needed for auto-test functionality to detect working channels
     const isCriticalMessage = message === 'Video playing';
+    // Recovery diagnostics — these are low-volume (one per health-
+    // check tick, only on freezes) and crucial for debugging the
+    // multi-view freeze-and-recover chain. Always allow them through
+    // to the console even in theatre mode so the user can see WHY a
+    // stream froze and which recovery tier fired.
+    const isRecoveryDiagnostic =
+      typeof message === 'string' &&
+      (message.startsWith('[health]') || message.startsWith('[recovery]'));
 
     // In theatre mode (multi-view), skip most logging to prevent performance issues
     // But always emit critical messages that other components depend on
-    if (theatreMode && !isCriticalMessage) {
+    if (theatreMode && !isCriticalMessage && !isRecoveryDiagnostic) {
       return;
     }
 
     // Log critical messages to console in ALL modes (needed for auto-test detection)
     // Log other messages only in development
-    if (isCriticalMessage || process.env.NODE_ENV === 'development') {
-      console.log(`[${level.toUpperCase()}] ${message}`, data || '');
+    if (isCriticalMessage || isRecoveryDiagnostic || process.env.NODE_ENV === 'development') {
+      const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+      fn(`[${level.toUpperCase()}] ${message}`, data || '');
     }
 
     // Skip state updates in theatre mode (no debug panel shown)

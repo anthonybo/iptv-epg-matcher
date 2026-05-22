@@ -183,6 +183,18 @@ const MultiViewPage = ({ sessionId }) => {
     setShowSportDropdown
   });
 
+  // Tracks slots that have already received an auto-refresh in the
+  // current dead-stream cycle. Cleared when the slot emits the
+  // `iptv:streamPlaying` event (in initMpegts.js) — see the listener
+  // attached inside handleStreamDead below. Prevents an infinite
+  // refresh→fail→refresh loop on a genuinely broken stream.
+  const refreshAttemptedSlotsRef = useRef(new Set());
+
+  // Timestamp of the last visibility-change-to-hidden. Used by the
+  // wake-up effect below to decide whether enough time has passed
+  // that streams are likely stale and need a refresh.
+  const lastHiddenAtRef = useRef(0);
+
   const {
     findingAlternativeFor,
     handleFindAlternative,
@@ -395,6 +407,122 @@ const MultiViewPage = ({ sessionId }) => {
       });
     }
   }, [streams]);
+
+  // Page Visibility wake-up. When the user backgrounds the tab, the
+  // browser throttles XHR/fetch and the resilient-proxy backend often
+  // gives up after its retry budget; when they come back the player
+  // is sitting on a frozen frame with no event to recover from. If
+  // the tab was hidden for >30s, refresh every active stream (the
+  // same path as the manual ↻ button), staggered 300ms apart so we
+  // don't kick off N parallel mpegts re-inits + N backend ffmpeg
+  // pipes simultaneously.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        lastHiddenAtRef.current = Date.now();
+        console.info(`[multiview][visibility] tab hidden`);
+        return;
+      }
+      const hiddenMs = lastHiddenAtRef.current
+        ? Date.now() - lastHiddenAtRef.current
+        : 0;
+      lastHiddenAtRef.current = 0;
+      console.info(
+        `[multiview][visibility] tab visible after ${hiddenMs}ms hidden (streams=${streams?.length || 0})`
+      );
+      if (hiddenMs < 30000) return;
+      if (!streams || streams.length === 0) return;
+
+      console.info(
+        `[multiview][visibility] hidden >30s — proactively refreshing ${streams.length} streams (staggered 300ms)`
+      );
+      // Snapshot the current stream list — refreshStream mutates the
+      // live array, so iterate over a copy.
+      const snapshot = streams.slice();
+      snapshot.forEach((s, idx) => {
+        if (!s || !s.id || !s.sourceId) return;
+        setTimeout(() => {
+          refreshStream(s.id, s.sourceId);
+        }, idx * 300);
+      });
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [streams, refreshStream]);
+
+  // When IPTVPlayer declares a slot dead (45s frozen, fatal error,
+  // etc.), try an automatic refresh of the same channel FIRST before
+  // escalating to find-alternative. The refresh path is exactly what
+  // the manual ↻ button does: bump the slot's _refreshKey, which
+  // forces IPTVPlayer to unmount + remount with a fresh mpegts
+  // instance + fresh backend connection. Empirically that fixes most
+  // "stuck" streams without swapping the user to a different channel.
+  //
+  // Loop guard: refreshAttemptedSlotsRef tracks which slots we've
+  // already auto-refreshed in this dead-stream cycle. If the same
+  // slot dies again before successfully playing, we go straight to
+  // find-alternative (the swap is the user's escape hatch when the
+  // channel genuinely is broken). The set is cleared when
+  // initMpegts.js emits the `iptv:streamPlaying` event for the slot.
+  const handleStreamDead = useCallback((stream) => {
+    if (!stream || !stream.id || !stream.sourceId) return;
+    const slotKey = `${stream.sourceId}_${stream.id}`;
+    const channelName = stream.name || stream.id;
+    const startedAt = Date.now();
+
+    if (refreshAttemptedSlotsRef.current.has(slotKey)) {
+      // Refresh was already tried and it ALSO failed. Escalate.
+      refreshAttemptedSlotsRef.current.delete(slotKey);
+      console.warn(
+        `[multiview][recovery] ${channelName}: auto-refresh already failed this cycle — escalating to find-alternative`
+      );
+      handleFindAlternative(stream, true);
+      return;
+    }
+
+    refreshAttemptedSlotsRef.current.add(slotKey);
+    console.info(
+      `[multiview][recovery] ${channelName}: stream declared dead — triggering auto-refresh (slot=${slotKey})`
+    );
+    refreshStream(stream.id, stream.sourceId);
+
+    // Wait up to 12s for the stream to start playing. If it does,
+    // initMpegts.js fires `iptv:streamPlaying` and the listener clears
+    // the slot from the attempted-set. If it doesn't, the timeout
+    // promotes to find-alternative. 12s is tight enough that the
+    // total recovery window (freeze detection ~8-15s + refresh wait
+    // 12s) stays under 30s — matching what the user expects from
+    // hitting the manual ↻ button.
+    const onPlay = (e) => {
+      const d = e.detail || {};
+      if (d.sourceId === stream.sourceId && d.channelId === stream.id) {
+        const elapsed = Date.now() - startedAt;
+        console.info(
+          `[multiview][recovery] ${channelName}: auto-refresh succeeded after ${elapsed}ms ✓`
+        );
+        window.removeEventListener('iptv:streamPlaying', onPlay);
+        clearTimeout(timeoutId);
+        refreshAttemptedSlotsRef.current.delete(slotKey);
+      }
+    };
+    window.addEventListener('iptv:streamPlaying', onPlay);
+    const timeoutId = setTimeout(() => {
+      window.removeEventListener('iptv:streamPlaying', onPlay);
+      if (refreshAttemptedSlotsRef.current.has(slotKey)) {
+        const elapsed = Date.now() - startedAt;
+        console.warn(
+          `[multiview][recovery] ${channelName}: auto-refresh did NOT confirm playback within ${elapsed}ms — escalating to find-alternative`
+        );
+        refreshAttemptedSlotsRef.current.delete(slotKey);
+        // Stream still wasn't playing after the refresh window — try
+        // an alternative now. handleFindAlternative has its own
+        // chain-breaker so this won't runaway.
+        handleFindAlternative(stream, true);
+      }
+    }, 12000);
+  }, [refreshStream, handleFindAlternative]);
 
   // ─── Panel openers (rail icons + command palette) ──────────────────
   // Each rail icon → panel.open with the module's descriptor (title,
@@ -681,6 +809,7 @@ const MultiViewPage = ({ sessionId }) => {
             onToggleMute={toggleMute}
             onVolumeChange={setStreamVolume}
             onRefresh={refreshStream}
+            onStreamDead={handleStreamDead}
             onFindAlternative={handleFindAlternative}
             onFindDifferentGame={handleFindDifferentGame}
             onAlternateSources={openPickerForStreamPanel}
