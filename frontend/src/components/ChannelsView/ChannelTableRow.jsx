@@ -257,4 +257,9 @@ const ChannelTableRow = ({
   );
 };
 
-export default ChannelTableRow;
+// Memoize so a parent re-render (selection change, search update,
+// other-row state flip) doesn't force every row in a 200-row table
+// to re-render. The default shallow compare is enough — props are
+// primitive flags + the channel object reference (channels list is
+// rebuilt on fetch, not mutated, so reference equality is reliable).
+export default React.memo(ChannelTableRow);

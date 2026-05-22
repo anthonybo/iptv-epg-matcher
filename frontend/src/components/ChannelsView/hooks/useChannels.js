@@ -21,22 +21,42 @@ export const useChannels = (sessionId, sourceId = null) => {
     }
   });
   const [loading, setLoading] = useState(true);
+  // `categoriesLoading` is distinct from `loading` so the category
+  // sidebar can show "Loading…" while its own fetch is in flight,
+  // independently of the channels-list fetch. Previously the sidebar
+  // re-used the channels `loading` flag, which flipped to false as
+  // soon as the (much faster) channels fetch returned — at which
+  // point the sidebar's empty-state path rendered "No categories
+  // available" even though the categories fetch was still pending.
+  const [categoriesLoading, setCategoriesLoading] = useState(true);
   const [error, setError] = useState(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
-  const limit = 1000;
+  // Per-page row count. Previously 1000, which meant the initial
+  // render dumped 1000 rich rows (logo image, badges, three action
+  // buttons each) into the DOM in one go — heavy enough to block
+  // the main thread and make clicks feel laggy on lower-end
+  // machines or during concurrent backend load. 200 is enough to
+  // fill ~3 viewport heights; infinite-scroll fetches more as the
+  // user reaches the bottom.
+  const limit = 200;
 
   // Fetch categories
   useEffect(() => {
     if (!sessionId) return;
 
+    const abortController = new AbortController();
+    let isSubscribed = true;
+
     const fetchCategories = async () => {
+      setCategoriesLoading(true);
       try {
         let url = `/channels/${sessionId}/categories`;
         if (sourceId) {
           url += `?source_id=${sourceId}`;
         }
-        const response = await apiClient.get(url);
+        const response = await apiClient.get(url, { signal: abortController.signal });
+        if (!isSubscribed) return;
 
         const data = response.data;
 
@@ -54,12 +74,23 @@ export const useChannels = (sessionId, sourceId = null) => {
           setCategories(normalized);
         }
       } catch (err) {
+        // Ignore aborted requests (expected when sourceId changes
+        // mid-flight).
+        if (err.name === 'AbortError' || err.name === 'CanceledError' || err.code === 'ERR_CANCELED') {
+          return;
+        }
         console.error('Error fetching categories:', err);
-        setError(err.message);
+        if (isSubscribed) setError(err.message);
+      } finally {
+        if (isSubscribed) setCategoriesLoading(false);
       }
     };
 
     fetchCategories();
+    return () => {
+      isSubscribed = false;
+      abortController.abort();
+    };
   }, [sessionId, sourceId]);
 
   // Save search term to sessionStorage whenever it changes
@@ -242,6 +273,7 @@ export const useChannels = (sessionId, sourceId = null) => {
     selectedCategories,
     searchTerm,
     loading,
+    categoriesLoading,
     error,
     hasMore,
     setSearchTerm,

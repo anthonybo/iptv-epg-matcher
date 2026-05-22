@@ -226,43 +226,66 @@ export function useMultiViewStreams() {
     showToast('Stream refreshed', 'success');
   };
 
-  const removeStream = async (id, sourceId) => {
-    try {
-      const success = await removeFromMultiview(id, sourceId);
-      if (success) {
-        setStreams((prevStreams) =>
-          prevStreams.filter(
-            (stream) => !(stream.id === id && stream.sourceId === sourceId)
-          )
-        );
-        const streamKey = `${sourceId}_${id}`;
-        setStreamQualities((prev) => {
-          const { [streamKey]: _removed, ...rest } = prev;
-          return rest;
-        });
-      } else {
-        showToast('Failed to remove stream', 'error');
-      }
-    } catch (error) {
-      console.error('Error removing stream:', error);
-      showToast('Failed to remove stream', 'error');
-    }
+  // Optimistic removal — drop the tile from local state immediately
+  // so the X click feels responsive, then sync to the backend in
+  // the background. If the backend ack fails (timeout, 500), we
+  // surface a toast but DON'T restore the tile; on the next page
+  // load the source of truth will reconcile. This pattern is what
+  // matters when the API is slow or congested: the user controls
+  // their own grid without waiting on the server.
+  const removeStream = (id, sourceId) => {
+    // Capture for potential restore-on-failure.
+    let removedStream = null;
+    setStreams((prevStreams) => {
+      removedStream = prevStreams.find(
+        (s) => s.id === id && s.sourceId === sourceId
+      );
+      return prevStreams.filter(
+        (s) => !(s.id === id && s.sourceId === sourceId)
+      );
+    });
+    const streamKey = `${sourceId}_${id}`;
+    setStreamQualities((prev) => {
+      const { [streamKey]: _removed, ...rest } = prev;
+      return rest;
+    });
+
+    // Fire-and-forget the backend sync. Logged + toasted on failure
+    // but does not block the UI update above.
+    Promise.resolve()
+      .then(() => removeFromMultiview(id, sourceId))
+      .then((success) => {
+        if (!success && removedStream) {
+          showToast('Stream removed locally — server sync failed', 'warning');
+        }
+      })
+      .catch((error) => {
+        console.error('Error syncing stream removal:', error);
+        showToast('Stream removed locally — server sync failed', 'warning');
+      });
   };
 
-  const clearAll = async () => {
-    try {
-      const success = await clearMultiview();
-      if (success) {
-        window.dispatchEvent(new Event('multiviewUpdate'));
-        setStreamQualities({});
-        showToast('All streams cleared', 'success');
-      } else {
-        showToast('Failed to clear streams', 'error');
-      }
-    } catch (error) {
-      console.error('Error clearing streams:', error);
-      showToast('Failed to clear streams', 'error');
-    }
+  // Same optimistic pattern for clear-all — wipe the grid client-
+  // side immediately, then sync the backend. Local state already
+  // updates through the multiviewUpdate event chain below.
+  const clearAll = () => {
+    setStreams([]);
+    setStreamQualities({});
+    window.dispatchEvent(new Event('multiviewUpdate'));
+
+    Promise.resolve()
+      .then(() => clearMultiview())
+      .then((success) => {
+        if (success) {
+          showToast('All streams cleared', 'success');
+        } else {
+          showToast('Streams cleared locally — server sync failed', 'warning');
+        }
+      })
+      .catch((error) => {
+        console.error('Error syncing clear-all:', error);
+        showToast('Streams cleared locally — server sync failed', 'warning');
+      });
   };
 
   const onQualityDetected = useCallback((streamId, quality) => {

@@ -96,6 +96,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     selectedCategories,
     searchTerm,
     loading,
+    categoriesLoading,
     error,
     hasMore,
     setSearchTerm,
@@ -756,7 +757,7 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
               selectedCategories={selectedCategories}
               onToggle={toggleCategory}
               onClearAll={clearCategoryFilters}
-              loading={loading}
+              loading={categoriesLoading}
             />
           </div>
         </div>
