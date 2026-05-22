@@ -2,46 +2,81 @@ import React, { useState } from 'react';
 import ChannelTableRow from './ChannelTableRow';
 
 /**
- * Skeleton loader for table rows
+ * ChannelTable — polished media-table for browsing channels.
+ *
+ * Layout:
+ *   ┌──────────────────────────────────────────────────────────┐
+ *   │  Bulk-action bar  (select-all + selection-context chips) │
+ *   ├──────────────────────────────────────────────────────────┤
+ *   │  Sortable header  (Channel · Group · Actions)            │
+ *   │  ChannelTableRow × N                                     │
+ *   ├──────────────────────────────────────────────────────────┤
+ *   │  Load-more footer (when hasMore)                         │
+ *   └──────────────────────────────────────────────────────────┘
+ *
+ * State logic (selectedChannels, sort, toggleAll, etc.) is
+ * preserved from the previous version; only the rendered chrome
+ * has been redesigned to match the rest of the app.
  */
+
+// Skeleton row for the initial-load shimmer. Matches the new 4-column
+// layout (we dropped the row-number column).
 const TableRowSkeleton = () => (
-  <tr className="border-b border-slate-800/50 bg-slate-900/40">
-    <td className="px-2 py-3"><div className="h-5 w-9 bg-slate-800/70 rounded-full animate-pulse mx-auto"></div></td>
-    <td className="px-4 py-3"><div className="h-4 w-8 bg-slate-800/70 rounded animate-pulse mx-auto"></div></td>
-    <td className="px-4 py-3">
+  <tr className="border-b border-slate-800/40">
+    <td className="pl-3 pr-2 py-3">
+      <div className="w-4 h-4 rounded-sm bg-slate-900/70 animate-pulse" />
+    </td>
+    <td className="px-3 py-3">
       <div className="flex items-center gap-3">
-        <div className="h-12 w-12 bg-slate-800/70 rounded-lg animate-pulse"></div>
-        <div className="flex-1 space-y-2">
-          <div className="h-4 w-32 bg-slate-800/70 rounded animate-pulse"></div>
-          <div className="h-3 w-20 bg-slate-800/70 rounded animate-pulse"></div>
+        <div className="w-12 h-12 rounded-md bg-slate-900/70 border border-slate-800/60 animate-pulse" />
+        <div className="flex-1 space-y-2 min-w-0">
+          <div className="h-3 w-44 rounded bg-slate-900/70 animate-pulse" />
+          <div className="h-2.5 w-28 rounded bg-slate-900/50 animate-pulse" />
         </div>
       </div>
     </td>
-    <td className="px-4 py-3"><div className="h-4 w-24 bg-slate-800/70 rounded animate-pulse"></div></td>
-    <td className="px-4 py-3">
+    <td className="px-3 py-3">
+      <div className="h-6 w-32 rounded-md bg-slate-900/70 border border-slate-800/60 animate-pulse" />
+    </td>
+    <td className="px-3 py-3">
       <div className="flex items-center justify-end gap-1.5">
-        <div className="h-7 w-7 bg-slate-800/70 rounded-lg animate-pulse"></div>
-        <div className="h-7 w-7 bg-slate-800/70 rounded-lg animate-pulse"></div>
-        <div className="h-7 w-7 bg-slate-800/70 rounded-lg animate-pulse"></div>
+        <div className="w-8 h-8 rounded-md bg-slate-900/70 animate-pulse" />
+        <div className="h-8 w-20 rounded-md bg-slate-900/70 animate-pulse" />
+        <div className="h-8 w-16 rounded-md bg-slate-900/70 animate-pulse" />
       </div>
     </td>
   </tr>
 );
 
-/**
- * ChannelTable - Table view for displaying channels with bulk actions
- * @param {Array} channels - Array of channel objects to display
- * @param {boolean} loading - Loading state
- * @param {boolean} hasMore - Whether more channels can be loaded
- * @param {Function} onLoadMore - Callback to load more channels
- * @param {Function} onChannelClick - Callback when a channel is clicked
- * @param {object} selectedChannel - Currently selected/active channel
- * @param {object} matchedChannels - Matched channel data
- * @param {Function} onPreview - Callback when preview button is clicked
- * @param {string} autoTestChannelKey - Composite key (sourceId-id) of channel currently being auto-tested
- * @param {Function} onAutoTest - Callback when auto-test button is clicked
- * @param {boolean} isAutoTesting - Whether auto-testing is currently active
- */
+// Mono-caps sort header button with a small chevron that reveals on
+// hover (inactive columns) or flips direction (active column).
+const SortButton = ({ active, direction, onClick, children }) => (
+  <button
+    onClick={onClick}
+    className={`group/sort inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.22em] transition ${
+      active ? 'text-cyan-200' : 'text-slate-500 hover:text-slate-300'
+    }`}
+  >
+    {children}
+    {active ? (
+      <span className="inline-flex items-center justify-center w-3 h-3 text-cyan-300">
+        <svg
+          className={`w-3 h-3 transition-transform ${direction === 'desc' ? 'rotate-180' : ''}`}
+          fill="none" stroke="currentColor" strokeWidth={2.8} viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" />
+        </svg>
+      </span>
+    ) : (
+      <span className="opacity-0 group-hover/sort:opacity-40 transition w-3 h-3 inline-flex items-center justify-center">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M8 9l4-4 4 4M16 15l-4 4-4-4" />
+        </svg>
+      </span>
+    )}
+  </button>
+);
+
 const ChannelTable = ({
   channels,
   loading,
@@ -59,7 +94,6 @@ const ChannelTable = ({
   const [sortColumn, setSortColumn] = useState(null);
   const [sortDirection, setSortDirection] = useState('asc');
 
-  // Toggle individual channel selection
   const toggleChannel = (channel) => {
     const newSelected = new Set(selectedChannels);
     const key = `${channel.sourceId}-${channel.id}`;
@@ -71,22 +105,19 @@ const ChannelTable = ({
     setSelectedChannels(newSelected);
   };
 
-  // Toggle all channels selection
   const toggleAll = () => {
     if (selectedChannels.size === channels.length) {
       setSelectedChannels(new Set());
     } else {
-      const allKeys = channels.map(ch => `${ch.sourceId}-${ch.id}`);
+      const allKeys = channels.map((ch) => `${ch.sourceId}-${ch.id}`);
       setSelectedChannels(new Set(allKeys));
     }
   };
 
-  // Clear selection
   const clearSelection = () => {
     setSelectedChannels(new Set());
   };
 
-  // Handle sort
   const handleSort = (column) => {
     if (sortColumn === column) {
       setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
@@ -96,298 +127,229 @@ const ChannelTable = ({
     }
   };
 
-  // Sort channels
   const sortedChannels = [...channels].sort((a, b) => {
     if (!sortColumn) return 0;
-
     let aVal = a[sortColumn] || '';
     let bVal = b[sortColumn] || '';
-
     if (sortColumn === 'name') {
-      aVal = aVal.toLowerCase();
-      bVal = bVal.toLowerCase();
+      aVal = String(aVal).toLowerCase();
+      bVal = String(bVal).toLowerCase();
     }
-
     if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
     if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
     return 0;
   });
 
-  // Show skeleton loaders on initial load
-  if (loading && channels.length === 0) {
-    return (
-      <div className="flex flex-col h-full bg-slate-950/80 rounded-2xl border border-slate-800/80 overflow-hidden">
-        {/* Bulk Actions Bar (disabled during loading) */}
-        <div className="border-b border-slate-800/50 bg-slate-900/60 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <div className="h-8 w-16 bg-slate-800/70 rounded-lg animate-pulse"></div>
-            <div className="h-8 w-8 bg-slate-800/70 rounded-lg animate-pulse"></div>
-            <div className="h-px flex-1 bg-slate-800/50"></div>
-            <div className="h-8 w-20 bg-slate-800/70 rounded-lg animate-pulse"></div>
-            <div className="h-8 w-20 bg-slate-800/70 rounded-lg animate-pulse"></div>
-            <div className="h-8 w-24 bg-slate-800/70 rounded-lg animate-pulse"></div>
-            <div className="h-8 w-16 bg-slate-800/70 rounded-lg animate-pulse"></div>
-          </div>
-        </div>
-
-        {/* Table */}
-        <div className="flex-1 overflow-auto">
-          <table className="w-full">
-            <thead className="sticky top-0 z-10 bg-slate-900/90 border-b border-slate-800/50">
-              <tr>
-                <th className="w-12 px-2 py-3"></th>
-                <th className="w-16 px-4 py-3 text-center text-xs font-semibold text-slate-400">#</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400">Name</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400">Group</th>
-                <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Array.from({ length: 15 }).map((_, index) => (
-                <TableRowSkeleton key={index} />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
-
-  // No channels found
-  if (!loading && channels.length === 0) {
-    return (
-      <div className="flex flex-col h-full bg-slate-950/80 rounded-2xl border border-slate-800/80 overflow-hidden">
-        <div className="flex-1 flex flex-col items-center justify-center py-16 text-center">
-          <svg
-            className="mb-4 h-16 w-16 text-slate-600"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          </svg>
-          <h3 className="mb-2 text-lg font-semibold text-slate-200">
-            No channels found
-          </h3>
-          <p className="text-sm text-slate-500">
-            Try adjusting your filters or search term
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   const allSelected = selectedChannels.size === channels.length && channels.length > 0;
   const someSelected = selectedChannels.size > 0 && selectedChannels.size < channels.length;
 
-  return (
-    <div className="flex flex-col h-full bg-slate-950/80 rounded-2xl border border-slate-800/80 overflow-hidden">
-      {/* Bulk Actions Bar */}
-      <div className="border-b border-slate-800/50 bg-slate-900/60 px-4 py-3">
-        <div className="flex items-center gap-2">
-          {/* Select All Dropdown */}
-          <div className="relative">
-            <button
-              onClick={toggleAll}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-700/80 bg-slate-800/60 text-sm font-medium text-slate-200 hover:bg-slate-700/60 transition-colors"
-            >
-              <div className="flex items-center justify-center w-4 h-4 rounded border border-slate-500">
-                {allSelected && (
-                  <svg className="w-3 h-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                  </svg>
-                )}
-                {someSelected && !allSelected && (
-                  <div className="w-2 h-0.5 bg-blue-400"></div>
-                )}
-              </div>
-              All
-            </button>
-          </div>
-
-          {/* Add New */}
+  // Shared shell so the loading, empty, and populated states all use
+  // the same chrome — no layout jitter when channels appear or filters
+  // empty the list.
+  const renderShell = (bodyChildren) => (
+    <div className="flex flex-col h-full bg-slate-950/60 rounded-xl border border-slate-800/80 overflow-hidden">
+      {/* ── Bulk-action bar ───────────────────────────────────── */}
+      <div className="flex-shrink-0 border-b border-slate-800/60 bg-slate-900/40 px-4 py-2.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Select-all checkbox + label */}
           <button
-            className="p-1.5 rounded-lg border border-green-700/60 bg-green-900/40 text-green-400 hover:bg-green-900/60 transition-colors"
-            title="Add channel"
+            onClick={toggleAll}
+            disabled={channels.length === 0}
+            className="group inline-flex items-center gap-2 h-8 pl-1.5 pr-3 rounded-md border border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:bg-slate-900 transition disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label="Select all channels"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
+            <span
+              className={`flex items-center justify-center w-4 h-4 rounded-sm border transition ${
+                allSelected
+                  ? 'border-cyan-500/60 bg-cyan-500 shadow-[0_0_8px_-2px_rgba(34,211,238,0.6)]'
+                  : someSelected
+                  ? 'border-cyan-500/60 bg-cyan-500/[0.15]'
+                  : 'border-slate-700 bg-slate-900/40 group-hover:border-slate-500'
+              }`}
+            >
+              {allSelected && (
+                <svg className="w-3 h-3 text-slate-950" fill="none" stroke="currentColor" strokeWidth={3.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+              {someSelected && !allSelected && (
+                <span className="w-1.5 h-[2px] bg-cyan-400" />
+              )}
+            </span>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-slate-300">
+              {allSelected ? 'All' : someSelected ? 'Some' : 'Select all'}
+            </span>
           </button>
 
-          <div className="h-6 w-px bg-slate-700/80"></div>
+          <span className="w-px h-5 bg-slate-800 mx-1" />
 
-          {/* Bulk Actions (only show when items are selected) */}
-          {selectedChannels.size > 0 && (
+          {selectedChannels.size > 0 ? (
             <>
-              <span className="text-xs text-slate-400 font-medium">
-                {selectedChannels.size} selected
+              <span className="font-mono text-[10.5px] uppercase tracking-[0.18em] tabular-nums">
+                <span className="text-cyan-200 font-bold">{selectedChannels.size}</span>
+                <span className="ml-1 text-slate-500">selected</span>
               </span>
 
               <button
                 onClick={clearSelection}
-                className="px-3 py-1.5 rounded-lg border border-slate-700/80 bg-slate-800/60 text-sm font-medium text-slate-300 hover:bg-slate-700/60 hover:text-red-400 transition-colors"
+                className="inline-flex items-center h-8 px-3 rounded-md border border-slate-800 bg-slate-900/40 hover:border-rose-500/40 hover:bg-rose-500/[0.06] hover:text-rose-200 text-slate-400 font-mono text-[10px] font-bold uppercase tracking-[0.18em] transition"
+                title="Remove selected channels"
               >
                 Remove
               </button>
-
               <button
-                className="px-3 py-1.5 rounded-lg border border-slate-700/80 bg-slate-800/60 text-sm font-medium text-slate-300 hover:bg-slate-700/60 hover:text-blue-400 transition-colors"
+                className="inline-flex items-center h-8 px-3 rounded-md border border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:text-slate-100 text-slate-400 font-mono text-[10px] font-bold uppercase tracking-[0.18em] transition"
+                title="Assign selected channels"
               >
                 Assign
               </button>
-
               <button
-                className="px-3 py-1.5 rounded-lg border border-slate-700/80 bg-slate-800/60 text-sm font-medium text-slate-300 hover:bg-slate-700/60 hover:text-purple-400 transition-colors"
+                className="inline-flex items-center h-8 px-3 rounded-md border border-slate-800 bg-slate-900/40 hover:border-violet-500/40 hover:bg-violet-500/[0.06] hover:text-violet-200 text-slate-400 font-mono text-[10px] font-bold uppercase tracking-[0.18em] transition"
+                title="Auto-match selected channels with EPG"
               >
-                Auto-Match
+                Auto-match
               </button>
             </>
+          ) : (
+            <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600">
+              Bulk actions appear when channels are selected
+            </span>
           )}
 
-          <div className="flex-1"></div>
+          <div className="flex-1" />
 
-          {/* Add button (right side) */}
           <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-700/60 bg-blue-900/40 text-sm font-medium text-blue-300 hover:bg-blue-900/60 transition-colors"
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-slate-800 bg-slate-900/40 hover:border-cyan-500/40 hover:bg-cyan-500/[0.06] hover:text-cyan-200 text-slate-300 font-mono text-[10px] font-bold uppercase tracking-[0.18em] transition"
+            title="Add a channel manually"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
             </svg>
-            Add
+            Add channel
           </button>
         </div>
       </div>
 
-      {/* Table */}
+      {/* ── Table ──────────────────────────────────────────── */}
       <div className="flex-1 overflow-auto">
-        <table className="w-full">
-          <thead className="sticky top-0 z-10 bg-slate-900/95 border-b border-slate-800/50">
+        <table className="w-full border-collapse">
+          <thead className="sticky top-0 z-10 bg-slate-950/95 border-b border-slate-800/60 backdrop-blur-sm">
             <tr>
-              <th className="w-12 px-2 py-3">
-                <div className="flex items-center justify-center">
-                  <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
-                  </svg>
-                </div>
-              </th>
-              <th className="w-16 px-4 py-3 text-center">
-                <button
-                  onClick={() => handleSort('id')}
-                  className="flex items-center justify-center gap-1 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors mx-auto"
-                >
-                  #
-                  {sortColumn === 'id' && (
-                    <svg className={`w-3 h-3 ${sortDirection === 'desc' ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                    </svg>
-                  )}
-                </button>
-              </th>
-              <th className="px-4 py-3 text-left">
-                <button
+              <th className="w-12 pl-3 pr-2 py-3 text-left" />
+              <th className="px-3 py-3 text-left">
+                <SortButton
+                  active={sortColumn === 'name'}
+                  direction={sortDirection}
                   onClick={() => handleSort('name')}
-                  className="flex items-center gap-1 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
                 >
-                  Name
-                  {sortColumn === 'name' && (
-                    <svg className={`w-3 h-3 ${sortDirection === 'desc' ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                    </svg>
-                  )}
-                </button>
+                  Channel
+                </SortButton>
               </th>
-              <th className="px-4 py-3 text-left">
-                <button
+              <th className="px-3 py-3 text-left">
+                <SortButton
+                  active={sortColumn === 'groupTitle'}
+                  direction={sortDirection}
                   onClick={() => handleSort('groupTitle')}
-                  className="flex items-center gap-1 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
                 >
                   Group
-                  {sortColumn === 'groupTitle' && (
-                    <svg className={`w-3 h-3 ${sortDirection === 'desc' ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
-                    </svg>
-                  )}
-                </button>
+                </SortButton>
               </th>
-              <th className="px-4 py-3 text-right text-xs font-semibold text-slate-400">Actions</th>
+              <th className="px-3 py-3 text-right">
+                <span className="font-mono text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">
+                  Actions
+                </span>
+              </th>
             </tr>
           </thead>
-          <tbody>
-            {sortedChannels.map((channel, index) => {
-              const key = `${channel.sourceId}-${channel.id}`;
-              const isChannelAutoTesting = autoTestChannelKey === key;
-              return (
-                <ChannelTableRow
-                  key={key}
-                  channel={channel}
-                  index={index + 1}
-                  isSelected={selectedChannels.has(key)}
-                  isActive={selectedChannel?.id === channel.id}
-                  isMatched={matchedChannels[channel.id] || matchedChannels[channel.tvgId]}
-                  isAutoTesting={isChannelAutoTesting}
-                  autoTestDisabled={isAutoTesting}
-                  onToggle={toggleChannel}
-                  onClick={onChannelClick}
-                  onPreview={onPreview}
-                  onAutoTest={onAutoTest}
-                />
-              );
-            })}
-          </tbody>
+          <tbody>{bodyChildren}</tbody>
         </table>
       </div>
 
-      {/* Load more button */}
+      {/* ── Load-more footer ──────────────────────────────────── */}
       {hasMore && (
-        <div className="border-t border-slate-800/50 bg-slate-900/60 px-4 py-3">
+        <div className="flex-shrink-0 border-t border-slate-800/60 bg-slate-900/40 px-4 py-3 flex items-center justify-center">
           <button
             onClick={onLoadMore}
             disabled={loading}
-            className={`
-              w-full rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200
-              ${loading
-                ? 'cursor-not-allowed bg-slate-700/40 text-slate-500'
-                : 'bg-blue-600/80 text-white hover:bg-blue-600 active:scale-[0.98]'
-              }
-            `}
+            className={`inline-flex items-center justify-center gap-2 h-9 px-4 rounded-md border font-mono text-[11px] font-bold uppercase tracking-[0.18em] transition ${
+              loading
+                ? 'border-cyan-500/40 bg-cyan-500/[0.08] text-cyan-200 cursor-wait'
+                : 'border-slate-800 bg-slate-900/40 text-slate-300 hover:text-cyan-200 hover:border-cyan-500/40 hover:bg-cyan-500/[0.06]'
+            }`}
           >
             {loading ? (
-              <span className="flex items-center justify-center">
-                <svg
-                  className="-ml-1 mr-3 h-5 w-5 animate-spin text-slate-400"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  ></circle>
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  ></path>
-                </svg>
-                Loading...
-              </span>
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                Loading
+              </>
             ) : (
-              'Load More Channels'
+              <>
+                <span>Load more channels</span>
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
+              </>
             )}
           </button>
         </div>
       )}
     </div>
+  );
+
+  // Initial-load skeleton
+  if (loading && channels.length === 0) {
+    return renderShell(
+      Array.from({ length: 15 }).map((_, i) => <TableRowSkeleton key={i} />)
+    );
+  }
+
+  // Empty state — slate vocabulary, no big sad-face icon.
+  if (!loading && channels.length === 0) {
+    return renderShell(
+      <tr>
+        <td colSpan={4} className="px-6 py-20">
+          <div className="max-w-md mx-auto text-center space-y-4">
+            <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-slate-600">
+              Channels
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-base font-bold text-slate-200">No channels match these filters</h3>
+              <p className="text-[12.5px] text-slate-500 leading-relaxed">
+                Try clearing a category filter, changing the source, or adjusting your search.
+              </p>
+            </div>
+            <div className="inline-flex items-center gap-1.5 h-7 px-3 rounded-md border border-slate-800 bg-slate-900/40 font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+              0 matches
+            </div>
+          </div>
+        </td>
+      </tr>
+    );
+  }
+
+  // Populated table
+  return renderShell(
+    sortedChannels.map((channel, idx) => {
+      const key = `${channel.sourceId}-${channel.id}`;
+      const isChannelAutoTesting = autoTestChannelKey === key;
+      return (
+        <ChannelTableRow
+          key={key}
+          channel={channel}
+          index={idx + 1}
+          isSelected={selectedChannels.has(key)}
+          isActive={selectedChannel?.id === channel.id}
+          isMatched={matchedChannels[channel.id] || matchedChannels[channel.tvgId]}
+          isAutoTesting={isChannelAutoTesting}
+          autoTestDisabled={isAutoTesting}
+          onToggle={toggleChannel}
+          onClick={onChannelClick}
+          onPreview={onPreview}
+          onAutoTest={onAutoTest}
+        />
+      );
+    })
   );
 };
 

@@ -1,19 +1,50 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 /**
- * ChannelTableRow - Table row for a single channel with actions
- * @param {object} channel - Channel object
- * @param {number} index - Row index/number
- * @param {boolean} isSelected - Whether this row is selected
- * @param {boolean} isActive - Whether this channel is currently active
- * @param {boolean} isMatched - Whether this channel is matched with EPG
- * @param {boolean} isAutoTesting - Whether this channel is being shown in auto-test (testing or found)
- * @param {boolean} autoTestDisabled - Whether auto-test button should be disabled
- * @param {Function} onToggle - Callback when toggle is clicked
- * @param {Function} onClick - Callback when row is clicked
- * @param {Function} onPreview - Callback when preview button is clicked
- * @param {Function} onAutoTest - Callback when auto-test button is clicked
+ * ChannelTableRow — single channel row in the polished media-table.
+ *
+ * Layout: [select checkbox] [logo tile + name + source/host meta] [group chip] [actions]
+ *
+ * States (left strip + background tint):
+ *   - Auto-testing: 3px violet stripe + bg tint + pulsing dot on the logo
+ *   - Active (player): 2px cyan stripe + bg tint + cyan-100 title text
+ *   - Selected: cyan-filled checkbox (no row tint — selection is a different axis)
+ *   - Hover: faint cyan stripe + slate row tint
  */
+
+// Strip M3U/EXTINF cruft so the title doesn't render as raw playlist text.
+const cleanChannelName = (name) => {
+  if (!name) return 'Unnamed Channel';
+  let cleaned = String(name).replace(/#EXTINF:[^,]*,/, '');
+  cleaned = cleaned.replace(/tvg-[a-z]+="[^"]*"/g, '');
+  cleaned = cleaned.replace(/group-title="[^"]*"/g, '');
+  return cleaned.trim() || 'Unnamed Channel';
+};
+
+// Pull just the hostname out of a stream URL. The raw URL has the
+// protocol, port, path, and sometimes user@host credentials embedded —
+// none of which a viewer cares about. The hostname alone is a useful
+// "where the stream is coming from" hint.
+const extractHostname = (url) => {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch (_) {
+    const m = String(url).match(/^[a-z]+:\/\/(?:[^/@]+@)?([^/:?#]+)/i);
+    return m ? m[1] : null;
+  }
+};
+
+// Two-letter monogram used as the logo fallback. Skips non-alphanumerics
+// so a broken upstream name like `?? IRAN ??` becomes "IR" instead of "??".
+const monogram = (name) => {
+  const cleaned = String(name || '').replace(/[^a-z0-9 ]/gi, ' ').trim();
+  if (!cleaned) return '??';
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+};
+
 const ChannelTableRow = ({
   channel,
   index,
@@ -30,182 +61,195 @@ const ChannelTableRow = ({
   const [imageError, setImageError] = useState(false);
   const rowRef = useRef(null);
 
-  // Scroll into view when auto-testing this channel
+  // Scroll the row into view when auto-test moves to it.
   useEffect(() => {
     if (isAutoTesting && rowRef.current) {
-      rowRef.current.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center'
-      });
+      rowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [isAutoTesting]);
 
-  // Clean up channel name
-  const cleanChannelName = (name) => {
-    if (!name) return 'Unnamed Channel';
-    let cleaned = name.replace(/#EXTINF:[^,]*,/, '');
-    cleaned = cleaned.replace(/tvg-[a-z]+="[^"]*"/g, '');
-    cleaned = cleaned.replace(/group-title="[^"]*"/g, '');
-    return cleaned.trim() || 'Unnamed Channel';
-  };
-
   const displayName = cleanChannelName(channel.name);
-  const hasHD = displayName.toUpperCase().includes('HD');
+  const hasHD = /\b(?:HD|FHD|UHD|4K|2160P|1080P)\b/i.test(displayName);
   const logoUrl = channel.logo || channel.tvgLogo;
+  const hostname = extractHostname(channel.url);
+
+  // Visual hierarchy of row states: auto-testing > active > hover.
+  // Selection is signalled by the checkbox, not the row background,
+  // so users can multi-select without losing track of what's playing.
+  const rowStateClass = isAutoTesting
+    ? 'bg-violet-500/[0.10] border-l-[3px] border-l-violet-500'
+    : isActive
+    ? 'bg-cyan-500/[0.06] border-l-[2px] border-l-cyan-500'
+    : 'border-l-[2px] border-l-transparent hover:bg-slate-900/60 hover:border-l-cyan-500/30';
 
   return (
     <tr
       ref={rowRef}
-      className={`group border-b border-slate-800/50 transition-colors ${
-        isAutoTesting
-          ? 'bg-purple-600/20 border-l-4 border-l-purple-600 animate-pulse'
-          : isActive
-          ? 'bg-blue-500/10'
-          : 'bg-slate-900/40 hover:bg-slate-800/60'
-      }`}
+      className={`group border-b border-slate-800/50 transition-colors ${rowStateClass}`}
     >
-
-      {/* Checkbox/Toggle */}
-      <td className="w-12 px-2 py-3">
-        <div className="flex items-center justify-center">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle && onToggle(channel);
-            }}
-            className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-slate-950"
-            style={{
-              backgroundColor: isSelected ? '#3b82f6' : '#475569'
-            }}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                isSelected ? 'translate-x-4' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
-        </div>
+      {/* Select checkbox — squarish, matches bulk-bar "Select all" */}
+      <td className="w-12 pl-3 pr-2 py-3 align-middle">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle && onToggle(channel);
+          }}
+          className={`flex items-center justify-center w-4 h-4 rounded-sm border transition ${
+            isSelected
+              ? 'border-cyan-500/60 bg-cyan-500 shadow-[0_0_8px_-2px_rgba(34,211,238,0.6)]'
+              : 'border-slate-700 hover:border-slate-500 bg-slate-900/40'
+          }`}
+          aria-label={isSelected ? 'Deselect channel' : 'Select channel'}
+          aria-pressed={isSelected}
+        >
+          {isSelected && (
+            <svg className="w-3 h-3 text-slate-950" fill="none" stroke="currentColor" strokeWidth={3.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+            </svg>
+          )}
+        </button>
       </td>
 
-      {/* Row Number */}
-      <td className="w-16 px-4 py-3 text-center text-sm text-slate-400 font-medium">
-        {index}
-      </td>
-
-      {/* Channel Logo & Name */}
-      <td className="px-4 py-3">
+      {/* Logo + Name + Meta — clickable as a unit, opens the player */}
+      <td className="px-3 py-3 min-w-0">
         <div
           className="flex items-center gap-3 cursor-pointer"
           onClick={() => onClick && onClick(channel)}
         >
-          {/* Logo */}
-          <div className="w-12 h-12 flex-shrink-0 flex items-center justify-center">
+          {/* Logo tile with hairline frame so off-color/transparent logos
+              still have visual containment. Falls back to a monogram. */}
+          <div className="relative w-12 h-12 flex-shrink-0 rounded-md border border-slate-800 bg-slate-900/60 flex items-center justify-center overflow-hidden">
+            {isAutoTesting && (
+              <span
+                aria-hidden
+                className="absolute -top-1 -left-1 w-2.5 h-2.5 rounded-full bg-violet-400 shadow-[0_0_10px_rgba(167,139,250,0.9)] animate-pulse"
+              />
+            )}
             {logoUrl && !imageError ? (
               <img
                 src={logoUrl}
-                alt={channel.name}
-                className="w-full h-full object-contain"
+                alt=""
+                className="w-full h-full object-contain p-1"
                 onError={() => setImageError(true)}
+                loading="lazy"
               />
             ) : (
-              <span className="text-slate-600 text-xs font-bold">
-                {displayName[0].toUpperCase()}
+              <span className="font-mono text-[12px] font-bold tracking-[0.12em] text-slate-500">
+                {monogram(displayName)}
               </span>
             )}
           </div>
 
-          {/* Name & Badges */}
+          {/* Name + meta stack */}
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className={`text-sm font-medium truncate ${
-                isActive ? 'text-blue-200' : 'text-slate-200'
-              }`}>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                className={`text-[13.5px] font-semibold truncate ${
+                  isActive ? 'text-cyan-100' : 'text-slate-100 group-hover:text-cyan-100/95'
+                } transition-colors`}
+                title={displayName}
+              >
                 {displayName}
               </span>
               {hasHD && (
-                <span className="flex-shrink-0 text-[10px] font-bold text-slate-400 bg-slate-800/60 px-1.5 py-0.5 rounded">
+                <span className="flex-shrink-0 h-4 px-1.5 inline-flex items-center rounded-sm font-mono text-[9px] font-bold tracking-[0.12em] text-slate-400 bg-slate-800/80 border border-slate-700/80">
                   HD
                 </span>
               )}
               {isMatched && (
-                <span className="flex-shrink-0 text-green-400" title="Matched with EPG">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                <span
+                  className="flex-shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-sm bg-emerald-500/15 border border-emerald-500/40"
+                  title="Matched with EPG"
+                >
+                  <svg className="w-2.5 h-2.5 text-emerald-300" fill="none" stroke="currentColor" strokeWidth={3} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
                 </span>
               )}
             </div>
-            {/* IPTV Source badge */}
-            {channel.sourceName && (
-              <div className="mt-1">
-                <span className="inline-flex items-center gap-1 text-[11px] text-blue-300 bg-blue-900/30 px-1.5 py-0.5 rounded border border-blue-700/30">
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                  </svg>
-                  {channel.sourceName}
-                </span>
+            {(channel.sourceName || hostname) && (
+              <div className="mt-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500 truncate">
+                {channel.sourceName && (
+                  <span className="truncate">{channel.sourceName}</span>
+                )}
+                {channel.sourceName && hostname && (
+                  <span className="text-slate-700 flex-shrink-0">·</span>
+                )}
+                {hostname && (
+                  <span className="truncate normal-case tracking-normal text-slate-600">{hostname}</span>
+                )}
               </div>
             )}
           </div>
         </div>
       </td>
 
-      {/* Group/Category */}
-      <td className="px-4 py-3">
-        <span className="text-sm text-slate-300">
-          {channel.groupTitle || 'No Category'}
-        </span>
+      {/* Group/category — slate chip, em-dash when missing */}
+      <td className="px-3 py-3">
+        {channel.groupTitle ? (
+          <span
+            className="inline-flex items-center max-w-[280px] h-6 px-2 rounded-md border border-slate-800 bg-slate-900/40 font-mono text-[10.5px] uppercase tracking-[0.14em] text-slate-400"
+            title={channel.groupTitle}
+          >
+            <span className="truncate">{channel.groupTitle}</span>
+          </span>
+        ) : (
+          <span className="font-mono text-[12px] text-slate-700" title="No category">—</span>
+        )}
       </td>
 
-      {/* Actions */}
-      <td className="px-4 py-3">
+      {/* Actions cluster — tertiary | secondary | primary */}
+      <td className="px-3 py-3">
         <div className="flex items-center justify-end gap-1.5">
-          {/* Auto-Test from here */}
+          {/* Auto-test from here — tertiary, icon only */}
           <button
             onClick={(e) => {
               e.stopPropagation();
               onAutoTest && onAutoTest(channel);
             }}
             disabled={autoTestDisabled}
-            className={`p-1.5 rounded-lg transition-colors ${
+            className={`flex items-center justify-center w-8 h-8 rounded-md border transition ${
               autoTestDisabled
-                ? 'text-slate-600 cursor-not-allowed'
-                : 'text-slate-400 hover:text-purple-400 hover:bg-purple-500/10'
+                ? 'border-slate-800/60 text-slate-700 cursor-not-allowed'
+                : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-violet-200 hover:border-violet-500/40 hover:bg-violet-500/[0.08]'
             }`}
-            title={autoTestDisabled ? 'Auto-test in progress' : 'Auto-test from here'}
+            title={autoTestDisabled ? 'Auto-test already in progress' : 'Auto-test from this channel'}
+            aria-label="Auto-test from this channel"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
             </svg>
           </button>
 
-          {/* PiP Preview */}
+          {/* Preview (PiP) — secondary */}
           <button
             onClick={(e) => {
               e.stopPropagation();
               onPreview && onPreview(channel);
             }}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-purple-400 hover:bg-purple-500/10 transition-colors"
-            title="Preview in PiP"
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-slate-800 bg-slate-900/40 text-slate-300 hover:text-slate-100 hover:border-slate-700 transition"
+            title="Preview in picture-in-picture"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <rect x="3" y="5" width="14" height="10" rx="1.5" />
+              <rect x="11" y="11" width="10" height="8" rx="1.5" fill="currentColor" stroke="none" opacity="0.4" />
             </svg>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-[0.16em]">Preview</span>
           </button>
 
-          {/* Go to Player */}
+          {/* Open in player — primary action, cyan accent */}
           <button
             onClick={(e) => {
               e.stopPropagation();
               onClick && onClick(channel);
             }}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
-            title="Open in Player"
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-cyan-500/40 bg-cyan-500/[0.08] text-cyan-200 hover:bg-cyan-500/15 hover:border-cyan-400/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition"
+            title="Open in player"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
+              <polygon points="6 4 20 12 6 20 6 4" />
             </svg>
+            <span className="font-mono text-[10px] font-bold uppercase tracking-[0.16em]">Open</span>
           </button>
         </div>
       </td>

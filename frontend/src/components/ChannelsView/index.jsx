@@ -27,6 +27,13 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
     return localStorage.getItem('channelsViewMode') || 'table';
   });
   const [pipChannel, setPipChannel] = React.useState(null);
+  // Category drawer — collapsible left panel that wraps the existing
+  // CategorySidebar. Default open on wide viewports (≥1280px), closed
+  // on narrow ones since the main grid needs more room and selected
+  // filters already surface as chips in the filter rail.
+  const [categoryDrawerOpen, setCategoryDrawerOpen] = React.useState(
+    () => typeof window !== 'undefined' && window.innerWidth >= 1280
+  );
   const sourceMenuRef = React.useRef(null);
 
   // Auto-test state
@@ -441,228 +448,316 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
 
   if (!sessionId) {
     return (
-      <div className="flex h-screen items-center justify-center bg-slate-950">
-        <div className="max-w-md rounded-2xl border border-amber-400/30 bg-amber-500/10 p-6 shadow-xl shadow-amber-900/30">
-          <div className="mb-2 flex items-center">
-            <svg className="mr-2 h-6 w-6 text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            <h3 className="text-lg font-semibold text-amber-200">No Session</h3>
+      <div className="min-h-[calc(100vh-5rem)] bg-slate-950 flex items-center justify-center px-6">
+        <div className="max-w-md text-center space-y-5">
+          <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-slate-600">
+            Channels
           </div>
-          <p className="text-sm text-amber-100/80">Please load channel data first from the configuration page.</p>
+          <div className="space-y-2">
+            <h2 className="text-xl font-bold text-slate-200">No active session</h2>
+            <p className="text-[13px] text-slate-500 leading-relaxed">
+              Load an IPTV source from the configuration page to start browsing channels.
+            </p>
+          </div>
+          <div className="inline-flex items-center gap-1.5 h-7 px-3 rounded-md border border-amber-500/30 bg-amber-500/[0.06] font-mono text-[10px] uppercase tracking-[0.18em] text-amber-300">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            Waiting for data
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-[calc(100vh-5rem)] bg-slate-950/95 text-slate-100">
-      {/* Left Sidebar - Categories */}
-      <CategorySidebar
-        categories={categories}
-        selectedCategories={selectedCategories}
-        onToggle={toggleCategory}
-        onClearAll={clearCategoryFilters}
-        loading={loading}
-      />
+    <div className="flex flex-col min-h-[calc(100vh-5rem)] bg-slate-950 text-slate-100">
+      {/* Slim error strip — sits above the hero, doesn't crowd it. */}
+      {error && (
+        <div className="border-b border-rose-500/30 bg-rose-500/[0.06]">
+          <div className="max-w-[1600px] mx-auto px-6 py-2.5 flex items-center gap-2 font-mono text-[11.5px]">
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 flex-shrink-0" />
+            <span className="uppercase tracking-[0.18em] text-rose-300">Error</span>
+            <span className="text-slate-700">·</span>
+            <span className="text-rose-100/90 normal-case tracking-normal">{error}</span>
+          </div>
+        </div>
+      )}
 
-      {/* Main Content Area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Header with search and stats */}
-        <div className="relative z-50 border-b border-slate-800 bg-slate-900/80 px-6 py-4">
-          {/* Error display */}
-          {error && (
-            <div className="mb-4 flex items-start rounded-xl border border-red-500/40 bg-red-500/10 p-3">
-              <svg className="mt-0.5 mr-2 h-5 w-5 flex-shrink-0 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <div>
-                <h4 className="text-sm font-semibold text-red-200">Error loading channels</h4>
-                <p className="mt-1 text-sm text-red-100/80">{error}</p>
-              </div>
-            </div>
-          )}
-
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-xl font-semibold text-slate-100">Channels</h2>
-                  {availableSources.length > 0 && (
-                    <div className="relative" ref={sourceMenuRef}>
-                      <button
-                        onClick={() => setShowSourceMenu(!showSourceMenu)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-500/20 px-2.5 py-1 text-xs font-medium text-blue-100 hover:bg-blue-500/30 transition-colors"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-                        </svg>
-                        {sourceFilter ? (sourceFilter.nickname || sourceFilter.name) : 'All Sources'}
-                        <svg className={`w-3.5 h-3.5 transition-transform ${showSourceMenu ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
-
-                      {/* Source Dropdown Menu */}
-                      {showSourceMenu && (
-                        <div className="absolute left-0 mt-2 w-64 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl shadow-slate-950/30 z-[9999]">
-                          <button
-                            onClick={() => {
-                              onSourceChange(null);
-                              setShowSourceMenu(false);
-                            }}
-                            className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm transition-colors hover:bg-slate-800 ${
-                              !sourceFilter ? 'bg-blue-500/20 text-blue-100' : 'text-slate-300'
-                            }`}
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                            </svg>
-                            <div>
-                              <div className="font-medium">All Sources</div>
-                              <div className="text-xs text-slate-500">Show channels from all IPTV sources</div>
-                            </div>
-                          </button>
-
-                          <div className="border-t border-slate-800">
-                            {availableSources.map((source) => (
-                              <button
-                                key={source.id}
-                                onClick={() => {
-                                  onSourceChange(source);
-                                  setShowSourceMenu(false);
-                                }}
-                                className={`flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm transition-colors hover:bg-slate-800 ${
-                                  sourceFilter?.id === source.id ? 'bg-blue-500/20 text-blue-100' : 'text-slate-300'
-                                }`}
-                              >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                                </svg>
-                                <div className="flex-1 min-w-0">
-                                  <div className="font-medium truncate">{source.nickname || source.name}</div>
-                                  {source.url && (
-                                    <div className="text-xs text-slate-500 truncate">{source.url}</div>
-                                  )}
-                                </div>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+      {/* ── HERO STRIP ─────────────────────────────────────────
+          Title + loaded/total mono count on the left; primary
+          action cluster (Auto-Find + Grid/Table toggle) on the
+          right. Wraps gracefully on narrow viewports. */}
+      <div className="border-b border-slate-800/70 bg-slate-950/95 px-6 py-5">
+        <div className="max-w-[1600px] mx-auto flex items-end justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-100 leading-tight">Channels</h1>
+            <div className="mt-1.5 font-mono text-[10.5px] uppercase tracking-[0.22em] tabular-nums text-slate-500">
+              {loading && filteredCount === 0 ? (
+                <span className="text-cyan-300/80 inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                  Loading channels
+                </span>
+              ) : (
+                <>
+                  <span className="text-slate-200">{filteredCount.toLocaleString()}</span>
+                  <span className="text-slate-700 mx-1.5">/</span>
+                  <span>{totalChannels.toLocaleString()}</span>
+                  <span className="ml-1.5 normal-case tracking-normal text-slate-600">channels</span>
+                  {selectedCategories.size > 0 && (
+                    <span className="ml-3 text-cyan-300/80 normal-case tracking-normal">
+                      · {selectedCategories.size} {selectedCategories.size === 1 ? 'filter' : 'filters'} active
+                    </span>
                   )}
-                </div>
-                <p className="mt-0.5 text-sm text-slate-400">
-                  {loading && filteredCount === 0 ? (
-                    'Loading channels...'
-                  ) : (
-                    <>
-                      Showing <span className="font-medium text-slate-100">{filteredCount.toLocaleString()}</span> of{' '}
-                      <span className="font-medium text-slate-100">{totalChannels.toLocaleString()}</span> channels
-                      {selectedCategories.size > 0 && (
-                        <span className="ml-1 text-blue-400">
-                          ({selectedCategories.size} {selectedCategories.size === 1 ? 'category' : 'categories'} selected)
-                        </span>
-                      )}
-                    </>
-                  )}
-                </p>
-              </div>
+                </>
+              )}
             </div>
+          </div>
 
-            {/* View Toggle, Auto-Find, and Search */}
-            <div className="flex items-center gap-3">
-              {/* Auto-Find Button */}
+          {/* Action cluster — Auto-Find + view toggle */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleAutoTest}
+              disabled={channels.length === 0 || autoTesting}
+              className={`inline-flex items-center gap-2 h-9 px-3.5 rounded-md border font-mono text-[11px] font-bold uppercase tracking-[0.18em] transition ${
+                autoTesting
+                  ? 'border-cyan-500/50 bg-cyan-500/[0.12] text-cyan-200 cursor-wait shadow-[0_0_18px_-4px_rgba(34,211,238,0.4)]'
+                  : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:text-slate-100 hover:border-slate-700 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-300 disabled:hover:border-slate-800'
+              }`}
+              title={autoTesting ? 'Searching for a working stream…' : 'Test channels in order until one plays successfully'}
+            >
+              {autoTesting ? (
+                <>
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                  <span>Testing</span>
+                </>
+              ) : (
+                <>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="M21 21l-4.35-4.35" />
+                    <polygon points="9 8 14 11 9 14" fill="currentColor" stroke="none" />
+                  </svg>
+                  <span>Auto-Find</span>
+                </>
+              )}
+            </button>
+
+            <div className="flex items-center h-9 p-0.5 rounded-md border border-slate-800 bg-slate-900/60">
               <button
-                onClick={handleAutoTest}
-                disabled={channels.length === 0 || autoTesting}
-                className={`flex items-center justify-center rounded-lg border p-2 transition-colors ${
-                  autoTesting
-                    ? 'border-purple-600 bg-purple-600 text-white cursor-not-allowed'
-                    : 'border-blue-600 bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed'
+                onClick={() => handleViewModeChange('grid')}
+                className={`flex items-center justify-center w-8 h-7 rounded transition ${
+                  viewMode === 'grid'
+                    ? 'bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.25)]'
+                    : 'text-slate-500 hover:text-slate-300'
                 }`}
-                title={autoTesting ? 'Auto-testing channels...' : 'Auto-find working channel'}
+                title="Grid view"
+                aria-label="Grid view"
               >
-                <svg
-                  className={`w-5 h-5 ${autoTesting ? 'animate-spin' : ''}`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
-                  />
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <rect x="4" y="4" width="6" height="6" rx="1" />
+                  <rect x="14" y="4" width="6" height="6" rx="1" />
+                  <rect x="4" y="14" width="6" height="6" rx="1" />
+                  <rect x="14" y="14" width="6" height="6" rx="1" />
                 </svg>
               </button>
+              <button
+                onClick={() => handleViewModeChange('table')}
+                className={`flex items-center justify-center w-8 h-7 rounded transition ${
+                  viewMode === 'table'
+                    ? 'bg-cyan-500/15 text-cyan-200 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.25)]'
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+                title="Table view"
+                aria-label="Table view"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
 
-              {/* View Mode Toggle */}
-              <div className="flex items-center rounded-lg border border-slate-800/80 bg-slate-900/70 p-1">
-                <button
-                  onClick={() => handleViewModeChange('grid')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                    viewMode === 'grid'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Grid view"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-                  </svg>
-                  Grid
-                </button>
-                <button
-                  onClick={() => handleViewModeChange('table')}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                    viewMode === 'table'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Table view"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-                  </svg>
-                  Table
-                </button>
+      {/* ── FILTER RAIL ─────────────────────────────────────────
+          Row 1: search + Sources dropdown + Browse-categories
+          toggle. Row 2 (conditional): selected category chips with
+          a Clear button. Stays slim by default, expands only when
+          filters are active. */}
+      <div className="border-b border-slate-800/70 bg-slate-950/80 px-6 py-3">
+        <div className="max-w-[1600px] mx-auto space-y-2.5">
+          {/* Row 1: search + source + browse */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative flex-1 min-w-[240px] max-w-lg">
+              <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="M21 21l-4.35-4.35" />
+                </svg>
               </div>
-
-              {/* Search box */}
-              <div className="relative w-80">
-                <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-                  <svg className="h-5 w-5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              <input
+                type="text"
+                placeholder="Search channels…"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full h-9 pl-9 pr-9 rounded-md border border-slate-800 bg-slate-900/60 text-slate-100 placeholder:text-slate-500 focus:border-cyan-500/40 focus:outline-none focus:shadow-[0_0_0_3px_rgba(34,211,238,0.06)] font-mono text-[12.5px]"
+              />
+              {searchTerm && (
+                <button
+                  onClick={() => setSearchTerm('')}
+                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500 hover:text-slate-200 transition"
+                  title="Clear search"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path d="M6 6l12 12M6 18L18 6" />
                   </svg>
-                </div>
-                <input
-                  type="text"
-                  placeholder="Search channels..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="block w-full rounded-lg border border-slate-800/80 bg-slate-900/70 py-2 pl-10 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-                />
-                {searchTerm && (
-                  <button
-                    onClick={() => setSearchTerm('')}
-                    className="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500 transition-colors hover:text-slate-200"
-                  >
-                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                </button>
+              )}
+            </div>
+
+            {availableSources.length > 0 && (
+              <div className="relative" ref={sourceMenuRef}>
+                <button
+                  onClick={() => setShowSourceMenu(!showSourceMenu)}
+                  className={`inline-flex items-center gap-1.5 h-9 px-3 rounded-md border font-mono text-[11px] font-bold uppercase tracking-[0.16em] transition ${
+                    sourceFilter
+                      ? 'border-cyan-500/40 bg-cyan-500/[0.08] text-cyan-200 hover:bg-cyan-500/15'
+                      : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:text-slate-100 hover:border-slate-700'
+                  }`}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                    <rect x="3" y="6" width="18" height="12" rx="2" />
+                    <path d="M7 10h10M7 14h6" />
+                  </svg>
+                  <span className="text-slate-500 normal-case tracking-normal">Source:</span>
+                  <span className="truncate max-w-[140px]">{sourceFilter ? (sourceFilter.nickname || sourceFilter.name) : 'All'}</span>
+                  <svg className={`w-3 h-3 transition-transform ${showSourceMenu ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                    <path d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showSourceMenu && (
+                  <div className="absolute left-0 mt-2 w-72 rounded-md border border-slate-800 bg-slate-950/95 shadow-2xl shadow-slate-950/60 z-[9999] overflow-hidden backdrop-blur-sm">
+                    <div className="px-3 py-2 border-b border-slate-800/80 font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-600">
+                      Filter by source
+                    </div>
+                    <button
+                      onClick={() => { onSourceChange(null); setShowSourceMenu(false); }}
+                      className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition ${
+                        !sourceFilter ? 'bg-cyan-500/[0.10] text-cyan-200' : 'text-slate-300 hover:bg-slate-900/80'
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${!sourceFilter ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]' : 'bg-slate-700'}`} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[12.5px] font-semibold">All sources</div>
+                        <div className="font-mono text-[9.5px] text-slate-600 uppercase tracking-[0.18em] mt-0.5">
+                          Combine every provider
+                        </div>
+                      </div>
+                    </button>
+                    <div className="border-t border-slate-800/80 max-h-72 overflow-y-auto">
+                      {availableSources.map((source) => (
+                        <button
+                          key={source.id}
+                          onClick={() => { onSourceChange(source); setShowSourceMenu(false); }}
+                          className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition ${
+                            sourceFilter?.id === source.id ? 'bg-cyan-500/[0.10] text-cyan-200' : 'text-slate-300 hover:bg-slate-900/80'
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${sourceFilter?.id === source.id ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.6)]' : 'bg-slate-700'}`} />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[12.5px] font-semibold truncate">{source.nickname || source.name}</div>
+                            {source.url && (
+                              <div className="font-mono text-[9.5px] text-slate-600 truncate normal-case tracking-normal mt-0.5">{source.url}</div>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
+            )}
+
+            <button
+              onClick={() => setCategoryDrawerOpen(!categoryDrawerOpen)}
+              className={`ml-auto inline-flex items-center gap-1.5 h-9 px-3 rounded-md border font-mono text-[11px] font-bold uppercase tracking-[0.16em] transition ${
+                categoryDrawerOpen
+                  ? 'border-cyan-500/50 bg-cyan-500/[0.10] text-cyan-200'
+                  : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:text-slate-100 hover:border-slate-700'
+              }`}
+              title={categoryDrawerOpen ? 'Hide categories panel' : 'Browse all categories'}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                <path d="M4 6h16M4 12h16M4 18h10" />
+              </svg>
+              <span>{categoryDrawerOpen ? 'Hide' : 'Browse'}</span>
+              <span className="text-slate-500 normal-case tracking-normal tabular-nums">
+                {categories.length.toLocaleString()}
+              </span>
+            </button>
+          </div>
+
+          {/* Row 2: selected category chips, only rendered when there are filters */}
+          {selectedCategories.size > 0 && (
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-600 mr-1">
+                Filters
+              </span>
+              {Array.from(selectedCategories).slice(0, 6).map((cat) => (
+                <span
+                  key={cat}
+                  className="inline-flex items-center h-8 pl-2.5 pr-1 rounded-md border border-cyan-500/40 bg-cyan-500/[0.08] text-cyan-100 text-[11.5px] font-semibold"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 mr-2 shadow-[0_0_6px_rgba(34,211,238,0.6)]" />
+                  <span className="truncate max-w-[200px]">{cat}</span>
+                  <button
+                    onClick={() => toggleCategory(cat)}
+                    className="ml-2 w-5 h-5 flex items-center justify-center rounded hover:bg-cyan-500/25 hover:text-cyan-50 transition"
+                    title="Remove filter"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                      <path d="M6 6l12 12M6 18L18 6" />
+                    </svg>
+                  </button>
+                </span>
+              ))}
+              {selectedCategories.size > 6 && (
+                <span className="inline-flex items-center h-8 px-2.5 rounded-md border border-slate-700 bg-slate-900/60 font-mono text-[10.5px] font-bold uppercase tracking-[0.14em] text-slate-400 tabular-nums">
+                  + {selectedCategories.size - 6} more
+                </span>
+              )}
+              <button
+                onClick={clearCategoryFilters}
+                className="ml-1 inline-flex items-center h-8 px-2 font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500 hover:text-rose-300 transition"
+                title="Clear all category filters"
+              >
+                Clear filters
+              </button>
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── MAIN AREA ───────────────────────────────────────────
+          Category drawer (collapsible) + channel display. The
+          drawer wraps the existing CategorySidebar at its native
+          w-72 width; closing the drawer transitions to w-0 and the
+          channel display reflows full-width. */}
+      <div className="relative flex-1 flex overflow-hidden">
+        <div
+          className={`transition-all duration-300 ease-out overflow-hidden flex-shrink-0 ${
+            categoryDrawerOpen ? 'w-72 border-r border-slate-800/70' : 'w-0'
+          }`}
+          aria-hidden={!categoryDrawerOpen}
+        >
+          <div className="w-72 h-full">
+            <CategorySidebar
+              categories={categories}
+              selectedCategories={selectedCategories}
+              onToggle={toggleCategory}
+              onClearAll={clearCategoryFilters}
+              loading={loading}
+            />
           </div>
         </div>
 
