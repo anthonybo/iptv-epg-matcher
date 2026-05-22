@@ -53,8 +53,14 @@ async function queryWithRetry(query, params = [], retries = 3) {
         const isBulkOperation = query.trim().toUpperCase().startsWith('INSERT') ||
                                  query.trim().toUpperCase().startsWith('DELETE');
 
+        // Include the SQL preview in the warning. The previous version
+        // stripped query info to keep the log line short, but then any
+        // sustained slow-query storm (e.g. 944/day) was completely
+        // un-diagnosable from the logs alone. A 120-char preview is
+        // plenty to identify the call site without bloating the logs.
         if (duration > 1000 && !isBulkOperation) {
-            logger.warn('Slow query detected', { duration, query: query.substring(0, 100) });
+            const preview = query.replace(/\s+/g, ' ').trim().substring(0, 120);
+            logger.warn(`Slow query (${duration}ms): ${preview}${query.length > 120 ? '…' : ''}`);
         }
 
         return result;
@@ -351,7 +357,8 @@ async function saveChannels(channels, sourceId, options = {}) {
         return { saved: 0 };
     }
 
-    // Deduplicate channels by ID (in case source API returns duplicates)
+    // Deduplicate channels by ID (in case the source API returns
+    // duplicates, which it occasionally does for category overlaps).
     const uniqueChannels = [];
     const seenIds = new Set();
     for (const channel of channels) {
@@ -360,115 +367,189 @@ async function saveChannels(channels, sourceId, options = {}) {
             uniqueChannels.push(channel);
         }
     }
-
     if (uniqueChannels.length < channels.length) {
         logger.warn(`Removed ${channels.length - uniqueChannels.length} duplicate channels for source ${sourceId}`);
     }
 
-    // Delete all existing channels for this source first
-    // This is much faster than ON CONFLICT for large datasets
-    await queryWithRetry(
-        'DELETE FROM iptv_channels WHERE source_id = $1',
-        [sourceId]
-    );
-
-    // Batch insert in chunks of 500 to avoid parameter limits
-    const batchSize = 500;
-    const totalBatches = Math.ceil(uniqueChannels.length / batchSize);
+    const total = uniqueChannels.length;
+    // Chunk size for the UNNEST-based INSERT. This isn't a Postgres
+    // parameter-limit constraint (UNNEST passes each column as one
+    // array param, so we could fit the whole 50k catalog in one
+    // statement), but smaller chunks keep memory bounded and let us
+    // honor the cancellation probe between chunks. 10k rows × 14 cols
+    // is ~140k array slots in memory — plenty fast.
+    const CHUNK = 10000;
+    const totalChunks = Math.ceil(total / CHUNK) || 1;
     let savedCount = 0;
     const saveStartedAt = Date.now();
 
     logger.info(
-        `[saveChannels] Source ${sourceId}: deleted old rows, inserting ${uniqueChannels.length} channels in ${totalBatches} batches of ${batchSize}`
+        `[saveChannels] Source ${sourceId}: bulk-replacing ${total} channels in ${totalChunks} chunk(s) of up to ${CHUNK}`
     );
 
-    for (let i = 0; i < uniqueChannels.length; i += batchSize) {
-        // Honor a Cancel between batches. We can't tear down an
-        // in-flight INSERT, but stopping the loop here is what makes
-        // a click on the frontend Cancel button actually visible —
-        // otherwise the 100-batch loop chews through the full 50k+
-        // channels regardless.
-        if (isCancelled()) {
-            logger.info(`[saveChannels] Source ${sourceId}: cancelled after ${savedCount}/${uniqueChannels.length} channels`);
-            return { saved: savedCount, cancelled: true };
+    // Atomic DELETE + INSERT inside a single transaction. The previous
+    // implementation did the DELETE outside the loop, then ran 100+
+    // separate INSERTs each with its own ON CONFLICT clause that was
+    // dead code (post-DELETE, nothing conflicts) and forced index
+    // maintenance to repeat per batch. A 51k-channel save took 25 min.
+    //
+    // The new path:
+    //   * One DELETE
+    //   * One INSERT per chunk via UNNEST(arrays) — Postgres' set-based
+    //     bulk path. Each chunk is a single SQL statement with 14 array
+    //     params regardless of row count.
+    //   * Wrapped in a single transaction so a refresh either fully
+    //     replaces the source's channels or leaves the previous data
+    //     intact (no half-loaded states for concurrent readers).
+    //   * No ON CONFLICT — the DELETE guarantees no rows exist.
+    // List of "fat" text indexes on iptv_channels.name that are
+    // dropped before the bulk INSERT and rebuilt after. These three
+    // alone account for ~80% of per-row INSERT cost — GIN indexes
+    // tokenize each name on every row, and we have two GINs plus a
+    // btree on the same column. Drop+rebuild is dramatically faster
+    // than per-row maintenance for >5k rows, and since it's all in
+    // one transaction a failure rolls everything back (the indexes
+    // are never lost). Other queries against iptv_channels block on
+    // the table's AccessExclusiveLock during the txn — acceptable
+    // for a refresh that already does a wholesale source replacement.
+    const FAT_INDEXES = [
+        {
+            name: 'idx_iptv_channels_name',
+            create: "CREATE INDEX idx_iptv_channels_name ON iptv_channels USING gin (to_tsvector('english', name))"
+        },
+        {
+            name: 'idx_iptv_channels_name_btree',
+            create: 'CREATE INDEX idx_iptv_channels_name_btree ON iptv_channels USING btree (name)'
+        },
+        {
+            name: 'idx_iptv_channels_name_trgm',
+            create: 'CREATE INDEX idx_iptv_channels_name_trgm ON iptv_channels USING gin (name gin_trgm_ops)'
         }
-        const batch = uniqueChannels.slice(i, i + batchSize);
+    ];
 
-        // Build values array: ($1,$2,$3...), ($15,$16,$17...), ...
-        const values = [];
-        const params = [];
+    let cancelled = false;
+    try {
+        await transaction(async (client) => {
+            await client.query('DELETE FROM iptv_channels WHERE source_id = $1', [sourceId]);
 
-        batch.forEach((channel, idx) => {
-            const offset = idx * 14;
-            values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14})`);
+            // Skip the drop+rebuild dance for small saves — for <5k
+            // rows the per-row index cost is negligible and the
+            // rebuild adds latency that dwarfs the win.
+            const useIndexBulkPath = total >= 5000;
+            if (useIndexBulkPath) {
+                const dropStart = Date.now();
+                for (const idx of FAT_INDEXES) {
+                    await client.query(`DROP INDEX IF EXISTS ${idx.name}`);
+                }
+                logger.info(
+                    `[saveChannels] Source ${sourceId}: dropped 3 name indexes for bulk path (${Date.now() - dropStart}ms)`
+                );
+            }
 
-            // Handle both camelCase (from parsers) and snake_case (from transforms)
-            const groupTitle = channel.groupTitle || channel.group_title || '';
-            const tvgId = channel.tvgId || channel.tvg_id || '';
-            const tvgName = channel.tvgName || channel.tvg_name || channel.name || '';
+            for (let i = 0; i < total; i += CHUNK) {
+                if (isCancelled()) {
+                    cancelled = true;
+                    throw new Error('__SAVE_CHANNELS_CANCELLED__');
+                }
+                const chunk = uniqueChannels.slice(i, i + CHUNK);
 
-            params.push(
-                channel.id,
-                sourceId,
-                channel.name,
-                channel.url,
-                channel.logo,
-                channel.category || groupTitle,
-                tvgId,
-                tvgName,
-                groupTitle,
-                channel.source_type,
-                channel.source_username,
-                channel.source_password,
-                channel.source_url,
-                channel.source_mac
-            );
+                // Build one column-array per field; UNNEST zips them
+                // back into rows server-side. Empty-string default
+                // matches the previous insert behavior so search/EPG
+                // queries that filter on `tvg_id <> ''` etc. stay happy.
+                const channelIds = new Array(chunk.length);
+                const names = new Array(chunk.length);
+                const urls = new Array(chunk.length);
+                const logos = new Array(chunk.length);
+                const categories = new Array(chunk.length);
+                const tvgIds = new Array(chunk.length);
+                const tvgNames = new Array(chunk.length);
+                const groupTitles = new Array(chunk.length);
+                const sourceTypes = new Array(chunk.length);
+                const sourceUsernames = new Array(chunk.length);
+                const sourcePasswords = new Array(chunk.length);
+                const sourceUrls = new Array(chunk.length);
+                const sourceMacs = new Array(chunk.length);
+
+                for (let j = 0; j < chunk.length; j++) {
+                    const c = chunk[j];
+                    const groupTitle = c.groupTitle || c.group_title || '';
+                    channelIds[j] = c.id;
+                    names[j] = c.name;
+                    urls[j] = c.url;
+                    logos[j] = c.logo;
+                    categories[j] = c.category || groupTitle;
+                    tvgIds[j] = c.tvgId || c.tvg_id || '';
+                    tvgNames[j] = c.tvgName || c.tvg_name || c.name || '';
+                    groupTitles[j] = groupTitle;
+                    sourceTypes[j] = c.source_type;
+                    sourceUsernames[j] = c.source_username;
+                    sourcePasswords[j] = c.source_password;
+                    sourceUrls[j] = c.source_url;
+                    sourceMacs[j] = c.source_mac;
+                }
+
+                // The INSERT column order matches the SELECT output
+                // order — source_id sits at the end of both rather
+                // than in its on-disk position so the SELECT can just
+                // be `*, $sourceId` without per-row interleaving.
+                await client.query(
+                    `INSERT INTO iptv_channels (
+                        channel_id, name, stream_url, logo_url, category,
+                        tvg_id, tvg_name, group_title, source_type, source_username,
+                        source_password, source_url, source_mac, source_id
+                    )
+                    SELECT *, $14::int FROM UNNEST(
+                        $1::text[],  $2::text[],  $3::text[],  $4::text[],  $5::text[],
+                        $6::text[],  $7::text[],  $8::text[],  $9::text[],  $10::text[],
+                        $11::text[], $12::text[], $13::text[]
+                    ) AS t (
+                        channel_id, name, stream_url, logo_url, category,
+                        tvg_id, tvg_name, group_title, source_type, source_username,
+                        source_password, source_url, source_mac
+                    )`,
+                    [
+                        channelIds, names, urls, logos, categories,
+                        tvgIds, tvgNames, groupTitles, sourceTypes, sourceUsernames,
+                        sourcePasswords, sourceUrls, sourceMacs,
+                        sourceId
+                    ]
+                );
+
+                savedCount += chunk.length;
+                const pct = Math.floor((savedCount / total) * 100);
+                const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
+                const batchNumber = Math.ceil(savedCount / CHUNK);
+                logger.info(
+                    `[saveChannels] Source ${sourceId}: ${savedCount}/${total} (${pct}%, ${elapsedSec}s)`
+                );
+                onProgress({ saved: savedCount, total, batchNumber, totalBatches: totalChunks });
+            }
+
+            // Rebuild the indexes we dropped above. CREATE INDEX inside
+            // a transaction is allowed (non-CONCURRENTLY) and runs as
+            // a single bulk operation rather than per-row maintenance.
+            // Bumping maintenance_work_mem locally lets GIN sort more
+            // tuples in memory rather than spilling to temp files —
+            // typically halves the rebuild time on a multi-hundred-MB
+            // table.
+            if (useIndexBulkPath) {
+                const rebuildStart = Date.now();
+                await client.query("SET LOCAL maintenance_work_mem = '512MB'");
+                for (const idx of FAT_INDEXES) {
+                    await client.query(idx.create);
+                }
+                logger.info(
+                    `[saveChannels] Source ${sourceId}: rebuilt 3 name indexes (${Date.now() - rebuildStart}ms)`
+                );
+            }
         });
-
-        const query = `
-            INSERT INTO iptv_channels (
-                channel_id, source_id, name, stream_url, logo_url, category,
-                tvg_id, tvg_name, group_title, source_type, source_username,
-                source_password, source_url, source_mac
-            )
-            VALUES ${values.join(', ')}
-            ON CONFLICT (channel_id, source_id) DO UPDATE SET
-                name = EXCLUDED.name,
-                stream_url = EXCLUDED.stream_url,
-                logo_url = EXCLUDED.logo_url,
-                category = EXCLUDED.category,
-                tvg_id = EXCLUDED.tvg_id,
-                tvg_name = EXCLUDED.tvg_name,
-                group_title = EXCLUDED.group_title,
-                updated_at = CURRENT_TIMESTAMP
-        `;
-
-        await queryWithRetry(query, params);
-        savedCount += batch.length;
-
-        // Per-batch progress. Log every batch up to 5k, then every
-        // 5th batch so the log stream doesn't drown when a 100k
-        // provider lands. Also surface to the optional onProgress
-        // callback so SSE pipes can update the UI.
-        const batchNumber = Math.floor(savedCount / batchSize);
-        const shouldLog =
-            totalBatches <= 10 ||           // small saves: log every batch
-            batchNumber <= 10 ||             // first 10 of larger saves
-            batchNumber % 5 === 0 ||         // then every 5th batch
-            savedCount >= uniqueChannels.length; // and the final one
-        if (shouldLog) {
-            const pct = Math.floor((savedCount / uniqueChannels.length) * 100);
-            const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
-            logger.info(
-                `[saveChannels] Source ${sourceId}: ${savedCount}/${uniqueChannels.length} channels (${pct}%, ${elapsedSec}s)`
-            );
+    } catch (err) {
+        if (cancelled) {
+            logger.info(`[saveChannels] Source ${sourceId}: cancelled — transaction rolled back`);
+            return { saved: 0, cancelled: true };
         }
-        onProgress({
-            saved: savedCount,
-            total: uniqueChannels.length,
-            batchNumber,
-            totalBatches
-        });
+        throw err;
     }
 
     // Update the source row to reflect this successful load. Stamping
@@ -692,6 +773,69 @@ async function getUserEpgSources(userId, sessionId) {
     return result.rows;
 }
 
+/**
+ * Get alternate feeds for a channel across a user's active sources.
+ * Used by FeedSelector to surface other providers that carry the
+ * same channel so the user can pick a working stream when one fails.
+ *
+ * @param {number} userId        Owning user id (scopes the query).
+ * @param {string} channelName   Channel name to match (case-insensitive).
+ * @param {string} [tvgId]       Optional EPG channel id; widens the
+ *                                match to include any source that
+ *                                tags the channel with the same tvg_id.
+ */
+async function getAlternateFeeds(userId, channelName, tvgId = null) {
+    if (!userId || !channelName) return [];
+
+    const params = [userId, channelName];
+    const tvgClause = tvgId
+        ? (params.push(tvgId), 'OR c.tvg_id = $3')
+        : '';
+
+    const query = `
+        SELECT
+            c.id,
+            c.channel_id,
+            c.name,
+            c.logo_url      AS logo,
+            c.stream_url    AS url,
+            c.group_title,
+            c.tvg_id        AS epg_channel_id,
+            s.id            AS source_id,
+            s.name          AS source_name,
+            s.type          AS source_type,
+            p.priority,
+            p.nickname      AS source_nickname,
+            p.is_active
+        FROM iptv_channels c
+        JOIN iptv_sources s             ON c.source_id = s.id
+        JOIN user_iptv_preferences p    ON s.id = p.source_id
+        WHERE p.user_id = $1
+          AND p.is_active = TRUE
+          AND (LOWER(c.name) = LOWER($2) ${tvgClause})
+        ORDER BY p.priority ASC, s.name ASC
+    `;
+
+    const result = await queryWithRetry(query, params);
+    return result.rows.map((row) => ({
+        id: row.id,
+        channelId: row.channel_id,
+        name: row.name,
+        logo: row.logo,
+        url: row.url,
+        groupTitle: row.group_title,
+        epgChannelId: row.epg_channel_id,
+        source: {
+            id: row.source_id,
+            name: row.source_name,
+            nickname: row.source_nickname || row.source_name,
+            type: row.source_type,
+            priority: row.priority,
+            isActive: row.is_active === true
+        }
+    }));
+}
+
 // Export all functions
 module.exports = {
     // Core
@@ -718,6 +862,7 @@ module.exports = {
     saveChannels,
     getChannelsForSession,
     getChannelById,
+    getAlternateFeeds,
 
     // EPG Matches
     saveEpgMatch,
