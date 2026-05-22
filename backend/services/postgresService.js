@@ -4,6 +4,11 @@
  */
 
 const { Pool } = require('pg');
+// pg-copy-streams is maintained by the node-postgres author; provides
+// the COPY FROM / TO streaming interface that node-pg itself doesn't
+// expose. Used by saveChannels for bulk-loading channel rows into a
+// source's partition — the fastest Postgres ingest path.
+const { from: copyFrom } = require('pg-copy-streams');
 const logger = require('../utils/logger');
 
 // Connection pool configuration
@@ -297,7 +302,16 @@ async function saveSource(sourceData) {
             exp_date, max_connections, active_connections, account_status, is_trial, account_created_at,
             server_country, server_city
         ]);
-        return result.rows[0];
+        const newSource = result.rows[0];
+        // Provision the iptv_channels partition for this source so
+        // the first saveChannels can TRUNCATE+COPY into it directly
+        // rather than landing rows in the DEFAULT partition.
+        try {
+            await ensureChannelsPartition(newSource.id);
+        } catch (e) {
+            logger.warn(`[saveSource] failed to provision partition for new source ${newSource.id}: ${e.message}`);
+        }
+        return newSource;
     }
 }
 
@@ -315,7 +329,65 @@ async function getUserSources(userId, sessionId) {
 async function deleteSource(sourceId, userId) {
     const query = 'DELETE FROM iptv_sources WHERE id = $1 AND user_id = $2 RETURNING id';
     const result = await queryWithRetry(query, [sourceId, userId]);
-    return result.rowCount > 0;
+    const ok = result.rowCount > 0;
+    // Drop the iptv_channels partition for this source. CASCADE on
+    // the FK already removed the rows; this removes the now-empty
+    // partition table so we don't accumulate orphan partitions.
+    if (ok) {
+        try {
+            await dropChannelsPartition(sourceId);
+        } catch (e) {
+            logger.warn(`[deleteSource] failed to drop partition for source ${sourceId}: ${e.message}`);
+        }
+    }
+    return ok;
+}
+
+// ============================================================================
+// iptv_channels partition lifecycle
+//
+// iptv_channels is LIST-partitioned by source_id (migration 032).
+// Every IPTV source gets its own partition, which enables:
+//   - TRUNCATE ... ONLY  for instant per-source wipe (no dead tuples)
+//   - COPY into partition for the fastest bulk-insert path
+//   - per-source lock scope: refreshing source A can't block reads
+//     of source B
+//
+// The app is responsible for creating/dropping partitions alongside
+// iptv_sources rows. A DEFAULT partition catches any source_id that
+// somehow gets inserted before a partition is provisioned.
+// ============================================================================
+
+async function ensureChannelsPartition(sourceId) {
+    const id = parseInt(sourceId, 10);
+    if (!Number.isFinite(id)) {
+        throw new Error(`ensureChannelsPartition: invalid sourceId ${sourceId}`);
+    }
+    const partitionName = `iptv_channels_p_${id}`;
+    // CREATE TABLE IF NOT EXISTS doesn't work with PARTITION OF, so
+    // we check the catalog first.
+    const exists = await queryWithRetry(
+        `SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r'`,
+        [partitionName]
+    );
+    if (exists.rows.length > 0) return partitionName;
+    // sourceId is a sanitized integer (parseInt above), so direct
+    // interpolation is safe; LIST partition values can't be supplied
+    // as bind parameters.
+    await queryWithRetry(
+        `CREATE TABLE ${partitionName} PARTITION OF iptv_channels FOR VALUES IN (${id})`
+    );
+    logger.info(`Created partition ${partitionName} for source ${id}`);
+    return partitionName;
+}
+
+async function dropChannelsPartition(sourceId) {
+    const id = parseInt(sourceId, 10);
+    if (!Number.isFinite(id)) return;
+    const partitionName = `iptv_channels_p_${id}`;
+    // DROP TABLE IF EXISTS — safe whether or not the partition was
+    // ever created (e.g. a source that was added but never refreshed).
+    await queryWithRetry(`DROP TABLE IF EXISTS ${partitionName}`);
 }
 
 // ============================================================================
@@ -342,13 +414,6 @@ async function saveChannels(channels, sourceId, options = {}) {
     const isCancelled = typeof options.isCancelled === 'function'
         ? options.isCancelled
         : () => false;
-    // Optional progress callback so long-running INSERT loops can
-    // tell the SSE pipe / log stream how far they've gotten. Default
-    // is a no-op. The previous code logged once at the very end,
-    // which left the user staring at a "Saving to database…" UI for
-    // 5+ minutes with zero feedback — even the backend logs went
-    // silent during the loop, so there was no way to tell if it was
-    // working or hung.
     const onProgress = typeof options.onProgress === 'function'
         ? options.onProgress
         : () => {};
@@ -357,8 +422,8 @@ async function saveChannels(channels, sourceId, options = {}) {
         return { saved: 0 };
     }
 
-    // Deduplicate channels by ID (in case the source API returns
-    // duplicates, which it occasionally does for category overlaps).
+    // Deduplicate channels by id (the source API occasionally returns
+    // duplicates when a channel sits in multiple provider categories).
     const uniqueChannels = [];
     const seenIds = new Set();
     for (const channel of channels) {
@@ -372,207 +437,158 @@ async function saveChannels(channels, sourceId, options = {}) {
     }
 
     const total = uniqueChannels.length;
-    // Chunk size for the UNNEST-based INSERT. This isn't a Postgres
-    // parameter-limit constraint (UNNEST passes each column as one
-    // array param, so we could fit the whole 50k catalog in one
-    // statement), but smaller chunks keep memory bounded and let us
-    // honor the cancellation probe between chunks. 10k rows × 14 cols
-    // is ~140k array slots in memory — plenty fast.
-    const CHUNK = 10000;
-    const totalChunks = Math.ceil(total / CHUNK) || 1;
-    let savedCount = 0;
     const saveStartedAt = Date.now();
 
-    logger.info(
-        `[saveChannels] Source ${sourceId}: bulk-replacing ${total} channels in ${totalChunks} chunk(s) of up to ${CHUNK}`
-    );
-
-    // Atomic DELETE + INSERT inside a single transaction. The previous
-    // implementation did the DELETE outside the loop, then ran 100+
-    // separate INSERTs each with its own ON CONFLICT clause that was
-    // dead code (post-DELETE, nothing conflicts) and forced index
-    // maintenance to repeat per batch. A 51k-channel save took 25 min.
+    // Strategy (post-migration 032):
+    //   * iptv_channels is LIST-partitioned by source_id. Each source
+    //     gets its own partition table iptv_channels_p_<id>.
+    //   * Refresh becomes TRUNCATE the partition (instant, no dead
+    //     tuples) then COPY the new rows into it (Postgres' fastest
+    //     bulk-insert path, ~1.7x faster than UNNEST INSERT, ~8x
+    //     faster than multi-VALUES INSERT per Tiger Data benchmarks).
+    //   * AccessExclusiveLock is scoped to this partition only —
+    //     refreshing one source does NOT block reads of other sources.
+    //   * No global index drop/rebuild needed; the partition's
+    //     indexes were emptied by TRUNCATE so re-populating them via
+    //     COPY runs at full speed.
     //
-    // The new path:
-    //   * One DELETE
-    //   * One INSERT per chunk via UNNEST(arrays) — Postgres' set-based
-    //     bulk path. Each chunk is a single SQL statement with 14 array
-    //     params regardless of row count.
-    //   * Wrapped in a single transaction so a refresh either fully
-    //     replaces the source's channels or leaves the previous data
-    //     intact (no half-loaded states for concurrent readers).
-    //   * No ON CONFLICT — the DELETE guarantees no rows exist.
-    // List of "fat" text indexes on iptv_channels.name that are
-    // dropped before the bulk INSERT and rebuilt after. These three
-    // alone account for ~80% of per-row INSERT cost — GIN indexes
-    // tokenize each name on every row, and we have two GINs plus a
-    // btree on the same column. Drop+rebuild is dramatically faster
-    // than per-row maintenance for >5k rows, and since it's all in
-    // one transaction a failure rolls everything back (the indexes
-    // are never lost). Other queries against iptv_channels block on
-    // the table's AccessExclusiveLock during the txn — acceptable
-    // for a refresh that already does a wholesale source replacement.
-    const FAT_INDEXES = [
-        {
-            name: 'idx_iptv_channels_name',
-            create: "CREATE INDEX idx_iptv_channels_name ON iptv_channels USING gin (to_tsvector('english', name))"
-        },
-        {
-            name: 'idx_iptv_channels_name_btree',
-            create: 'CREATE INDEX idx_iptv_channels_name_btree ON iptv_channels USING btree (name)'
-        },
-        {
-            name: 'idx_iptv_channels_name_trgm',
-            create: 'CREATE INDEX idx_iptv_channels_name_trgm ON iptv_channels USING gin (name gin_trgm_ops)'
-        }
-    ];
+    // The whole flow is one transaction so a refresh either fully
+    // replaces the source's channels or leaves the previous data
+    // intact. No half-loaded states.
+    await ensureChannelsPartition(sourceId);
+    const partitionName = `iptv_channels_p_${parseInt(sourceId, 10)}`;
 
-    let cancelled = false;
+    if (isCancelled()) return { saved: 0, cancelled: true };
+
+    const client = await pool.connect();
+    let savedCount = 0;
     try {
-        await transaction(async (client) => {
-            await client.query('DELETE FROM iptv_channels WHERE source_id = $1', [sourceId]);
+        await client.query('BEGIN');
+        await client.query(`TRUNCATE TABLE ${partitionName}`);
 
-            // Skip the drop+rebuild dance for small saves — for <5k
-            // rows the per-row index cost is negligible and the
-            // rebuild adds latency that dwarfs the win.
-            const useIndexBulkPath = total >= 5000;
-            if (useIndexBulkPath) {
-                const dropStart = Date.now();
-                for (const idx of FAT_INDEXES) {
-                    await client.query(`DROP INDEX IF EXISTS ${idx.name}`);
-                }
-                logger.info(
-                    `[saveChannels] Source ${sourceId}: dropped 3 name indexes for bulk path (${Date.now() - dropStart}ms)`
-                );
-            }
+        // COPY uses text format with tab delimiter and \N as the NULL
+        // marker. Postgres' text COPY is well-defined, requires no
+        // extra escaping rules beyond the four characters below, and
+        // doesn't need the binary protocol's type-tag work for each
+        // value. Plenty fast for our scale.
+        const copyStream = client.query(copyFrom(
+            `COPY ${partitionName} (
+                channel_id, source_id, name, stream_url, logo_url, category,
+                tvg_id, tvg_name, group_title, source_type, source_username,
+                source_password, source_url, source_mac
+            ) FROM STDIN WITH (FORMAT text)`
+        ));
+        // Always attach an error listener so an async stream error
+        // (e.g. from copyStream.destroy() during cancellation) is
+        // consumed instead of bubbling up as an uncaughtException.
+        // We don't need to act on it — the surrounding try/catch
+        // handles cancellation + ROLLBACK explicitly.
+        copyStream.on('error', () => {});
 
-            for (let i = 0; i < total; i += CHUNK) {
-                if (isCancelled()) {
-                    cancelled = true;
-                    throw new Error('__SAVE_CHANNELS_CANCELLED__');
-                }
-                const chunk = uniqueChannels.slice(i, i + CHUNK);
+        // Text COPY escapes: backslash → \\; tab → \t; newline → \n;
+        // carriage return → \r. NULL is the literal two-character
+        // sequence \N. Anything else is passed through verbatim.
+        const escape = (v) => {
+            if (v == null) return '\\N';
+            return String(v)
+                .replace(/\\/g, '\\\\')
+                .replace(/\t/g, '\\t')
+                .replace(/\n/g, '\\n')
+                .replace(/\r/g, '\\r');
+        };
 
-                // Build one column-array per field; UNNEST zips them
-                // back into rows server-side. Empty-string default
-                // matches the previous insert behavior so search/EPG
-                // queries that filter on `tvg_id <> ''` etc. stay happy.
-                const channelIds = new Array(chunk.length);
-                const names = new Array(chunk.length);
-                const urls = new Array(chunk.length);
-                const logos = new Array(chunk.length);
-                const categories = new Array(chunk.length);
-                const tvgIds = new Array(chunk.length);
-                const tvgNames = new Array(chunk.length);
-                const groupTitles = new Array(chunk.length);
-                const sourceTypes = new Array(chunk.length);
-                const sourceUsernames = new Array(chunk.length);
-                const sourcePasswords = new Array(chunk.length);
-                const sourceUrls = new Array(chunk.length);
-                const sourceMacs = new Array(chunk.length);
-
-                for (let j = 0; j < chunk.length; j++) {
-                    const c = chunk[j];
-                    const groupTitle = c.groupTitle || c.group_title || '';
-                    channelIds[j] = c.id;
-                    names[j] = c.name;
-                    urls[j] = c.url;
-                    logos[j] = c.logo;
-                    categories[j] = c.category || groupTitle;
-                    tvgIds[j] = c.tvgId || c.tvg_id || '';
-                    tvgNames[j] = c.tvgName || c.tvg_name || c.name || '';
-                    groupTitles[j] = groupTitle;
-                    sourceTypes[j] = c.source_type;
-                    sourceUsernames[j] = c.source_username;
-                    sourcePasswords[j] = c.source_password;
-                    sourceUrls[j] = c.source_url;
-                    sourceMacs[j] = c.source_mac;
-                }
-
-                // The INSERT column order matches the SELECT output
-                // order — source_id sits at the end of both rather
-                // than in its on-disk position so the SELECT can just
-                // be `*, $sourceId` without per-row interleaving.
-                await client.query(
-                    `INSERT INTO iptv_channels (
-                        channel_id, name, stream_url, logo_url, category,
-                        tvg_id, tvg_name, group_title, source_type, source_username,
-                        source_password, source_url, source_mac, source_id
-                    )
-                    SELECT *, $14::int FROM UNNEST(
-                        $1::text[],  $2::text[],  $3::text[],  $4::text[],  $5::text[],
-                        $6::text[],  $7::text[],  $8::text[],  $9::text[],  $10::text[],
-                        $11::text[], $12::text[], $13::text[]
-                    ) AS t (
-                        channel_id, name, stream_url, logo_url, category,
-                        tvg_id, tvg_name, group_title, source_type, source_username,
-                        source_password, source_url, source_mac
-                    )`,
-                    [
-                        channelIds, names, urls, logos, categories,
-                        tvgIds, tvgNames, groupTitles, sourceTypes, sourceUsernames,
-                        sourcePasswords, sourceUrls, sourceMacs,
-                        sourceId
-                    ]
-                );
-
-                savedCount += chunk.length;
-                const pct = Math.floor((savedCount / total) * 100);
-                const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
-                const batchNumber = Math.ceil(savedCount / CHUNK);
-                logger.info(
-                    `[saveChannels] Source ${sourceId}: ${savedCount}/${total} (${pct}%, ${elapsedSec}s)`
-                );
-                onProgress({ saved: savedCount, total, batchNumber, totalBatches: totalChunks });
-            }
-
-            // Rebuild the indexes we dropped above. CREATE INDEX inside
-            // a transaction is allowed (non-CONCURRENTLY) and runs as
-            // a single bulk operation rather than per-row maintenance.
-            // Bumping maintenance_work_mem locally lets GIN sort more
-            // tuples in memory rather than spilling to temp files —
-            // typically halves the rebuild time on a multi-hundred-MB
-            // table.
-            if (useIndexBulkPath) {
-                const rebuildStart = Date.now();
-                await client.query("SET LOCAL maintenance_work_mem = '512MB'");
-                for (const idx of FAT_INDEXES) {
-                    await client.query(idx.create);
-                }
-                logger.info(
-                    `[saveChannels] Source ${sourceId}: rebuilt 3 name indexes (${Date.now() - rebuildStart}ms)`
-                );
+        // Stream rows in via async iteration. We pace with the
+        // writable's backpressure (`drain`) so we don't pile up the
+        // entire 50k-row buffer in node memory.
+        const writeRow = (row) => new Promise((resolve, reject) => {
+            if (copyStream.write(row)) {
+                resolve();
+            } else {
+                copyStream.once('drain', resolve);
+                copyStream.once('error', reject);
             }
         });
+
+        const sourceIdStr = String(parseInt(sourceId, 10));
+        for (let i = 0; i < total; i++) {
+            if (isCancelled()) {
+                // Abort the COPY by destroying the stream; the
+                // ROLLBACK below cleans up the transaction.
+                copyStream.destroy(new Error('__SAVE_CHANNELS_CANCELLED__'));
+                throw new Error('__SAVE_CHANNELS_CANCELLED__');
+            }
+            const c = uniqueChannels[i];
+            const groupTitle = c.groupTitle || c.group_title || '';
+            const row = [
+                c.id,
+                sourceIdStr,
+                c.name,
+                c.url,
+                c.logo,
+                c.category || groupTitle,
+                c.tvgId || c.tvg_id || '',
+                c.tvgName || c.tvg_name || c.name || '',
+                groupTitle,
+                c.source_type,
+                c.source_username,
+                c.source_password,
+                c.source_url,
+                c.source_mac
+            ].map(escape).join('\t') + '\n';
+            await writeRow(row);
+
+            // Progress every 5k rows so the log isn't drowned but
+            // the user gets visible heartbeat for big saves.
+            if ((i + 1) % 5000 === 0) {
+                const pct = Math.floor(((i + 1) / total) * 100);
+                const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
+                logger.info(
+                    `[saveChannels] Source ${sourceId}: ${i + 1}/${total} (${pct}%, ${elapsedSec}s)`
+                );
+                onProgress({ saved: i + 1, total });
+            }
+        }
+
+        // Close the COPY stream and wait for Postgres' ack. End +
+        // 'finish' is the documented pattern in pg-copy-streams.
+        await new Promise((resolve, reject) => {
+            copyStream.once('finish', resolve);
+            copyStream.once('error', reject);
+            copyStream.end();
+        });
+        savedCount = total;
+
+        // Update the source row's refresh stats inside the same
+        // transaction so it commits atomically with the channel data.
+        await client.query(
+            `UPDATE iptv_sources
+                SET channel_count            = $1,
+                    last_refresh_attempt     = CURRENT_TIMESTAMP,
+                    last_successful_refresh  = CURRENT_TIMESTAMP,
+                    last_refresh_status      = 'success',
+                    last_refresh_error       = NULL,
+                    failure_count            = 0
+              WHERE id = $2`,
+            [savedCount, sourceId]
+        );
+
+        await client.query('COMMIT');
     } catch (err) {
-        if (cancelled) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+        if (err && err.message === '__SAVE_CHANNELS_CANCELLED__') {
             logger.info(`[saveChannels] Source ${sourceId}: cancelled — transaction rolled back`);
             return { saved: 0, cancelled: true };
         }
         throw err;
+    } finally {
+        client.release();
     }
 
-    // Update the source row to reflect this successful load. Stamping
-    // the refresh-status fields here matters for the MyIPTVs page's
-    // "Last refresh" column — bulk-added sources used to leave these
-    // fields null even though the load completed cleanly, so the UI
-    // showed "—" for every just-imported source. By writing them at
-    // the lowest level (every load path bottoms out here), every
-    // single-source / bulk / xtream / stalker code path gets proper
-    // provenance for free.
-    await queryWithRetry(
-        `UPDATE iptv_sources
-            SET channel_count            = $1,
-                last_refresh_attempt     = CURRENT_TIMESTAMP,
-                last_successful_refresh  = CURRENT_TIMESTAMP,
-                last_refresh_status      = 'success',
-                last_refresh_error       = NULL,
-                failure_count            = 0
-          WHERE id = $2`,
-        [savedCount, sourceId]
+    const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
+    logger.info(
+        `[saveChannels] Source ${sourceId}: ${savedCount} channels saved in ${elapsedSec}s via TRUNCATE+COPY`
     );
-
-    logger.info(`Saved ${savedCount} channels for source ${sourceId}`);
+    onProgress({ saved: savedCount, total });
     return { saved: savedCount };
 }
 
@@ -863,6 +879,8 @@ module.exports = {
     getChannelsForSession,
     getChannelById,
     getAlternateFeeds,
+    ensureChannelsPartition,
+    dropChannelsPartition,
 
     // EPG Matches
     saveEpgMatch,

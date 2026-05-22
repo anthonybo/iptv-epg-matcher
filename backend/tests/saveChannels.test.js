@@ -20,8 +20,10 @@ const pg = require('../services/postgresService');
 // test so the suite is hermetic. Chosen to be obviously fake.
 const TEST_SOURCE_ID = 9990001;
 
-// Ensure the test source row exists. iptv_channels.source_id has a
-// FK against iptv_sources, so we need a parent row.
+// Ensure the test source row + its iptv_channels partition exist.
+// After migration 032 iptv_channels is LIST-partitioned by
+// source_id, so every test source needs its partition provisioned
+// before any row can land in it.
 async function ensureTestSource() {
     await pg.query(
         `INSERT INTO iptv_sources (id, name, type, url, username, password)
@@ -29,6 +31,7 @@ async function ensureTestSource() {
          ON CONFLICT (id) DO NOTHING`,
         [TEST_SOURCE_ID, 'TEST_SAVE_CHANNELS', 'xtream', 'http://test.local', 'test', 'test']
     );
+    await pg.ensureChannelsPartition(TEST_SOURCE_ID);
 }
 
 async function cleanTestChannels() {
@@ -38,6 +41,9 @@ async function cleanTestChannels() {
 async function cleanTestSource() {
     await cleanTestChannels();
     await pg.query('DELETE FROM iptv_sources WHERE id = $1', [TEST_SOURCE_ID]);
+    // Drop the partition too, so consecutive test runs don't leave
+    // orphan iptv_channels_p_9990001 tables around the DB.
+    await pg.dropChannelsPartition(TEST_SOURCE_ID);
 }
 
 function makeChannel(i, overrides = {}) {
