@@ -111,7 +111,11 @@ export function useChannelPicker({
           error: data?.error || `Lookup failed (${response.status})`
         };
       }
-      return { ok: true, candidates: data.candidates || [] };
+      return {
+        ok: true,
+        candidates: data.candidates || [],
+        timedOut: data.timedOut === true
+      };
     } catch (e) {
       console.error('[Channel Picker] fetch failed', e);
       return { ok: false, error: 'Network error' };
@@ -180,11 +184,16 @@ export function useChannelPicker({
     }
     setCandidates(result.candidates);
     setLoading(false);
-    if (result.candidates.length === 0) {
-      // Surface an immediate, helpful empty state. The picker still
-      // opens so the user can see the (empty) result rather than a
-      // toast that disappears.
-      setError(`No channels found matching "${q}".`);
+    // Only surface an error banner when the query genuinely failed
+    // (timed out, network error, etc). For a clean empty result we
+    // leave `error` null so the modal renders the gentler
+    // EmptyState — the rose "Couldn't load candidates" card was
+    // misleading when the SQL ran fine but happened to return zero
+    // rows (e.g. typo, very obscure name).
+    if (result.timedOut) {
+      setError(
+        `Search took longer than expected for "${q}". Try a more specific query.`
+      );
     }
   }, [streams, fetchCandidates]);
 
@@ -240,8 +249,10 @@ export function useChannelPicker({
     }
     setCandidates(result.candidates);
     setLoading(false);
-    if (result.candidates.length === 0) {
-      setError(`No alternate sources found for "${q}".`);
+    if (result.timedOut) {
+      setError(
+        `Search took longer than expected for "${q}". Try a more specific query.`
+      );
     }
   }, [streams, fetchCandidates]);
 

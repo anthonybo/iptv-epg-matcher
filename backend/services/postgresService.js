@@ -388,6 +388,17 @@ async function dropChannelsPartition(sourceId) {
     // DROP TABLE IF EXISTS — safe whether or not the partition was
     // ever created (e.g. a source that was added but never refreshed).
     await queryWithRetry(`DROP TABLE IF EXISTS ${partitionName}`);
+    // Mirror the cleanup into the search shadow (migration 033). The
+    // shadow has no FK to iptv_sources so the rows would otherwise
+    // become orphaned and pollute future search results.
+    try {
+        await queryWithRetry(
+            `DELETE FROM iptv_channels_search WHERE source_id = $1`,
+            [id]
+        );
+    } catch (e) {
+        logger.warn(`[dropChannelsPartition] failed to purge search shadow for source ${id}: ${e.message}`);
+    }
 }
 
 // ============================================================================
@@ -557,6 +568,28 @@ async function saveChannels(channels, sourceId, options = {}) {
             copyStream.end();
         });
         savedCount = total;
+
+        // Sync the search shadow (migration 033) inside the same
+        // transaction so the visible state always matches:
+        // partition rows ↔ shadow rows. DELETE+INSERT (rather than
+        // UPSERT) is the simplest correct path because the partition
+        // was just TRUNCATEd above — there are no stale rows to merge
+        // around. INSERT-SELECT from the partition keeps the data
+        // exactly aligned even if we add or drop columns later, and
+        // runs entirely server-side (no second COPY stream from
+        // Node).
+        await client.query(
+            `DELETE FROM iptv_channels_search WHERE source_id = $1`,
+            [sourceId]
+        );
+        await client.query(
+            `INSERT INTO iptv_channels_search
+                 (source_id, channel_id, user_id, name, logo_url, stream_url, tvg_id, group_title)
+             SELECT c.source_id, c.channel_id, s.user_id, c.name, c.logo_url, c.stream_url,
+                    c.tvg_id, c.group_title
+               FROM ${partitionName} c
+               JOIN iptv_sources s ON s.id = c.source_id`
+        );
 
         // Update the source row's refresh stats inside the same
         // transaction so it commits atomically with the channel data.

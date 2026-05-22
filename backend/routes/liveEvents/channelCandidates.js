@@ -102,41 +102,62 @@ router.post('/channel-candidates', async (req, res) => {
       return `$${params.length}`;
     };
 
-    // SQL filter: name must contain the full query phrase OR any
-    // expanded alias. We deliberately do NOT OR in individual tokens
-    // — for a user with ~1M channels, a token like "nhl" or
-    // "network" matches tens of thousands of rows and the trgm
-    // index's BitmapOr explodes the working set; resolving 67-source
-    // JOIN + sort over that set used to push response times past 5
-    // minutes. Instead, the AND-all-tokens fallback below catches
-    // out-of-order phrasings ("ESPN NHL" vs "NHL ESPN") without the
-    // selectivity blowup.
-    const orParts = [];
-    const seenLikes = new Set();
-    const orTerms = [
-      queryLower,
-      ...expandedAliases.map((a) => a.toLowerCase())
-    ];
-    for (const tok of orTerms) {
-      if (!tok || tok.length < 3 || seenLikes.has(tok)) continue;
-      seenLikes.add(tok);
-      orParts.push(`c.name ILIKE ${placeholder(`%${tok}%`)}`);
-    }
+    // ───────────────────────────────────────────────────────────────
+    // Build a Postgres tsquery from the user's input + brand-alias
+    // expansion. We query iptv_channels_search (migration 033), a
+    // NON-partitioned shadow with a single GIN(tsvector) index —
+    // bypassing the 65-partition catalog enumeration that was costing
+    // 3.5s of planning time on cold connections (logs 2026-05-22
+    // 10:39:47, "nhl network" → 15s timeout).
+    //
+    // Config: 'simple' (no English stemming, no stop-words). Channel
+    // names like "USA HD" or "NHL Network" need every token preserved
+    // verbatim; stemming would silently rewrite "Networks" → "network"
+    // (occasionally helpful) but also drop tokens like "and" / "the"
+    // / "of" (e.g. "The Movie Channel" would lose "The"). Simple is
+    // safer for this domain.
+    //
+    // Per-token escaping: tsquery is a fragile mini-language. We
+    // strip every non-alphanumeric char, lowercase, then join with
+    // operators — no user-supplied character can reach the parser.
+    // ───────────────────────────────────────────────────────────────
+    const tsqEscape = (t) =>
+      String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const queryTokensForFts = queryTokens.map(tsqEscape).filter((t) => t.length >= 2);
+    const aliasGroups = expandedAliases
+      .map((alias) =>
+        String(alias)
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .map(tsqEscape)
+          .filter((t) => t.length >= 2)
+      )
+      .filter((tokens) => tokens.length > 0);
 
-    // AND-all-tokens fallback for multi-token queries. Requires every
-    // ≥3-char token to appear somewhere in the name (in any order).
-    // This catches "NHL Network HD", "USA NHL Network", and other
-    // permutations that the bare phrase ILIKE misses, while still
-    // being trgm-indexed and selective (each token narrows the set).
-    if (queryTokens.length > 1) {
-      const longTokens = queryTokens.filter((t) => t.length >= 3);
-      if (longTokens.length >= 2) {
-        const andClauses = longTokens.map(
-          (t) => `c.name ILIKE ${placeholder(`%${t}%`)}`
-        );
-        orParts.push(`(${andClauses.join(' AND ')})`);
-      }
+    // Primary clause: AND-all-tokens with prefix matching. "nhl
+    // network" → 'nhl:* & network:*' — matches names that contain
+    // BOTH tokens, where each token can be a prefix (so "NHLN" alone
+    // does NOT satisfy the "nhl & network" AND, but "NHL Network HD"
+    // does). Order-independent: "USA NHL Network" matches too.
+    const queryAndClause = queryTokensForFts.length > 0
+      ? '(' + queryTokensForFts.map((t) => `${t}:*`).join(' & ') + ')'
+      : null;
+
+    // Alias clauses: each expanded alias becomes its own AND-token
+    // group, all OR'd together. So expanding "NHL NETWORK" → "NHLN"
+    // gives ('nhln:*') as a separate clause, matching channels named
+    // just "NHLN" that would miss the AND-clause above.
+    const aliasOrClauses = aliasGroups.map(
+      (toks) => '(' + toks.map((t) => `${t}:*`).join(' & ') + ')'
+    );
+
+    const tsqueryParts = [queryAndClause, ...aliasOrClauses].filter(Boolean);
+    if (tsqueryParts.length === 0) {
+      // Defensive — should be impossible given the ≥2-char guard above
+      return res.json({ success: true, query: searchQuery, candidates: [] });
     }
+    const tsqueryString = tsqueryParts.join(' | ');
+    const tsqueryPh = placeholder(tsqueryString);
 
     let sourceExclusion = '';
     if (excludeSourceIds.length > 0) {
@@ -147,7 +168,7 @@ router.post('/channel-candidates', async (req, res) => {
     let channelExclusion = '';
     if (excludeChannelIds.length > 0) {
       const ph = excludeChannelIds.map((id) => placeholder(id)).join(', ');
-      channelExclusion = `AND c.channel_id NOT IN (${ph})`;
+      channelExclusion = `AND cs.channel_id NOT IN (${ph})`;
     }
 
     // Overfetch — we dedupe by (lower(name), host, account) below.
@@ -155,38 +176,35 @@ router.post('/channel-candidates', async (req, res) => {
 
     const sql = `
       SELECT
-        c.channel_id  AS id,
-        c.name        AS name,
-        c.logo_url    AS logo,
-        c.stream_url  AS url,
-        c.tvg_id      AS epg_channel_id,
-        c.group_title AS category,
-        s.id          AS source_id,
-        s.name        AS source_name,
-        s.type        AS source_type,
-        s.url         AS source_url,
-        s.username    AS source_username,
-        s.password    AS source_password,
-        s.mac_address AS source_mac
-      FROM iptv_channels c
-      JOIN iptv_sources s ON c.source_id = s.id
-      WHERE s.user_id = $1
-        AND (${orParts.join(' OR ')})
+        cs.channel_id  AS id,
+        cs.name        AS name,
+        cs.logo_url    AS logo,
+        cs.stream_url  AS url,
+        cs.tvg_id      AS epg_channel_id,
+        cs.group_title AS category,
+        s.id           AS source_id,
+        s.name         AS source_name,
+        s.type         AS source_type,
+        s.url          AS source_url,
+        s.username     AS source_username,
+        s.password     AS source_password,
+        s.mac_address  AS source_mac
+      FROM iptv_channels_search cs
+      JOIN iptv_sources s ON cs.source_id = s.id
+      WHERE cs.user_id = $1
+        AND cs.name_tsv @@ to_tsquery('simple', ${tsqueryPh})
         ${sourceExclusion}
         ${channelExclusion}
-      ORDER BY c.name
+      ORDER BY cs.name
       LIMIT ${limitPh}
     `;
 
-    // Hard ceiling so a pathological pattern can never tie up a
-    // server-side worker for minutes. 5s is generous given the trgm
-    // index — previous 5-minute response times were a query-shape
-    // problem (low-selectivity tokens OR'd together), but the
-    // timeout is a belt-and-braces guard against future regressions.
-    // SET LOCAL only takes effect inside a transaction, so we use
-    // the transaction wrapper to scope it correctly.
+    // Hard ceiling. Now that we query the non-partitioned shadow
+    // (single table, single GIN index, single plan), even a cold
+    // connection finishes in 1-3s. 8s is generous belt-and-braces.
+    // SET LOCAL only takes effect inside a transaction.
     const rows = await postgresService.transaction(async (client) => {
-      await client.query('SET LOCAL statement_timeout = 5000');
+      await client.query('SET LOCAL statement_timeout = 8000');
       const result = await client.query(sql, params);
       return result.rows;
     });
