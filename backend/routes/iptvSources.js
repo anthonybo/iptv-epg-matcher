@@ -5,6 +5,7 @@ const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
 const epgService = require('../services/epgService');
 const logger = require('../config/logger');
 const postgresService = require('../services/postgresService');
+const bundledEpgService = require('../services/bundledEpgService');
 const dns = require('dns').promises;
 const { execFile } = require('child_process');
 const { promisify } = require('util');
@@ -792,6 +793,37 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 // and will see the result. Don't crash on EPIPE.
                 logger.debug(`[REFRESH] Source ${sourceId}: response send failed (socket closed): ${e.message}`);
             }
+        }
+
+        // ─── Bundled-EPG ingest (post-035) ────────────────────────
+        // Fire-and-forget AFTER the response is sent. The user
+        // doesn't wait extra 30-90s for the EPG download — the
+        // refresh appears to complete as fast as before. Status +
+        // counts land on iptv_sources.bundled_epg_* columns; the
+        // UI polls those for the badge. Failures are logged + tag
+        // the source row 'failed' but never propagate as a refresh
+        // error (the channels saved fine, that's the user-visible
+        // success state). Skipped entirely for sources without
+        // credentials or types we don't auto-discover (e.g. stalker).
+        if (!clientGone && (source.type === 'xtream' || source.type === 'm3u')) {
+            // Don't await — promise runs in the background.
+            bundledEpgService
+                .ingestBundledEpgForSource(sourceId, { force: false })
+                .then((r) => {
+                    if (r && r.success) {
+                        logger.info(
+                            `[REFRESH] Source ${sourceId}: bundled-EPG ingest ok — ` +
+                            `${r.channelCount} channels, ${r.programCount} programs in ${Math.round((r.duration || 0) / 1000)}s`
+                        );
+                    } else {
+                        logger.info(
+                            `[REFRESH] Source ${sourceId}: bundled-EPG skipped (reason=${r?.reason || 'unknown'})`
+                        );
+                    }
+                })
+                .catch((err) => {
+                    logger.warn(`[REFRESH] Source ${sourceId}: bundled-EPG ingest threw: ${err.message}`);
+                });
         }
     } catch (error) {
         logger.error(`Error refreshing source data: ${error.message}`);

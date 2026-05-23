@@ -42,17 +42,26 @@ async function parseEpgSource(sourceConfig, options = {}) {
   try {
     logger.info(`[EPG Parser] Starting parse for source: ${sourceConfig.name}`);
 
-    // 1. Generate source ID
-    const sourceId = generateSourceId(sourceConfig.url);
+    // 1. Generate source ID.
+    //    Callers passing `sourceIdOverride` get to use a deterministic
+    //    id of their choosing (the bundled-EPG path uses
+    //    `bundled_${iptv_source_id}` so each IPTV source's EPG lives
+    //    in its own partition even when two sources happen to share
+    //    a URL — e.g. two accounts on the same Xtream backend).
+    const sourceId = sourceConfig.sourceIdOverride || generateSourceId(sourceConfig.url);
 
-    // 2. Register source in database
+    // 2. Register source in database. ownerIptvSourceId is forwarded
+    //    to saveSource so the epg_sources row gets tagged with the
+    //    IPTV source it belongs to (post-035 column). null for the
+    //    global public sources.
     await epgDatabaseService.saveSource({
       id: sourceId,
       name: sourceConfig.name,
       url: sourceConfig.url,
       filePath: null,
       channelCount: 0,
-      programCount: 0
+      programCount: 0,
+      ownerIptvSourceId: sourceConfig.ownerIptvSourceId || null
     });
 
     // 3. Download/cache EPG file
@@ -86,7 +95,8 @@ async function parseEpgSource(sourceConfig, options = {}) {
       url: sourceConfig.url,
       filePath: filePath,
       channelCount: 0,
-      programCount: 0
+      programCount: 0,
+      ownerIptvSourceId: sourceConfig.ownerIptvSourceId || null
     });
 
     // 5. Per-source replace: clear only this source's existing rows

@@ -80,15 +80,23 @@ const epgDatabaseService = {
    */
   async saveSource(source) {
     try {
+      // owner_iptv_source_id (post-035): null for global public EPGs
+      // (epg.pw, EPG Talk Guide, …), set for bundled EPGs that came
+      // from a specific iptv_source's provider. We COALESCE on
+      // UPSERT so a later save that doesn't pass an owner doesn't
+      // accidentally null it out — once a row is marked as owned by
+      // an iptv_source it stays that way until the owner is deleted
+      // (CASCADE handles the cleanup).
       const query = `
-        INSERT INTO epg_sources (id, name, url, file_path, channel_count, program_count, last_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+        INSERT INTO epg_sources (id, name, url, file_path, channel_count, program_count, owner_iptv_source_id, last_updated)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
         ON CONFLICT (id) DO UPDATE SET
           name = EXCLUDED.name,
           url = EXCLUDED.url,
           file_path = EXCLUDED.file_path,
           channel_count = EXCLUDED.channel_count,
           program_count = EXCLUDED.program_count,
+          owner_iptv_source_id = COALESCE(EXCLUDED.owner_iptv_source_id, epg_sources.owner_iptv_source_id),
           last_updated = CURRENT_TIMESTAMP
         RETURNING *
       `;
@@ -99,7 +107,8 @@ const epgDatabaseService = {
         source.url || null,
         source.filePath || null,
         source.channelCount || 0,
-        source.programCount || 0
+        source.programCount || 0,
+        source.ownerIptvSourceId || null
       ];
 
       const result = await pool.query(query, values);

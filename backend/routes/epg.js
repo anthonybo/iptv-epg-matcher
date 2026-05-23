@@ -781,30 +781,81 @@ router.get('/:sessionId', async (req, res) => {
     try {
       const userId = req.user?.id;
       let epgChannelId = null;
+      let matchSource = null;  // 'explicit' | 'bundled' | 'public' | null
 
-      // Look up the match from PostgreSQL
-      let query = `SELECT epg_channel_id FROM epg_matches WHERE iptv_channel_id = $1`;
-      const params = [channelId];
+      // ─── Precedence-aware EPG match resolution (post-035) ─────
+      //
+      //   Tier 1: explicit user match in epg_matches  — wins
+      //   Tier 2: channel's tvg_id matches an epg_channels row in
+      //           its source's BUNDLED EPG (epg_sources row owned
+      //           by this iptv_source, id = `bundled_${source_id}`)
+      //   Tier 3: channel's tvg_id matches an epg_channels row in
+      //           any PUBLIC EPG (epg_sources rows NOT owned)
+      //   Tier 4: no EPG.
+      //
+      // The bundled tier exists so that every channel gets default
+      // EPG from its own provider the moment the IPTV source is
+      // refreshed — no manual matching required. The explicit tier
+      // is still authoritative when the user has overridden it
+      // (e.g. mapped USA NHL Network to NHL Network from EPG Talk
+      // Guide because the provider's bundled EPG had no program
+      // data for that channel).
 
-      // Filter by user if authenticated
-      if (userId) {
-        query += ` AND user_id = $2`;
-        params.push(userId);
-      } else {
-        query += ` AND session_id = $2`;
-        params.push(sessionId);
+      // Tier 1: explicit match
+      const explicitQuery = userId
+        ? `SELECT epg_channel_id FROM epg_matches
+             WHERE iptv_channel_id = $1 AND user_id = $2 LIMIT 1`
+        : `SELECT epg_channel_id FROM epg_matches
+             WHERE iptv_channel_id = $1 AND session_id = $2 LIMIT 1`;
+      const explicitParams = [channelId, userId || sessionId];
+      const explicitRes = await postgresService.query(explicitQuery, explicitParams);
+      if (explicitRes.rows[0]) {
+        epgChannelId = explicitRes.rows[0].epg_channel_id;
+        matchSource = 'explicit';
+        logger.info(`[epg-precedence] ${channelId} → ${epgChannelId} (explicit)`);
       }
 
-      query += ` LIMIT 1`;
+      // Tiers 2 + 3: tvg_id-driven lookup. Skip when an explicit
+      // match already resolved.
+      if (!epgChannelId) {
+        const tvgRes = await postgresService.query(
+          'SELECT tvg_id, source_id FROM iptv_channels WHERE channel_id = $1 LIMIT 1',
+          [channelId]
+        );
+        const tvgId = tvgRes.rows[0]?.tvg_id || null;
+        const iptvSrcId = tvgRes.rows[0]?.source_id || null;
 
-      const result = await postgresService.query(query, params);
-      const match = result.rows[0];
+        if (tvgId && iptvSrcId) {
+          // Tier 2: bundled EPG owned by this iptv_source
+          const bundledRes = await postgresService.query(
+            `SELECT id FROM epg_channels
+              WHERE id = $1 AND source_id = $2 LIMIT 1`,
+            [tvgId, `bundled_${iptvSrcId}`]
+          );
+          if (bundledRes.rows[0]) {
+            epgChannelId = bundledRes.rows[0].id;
+            matchSource = 'bundled';
+            logger.info(`[epg-precedence] ${channelId} → ${epgChannelId} (bundled, source ${iptvSrcId})`);
+          }
+        }
 
-      if (match) {
-        epgChannelId = match.epg_channel_id;
-        logger.info(`Found EPG match: ${channelId} -> ${epgChannelId}`);
-      } else {
-        logger.info(`No match found for IPTV channel ${channelId}`);
+        if (!epgChannelId && tvgId) {
+          // Tier 3: any public EPG
+          const publicRes = await postgresService.query(
+            `SELECT id, source_id FROM epg_channels
+              WHERE id = $1 AND source_id NOT LIKE 'bundled_%' LIMIT 1`,
+            [tvgId]
+          );
+          if (publicRes.rows[0]) {
+            epgChannelId = publicRes.rows[0].id;
+            matchSource = 'public';
+            logger.info(`[epg-precedence] ${channelId} → ${epgChannelId} (public, source ${publicRes.rows[0].source_id})`);
+          }
+        }
+      }
+
+      if (!epgChannelId) {
+        logger.info(`[epg-precedence] no match found for ${channelId} (no explicit / no bundled / no public via tvg_id)`);
       }
 
       // Get channel info using the EPG channel ID
@@ -861,6 +912,14 @@ router.get('/:sessionId', async (req, res) => {
         programs,
         currentProgram,
         sources: sourcesList,
+        // Tells the UI which tier of the precedence chain (post-035)
+        // produced the displayed EPG: 'explicit' (user-confirmed
+        // match), 'bundled' (provider's own EPG, auto-applied via
+        // tvg-id), or 'public' (any global EPG source). Null means
+        // no match. The matcher panel uses this to render a small
+        // "Source: bundled" badge so the user knows whether to
+        // override.
+        matchSource,
         timeWindow: {
           start: now.toISOString(),
           end: endDate.toISOString()
