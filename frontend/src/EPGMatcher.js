@@ -1215,10 +1215,39 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
         if (!epgData || !epgData.channel) return null;
 
         const { channel, programs } = epgData;
+        // Backend tells us which precedence tier produced the
+        // displayed EPG (post-035): 'explicit' | 'bundled' | 'public'
+        // | null. Surface as a small badge so the user knows whether
+        // they're looking at their own confirmed match, the
+        // provider's bundled feed, or a public source — and whether
+        // they should bother overriding.
+        const matchSourceBadge = (() => {
+            const ms = epgData.matchSource;
+            if (!ms) return null;
+            const meta = {
+                explicit: { label: 'YOUR MATCH', cls: 'bg-emerald-500/15 ring-emerald-400/30 text-emerald-200' },
+                bundled:  { label: 'PROVIDER',   cls: 'bg-cyan-500/15 ring-cyan-400/30 text-cyan-200' },
+                public:   { label: 'PUBLIC',     cls: 'bg-slate-700/40 ring-slate-600/40 text-slate-300' }
+            }[ms];
+            if (!meta) return null;
+            return (
+                <span
+                    className={`inline-flex h-5 items-center rounded px-1.5 ring-1 font-mono text-[9.5px] uppercase tracking-[0.18em] ${meta.cls}`}
+                    title={
+                        ms === 'explicit' ? 'EPG from your manual match'
+                            : ms === 'bundled' ? 'EPG from the IPTV provider\'s own xmltv feed (auto-matched via tvg-id)'
+                            : 'EPG from a public source (auto-matched via tvg-id)'
+                    }
+                >
+                    {meta.label}
+                </span>
+            );
+        })();
 
         return (
             <div className={compactMode ? "flex flex-1 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40" : "mt-6 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/40"}>
                 <div className="flex flex-shrink-0 items-center border-b border-slate-800 bg-slate-900/60 p-4">
+                    {matchSourceBadge && <span className="mr-3 flex-shrink-0">{matchSourceBadge}</span>}
                     {channel.icon && (
                         <img
                             src={channel.icon}

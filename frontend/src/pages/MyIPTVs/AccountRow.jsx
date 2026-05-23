@@ -188,6 +188,64 @@ const AccountRow = ({
     password: source.password || '',
   });
 
+  // Bundled-EPG state (post-035). Local refreshing flag so the
+  // button can show a spinner while ingest runs (5-90s depending on
+  // provider EPG size). Optimistic status update so the user sees
+  // "pending" the moment they click; the real status comes back in
+  // the response and overwrites.
+  const [isRefreshingBundledEpg, setIsRefreshingBundledEpg] = useState(false);
+  const [optimisticBundledEpg, setOptimisticBundledEpg] = useState(null);
+  const bundledEpgView = optimisticBundledEpg || {
+    status: source.bundled_epg_status,
+    error: source.bundled_epg_error,
+    channelCount: source.bundled_epg_channel_count || 0,
+    programCount: source.bundled_epg_program_count || 0,
+    lastRefreshed: source.bundled_epg_last_refreshed,
+    url: source.bundled_epg_url
+  };
+  // Clear optimistic state when the underlying source row updates so
+  // the polled status (truth) takes over again.
+  useEffect(() => { setOptimisticBundledEpg(null); }, [
+    source.bundled_epg_status,
+    source.bundled_epg_last_refreshed
+  ]);
+
+  const handleRefreshBundledEpg = async () => {
+    if (isRefreshingBundledEpg) return;
+    setIsRefreshingBundledEpg(true);
+    setOptimisticBundledEpg({
+      ...bundledEpgView,
+      status: 'pending',
+      error: null
+    });
+    try {
+      const res = await fetch(`/api/iptv/sources/${source.id}/refresh-bundled-epg`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('authToken') || ''}` },
+        body: JSON.stringify({})
+      });
+      const body = await res.json().catch(() => ({}));
+      if (body && body.status) {
+        setOptimisticBundledEpg({
+          status: body.status.bundled_epg_status,
+          error: body.status.bundled_epg_error,
+          channelCount: body.status.bundled_epg_channel_count || 0,
+          programCount: body.status.bundled_epg_program_count || 0,
+          lastRefreshed: body.status.bundled_epg_last_refreshed,
+          url: body.status.bundled_epg_url
+        });
+      }
+    } catch (e) {
+      setOptimisticBundledEpg({
+        ...bundledEpgView,
+        status: 'failed',
+        error: String(e.message || e)
+      });
+    } finally {
+      setIsRefreshingBundledEpg(false);
+    }
+  };
+
   const health = getAccountHealth(source, refreshStatus, testResult);
   const accentRail = {
     ok: 'before:bg-emerald-500/60',
@@ -328,6 +386,92 @@ const AccountRow = ({
         )}
       </div>
 
+      {/* Provider EPG (bundled) — auto-ingested from the source's
+          own xmltv.php (Xtream) or url-tvg header (M3U). See
+          backend/services/bundledEpgService.js. Stalker sources skip
+          this entirely because MAG portals don't expose a standard
+          EPG endpoint. */}
+      {(source.type === 'xtream' || source.type === 'm3u') && (
+        <div className="mt-4 rounded-md border border-slate-800/70 bg-slate-900/40">
+          <div className="flex items-center justify-between gap-3 border-b border-slate-800/70 px-3 py-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                Provider EPG
+              </span>
+              {(() => {
+                const s = bundledEpgView.status;
+                const map = {
+                  ok:      { label: 'OK',       cls: 'bg-emerald-500/15 ring-emerald-400/30 text-emerald-200' },
+                  pending: { label: 'PENDING',  cls: 'bg-cyan-500/15 ring-cyan-400/30 text-cyan-200' },
+                  failed:  { label: 'FAILED',   cls: 'bg-rose-500/15 ring-rose-400/30 text-rose-200' },
+                  no_url:  { label: 'NO URL',   cls: 'bg-slate-700/40 ring-slate-600/40 text-slate-400' },
+                };
+                const m = map[s] || { label: 'NEVER', cls: 'bg-slate-700/30 ring-slate-700/40 text-slate-500' };
+                return (
+                  <span className={`inline-flex h-5 items-center rounded px-1.5 ring-1 font-mono text-[9.5px] uppercase tracking-[0.18em] ${m.cls}`}>
+                    {m.label}
+                  </span>
+                );
+              })()}
+              {bundledEpgView.channelCount > 0 && (
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500 tabular-nums">
+                  <span className="text-slate-300">{bundledEpgView.channelCount.toLocaleString()}</span> ch
+                  <span className="mx-1.5 text-slate-700">·</span>
+                  <span className="text-slate-300">{bundledEpgView.programCount.toLocaleString()}</span> prog
+                </span>
+              )}
+              {bundledEpgView.lastRefreshed && (
+                <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-600">
+                  · {formatRelativeTime(bundledEpgView.lastRefreshed)}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={handleRefreshBundledEpg}
+              disabled={isRefreshingBundledEpg || bundledEpgView.status === 'pending'}
+              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-cyan-500/40 bg-cyan-500/[0.08] px-2.5 font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-200 transition hover:border-cyan-400/60 hover:bg-cyan-500/[0.14] disabled:cursor-not-allowed disabled:opacity-50"
+              title="Re-fetch the provider's bundled EPG. Usually runs automatically after each channel refresh."
+            >
+              {isRefreshingBundledEpg ? (
+                <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                  <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 12a9 9 0 1015.5-6.36M21 5v5h-5" />
+                </svg>
+              )}
+              Refresh EPG
+            </button>
+          </div>
+          <div className="px-3 py-2 text-[11px]">
+            {bundledEpgView.url ? (
+              <div className="truncate font-mono text-slate-500" title={bundledEpgView.url}>
+                {bundledEpgView.url.replace(/(password=)[^&]*/i, '$1•••')}
+              </div>
+            ) : (
+              <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600">
+                No EPG URL discovered yet
+              </div>
+            )}
+            {bundledEpgView.status === 'failed' && bundledEpgView.error && (
+              <div className="mt-1.5 break-words rounded border border-rose-500/30 bg-rose-500/[0.06] px-2 py-1 font-mono text-[10.5px] text-rose-200">
+                {bundledEpgView.error}
+              </div>
+            )}
+            {bundledEpgView.status === 'no_url' && (
+              <div className="mt-1.5 font-mono text-[10px] text-slate-500">
+                {source.type === 'm3u'
+                  ? "Provider's playlist has no `url-tvg`/`x-tvg-url` header. EPG must come from a public source."
+                  : "Provider credentials don't expose a /xmltv.php endpoint."}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {source.last_refresh_error && (
         <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-200 font-mono leading-relaxed break-words">
           {source.last_refresh_error}
@@ -441,12 +585,36 @@ const AccountRow = ({
           )}
         </div>
 
-        {/* Col 2 — Channels (right-aligned, mono) */}
-        <NumCell
-          value={channelCount ? channelCount.toLocaleString() : null}
-          tone={channelCount ? 'default' : 'muted'}
-          title={channelCount ? `${channelCount.toLocaleString()} channels` : 'No channel count yet'}
-        />
+        {/* Col 2 — Channels (right-aligned, mono) + tiny EPG dot.
+            The dot reads the bundled_epg_status at a glance:
+            emerald = ok, cyan-pulse = pending, rose = failed,
+            slate = no_url / never. Hovering shows the tooltip with
+            counts; clicking the row to expand reveals the full
+            Provider EPG panel with the refresh button. */}
+        <div className="flex items-center justify-end gap-2 min-w-0">
+          <NumCell
+            value={channelCount ? channelCount.toLocaleString() : null}
+            tone={channelCount ? 'default' : 'muted'}
+            title={channelCount ? `${channelCount.toLocaleString()} channels` : 'No channel count yet'}
+          />
+          {(source.type === 'xtream' || source.type === 'm3u') && (() => {
+            const s = bundledEpgView.status;
+            const meta = {
+              ok:      { color: 'bg-emerald-400', ring: 'ring-emerald-400/30', tip: `EPG OK · ${bundledEpgView.channelCount.toLocaleString()} ch · ${bundledEpgView.programCount.toLocaleString()} prog` },
+              pending: { color: 'bg-cyan-400 animate-pulse', ring: 'ring-cyan-400/30', tip: 'EPG refreshing…' },
+              failed:  { color: 'bg-rose-400', ring: 'ring-rose-400/30', tip: `EPG failed: ${bundledEpgView.error || 'unknown error'}` },
+              no_url:  { color: 'bg-slate-600', ring: 'ring-slate-700/40', tip: 'No bundled EPG URL discovered' }
+            };
+            const m = meta[s] || { color: 'bg-slate-700', ring: 'ring-slate-800/40', tip: 'Provider EPG not fetched yet' };
+            return (
+              <span
+                className={`h-2 w-2 rounded-full ${m.color} ring-2 ${m.ring}`}
+                title={m.tip}
+                aria-label={m.tip}
+              />
+            );
+          })()}
+        </div>
 
         {/* Col 3 — Expires (right-aligned, mono, tone tracks days-left) */}
         <NumCell

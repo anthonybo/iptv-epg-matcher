@@ -914,6 +914,53 @@ router.get('/alternate-feeds', requireAuth, async (req, res) => {
 });
 
 /**
+ * POST /api/iptv/sources/:sourceId/refresh-bundled-epg
+ *
+ * Manually trigger a bundled-EPG ingest for one IPTV source. Same
+ * pipeline that runs automatically after refresh-account-info, just
+ * exposed as a standalone endpoint so the UI can offer a "refresh
+ * EPG only" button (the user doesn't want to re-fetch 50k channels
+ * just to get a fresh program guide).
+ *
+ * Synchronous — response holds until ingest finishes (or fails) so
+ * the UI can render the new counts immediately. Typical run: 5-90s
+ * depending on EPG size. force=true re-runs discovery (bypasses the
+ * cached `bundled_epg_url`).
+ */
+router.post('/sources/:sourceId/refresh-bundled-epg', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const sourceId = parseInt(req.params.sourceId);
+        const force = req.body && req.body.force === true;
+
+        // Auth: confirm the source belongs to the caller.
+        const ownedRes = await postgresService.query(
+            'SELECT 1 FROM iptv_sources WHERE id = $1 AND user_id = $2',
+            [sourceId, userId]
+        );
+        if (ownedRes.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Source not found' });
+        }
+
+        const result = await bundledEpgService.ingestBundledEpgForSource(sourceId, { force });
+        const statusRow = await postgresService.query(
+            `SELECT bundled_epg_url, bundled_epg_status, bundled_epg_error,
+                    bundled_epg_channel_count, bundled_epg_program_count, bundled_epg_last_refreshed
+               FROM iptv_sources WHERE id = $1`,
+            [sourceId]
+        );
+        return res.json({
+            success: !!(result && result.success),
+            result,
+            status: statusRow.rows[0] || null
+        });
+    } catch (err) {
+        logger.error(`[refresh-bundled-epg] source ${req.params.sourceId} failed: ${err.message}`);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
  * PATCH /api/iptv/sources/:sourceId/auto-detect-live
  * Update auto-detect live setting for a source
  */
