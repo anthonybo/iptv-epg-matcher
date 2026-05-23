@@ -374,16 +374,30 @@ const EpgSourcesSummary = ({ sources = [], onSourcesUpdated }) => {
               currentSourceName = sourceMatch[3].trim();
             }
 
-            // Extract progress numbers like "Processed 65000 programs"
-            const programMatch = message.match(/Processed (\d+) programs/);
-            if (programMatch) {
-              progressInfo = `${parseInt(programMatch[1]).toLocaleString()} programs processed`;
+            // Extract live progress counts from the rolling SSE
+            // message. Backend emits formats like:
+            //   "[EPG.pw - US] Parsed 5,450 channels, 110,000 programs (streaming)"
+            //   "[Starlite EPG - UTC] Inserted 2,866 channels"
+            //   "[EPG.pw - US] Downloaded 150.80 MB..."
+            // Note the commas in the formatted numbers — the previous
+            // regex looked for /Processed (\d+)/ which never matched
+            // anything the parser actually emits, so progressInfo was
+            // permanently null.
+            const parsedMatch = message.match(
+              /Parsed ([\d,]+) channels?, ([\d,]+) programs?/i
+            );
+            if (parsedMatch) {
+              progressInfo = `${parsedMatch[1]} channels · ${parsedMatch[2]} programs`;
             }
 
-            // Extract channel info like "Processed 24189 channels"
-            const channelMatch = message.match(/Processed (\d+) channels/);
-            if (channelMatch) {
-              progressInfo = `${parseInt(channelMatch[1]).toLocaleString()} channels extracted`;
+            const insertedMatch = message.match(/Inserted ([\d,]+) channels?/i);
+            if (insertedMatch) {
+              progressInfo = `Inserted ${insertedMatch[1]} channels`;
+            }
+
+            const downloadedMatch = message.match(/Downloaded ([\d.]+)\s*MB/i);
+            if (downloadedMatch) {
+              progressInfo = `Downloaded ${downloadedMatch[1]} MB`;
             }
 
             // Update progress with real-time message from parser
