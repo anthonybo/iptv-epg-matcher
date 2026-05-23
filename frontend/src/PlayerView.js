@@ -36,6 +36,17 @@ const PlayerView = ({
   const [selectedFeed, setSelectedFeed] = useState(null);
   const [sourceName, setSourceName] = useState(null);
   const [videoQuality, setVideoQuality] = useState(null);
+  // Bumped whenever IPTVPlayer declares the stream dead (after the
+  // recovery state machine exhausts soft + full retries). Used as
+  // the IPTVPlayer's React key so a fresh remount happens — same
+  // pattern multi-view uses via _refreshKey. Without this hook,
+  // single-view freezes had no escape and the user was left
+  // staring at a frozen frame.
+  const [playerRefreshKey, setPlayerRefreshKey] = useState(0);
+  const handleStreamDead = (reason) => {
+    console.warn(`[player] stream declared dead (${reason || 'no reason'}) — auto-refreshing`);
+    setPlayerRefreshKey((k) => k + 1);
+  };
 
   const playerButtonClasses = (type) => [
     'inline-flex items-center justify-center rounded-xl border p-2.5 transition',
@@ -296,11 +307,24 @@ const PlayerView = ({
           <div className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-4 shadow-2xl shadow-slate-950/40">
             {selectedChannel && sessionId ? (
               <IPTVPlayer
+                key={`${selectedChannel.id || selectedChannel.tvgId}-${playerRefreshKey}`}
                 sessionId={sessionId}
                 selectedChannel={selectedChannel}
                 playbackMethod={playerType}
                 matchedChannels={matchedChannels}
                 onQualityDetected={setVideoQuality}
+                onStreamDead={handleStreamDead}
+                // Opt single-view into the resilient backend proxy
+                // — same pipeline multi-view uses. Without this, the
+                // browser connects directly to the upstream URL
+                // (e.g. lordstreams.live), and every upstream pipe
+                // drop forces the legacy frontend recovery loop (6
+                // retries + 3 fresh starts ≈ 90s of trying the same
+                // dead URL) before notifyStreamDead can fire and
+                // remount the player. With it, the backend's ~30s
+                // retry budget handles reconnects transparently so
+                // the player never sees the drop.
+                useResilientProxy={true}
               />
             ) : (
               <div className="flex h-96 flex-col items-center justify-center gap-4 rounded-2xl border border-slate-800 bg-slate-950 text-slate-500">

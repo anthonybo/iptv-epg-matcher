@@ -82,14 +82,18 @@ export default function useStreamRecovery({
   const RECOVERY_WINDOW_MS = theatreMode ? 30000 : 60000;
   const MAX_RECOVERIES_IN_WINDOW = theatreMode ? 4 : 6;
   // Resilient proxy mode: backend has ~30-35s retry budget (20s stale
-  // threshold + 3 retries with backoff). We've tightened this twice
-  // now — first 45s → 25s, then 25s → 15s after user reports of
-  // 30-60s freezes. 15s catches a dead backend pipe quickly enough
-  // that auto-refresh (via handleStreamDead → refreshStream in
-  // MultiViewPage) can fully restore the stream inside a 25-30s
-  // total window. Non-resilient mode keeps its 120s ceiling as a
-  // safety net because there's no separate backend retry layer.
-  const MAX_STALE_TIME_MS = shouldUseResilientProxy ? 15000 : 120000;
+  // threshold + 3 retries with backoff). 15s catches a dead backend
+  // pipe quickly enough that auto-refresh (via handleStreamDead →
+  // refreshStream in MultiViewPage) can fully restore the stream
+  // inside a 25-30s total window.
+  //
+  // Non-resilient mode (single view, direct-to-upstream): used to
+  // keep a 120s ceiling, but that left the single-view player
+  // staring at a frozen frame for two full minutes before any
+  // escalation. Tightened to 25s — the buffer-drain fast-path now
+  // fires in this mode too (see "buffer drained" branch below) so
+  // we get out of a dead upstream pipe quickly.
+  const MAX_STALE_TIME_MS = shouldUseResilientProxy ? 15000 : 25000;
   const MAX_SOFT_RECOVERIES = 3;
 
   // Playhead-nudge thresholds. Shorter than the soft-recovery escalation
@@ -642,24 +646,42 @@ export default function useStreamRecovery({
           return;
         }
 
-        // Fast-path: buffer drained AND past freezeThreshold. No
-        // point sitting through the full MAX_STALE_TIME_MS waiting
-        // for a backend that already gave up — refresh now.
+        // Fast-path: buffer drained AND past freezeThreshold —
+        // upstream pipe is dead. Fires in BOTH modes:
+        //   - Resilient proxy: notifyStreamDead → parent (multi-view)
+        //     triggers refreshStream which re-spawns the backend
+        //     ffmpeg session.
+        //   - Direct upstream (single view): there's no parent
+        //     handler, so we self-recover by tearing down and
+        //     re-running attemptRecovery — same path the soft-
+        //     recovery loop would eventually reach but without
+        //     waiting through the 3-soft + 6-retry escalation chain
+        //     first. The user wasn't getting any escalation at all
+        //     in this branch before (logs showed back-to-back
+        //     "freeze begins" with no recovery).
         if (
-          shouldUseResilientProxy &&
           !hasFutureBuffer &&
           timeSinceLastPlaying >= freezeThreshold
         ) {
           log(
             'error',
-            `[health] buffer drained + frozen ${timeSinceLastPlaying}ms — backend pipe dead, escalating to refresh now`,
-            { currentTime, futureBufferS }
+            `[health] buffer drained + frozen ${timeSinceLastPlaying}ms — upstream pipe dead, escalating`,
+            { currentTime, futureBufferS, resilient: shouldUseResilientProxy }
           );
           clearInterval(healthCheckIntervalRef.current);
           healthCheckIntervalRef.current = null;
           streamUnstableRef.current = true;
           cleanupPlayer();
           setError('Stream unavailable. Refreshing…');
+          // Fire notifyStreamDead in BOTH modes. Previously the
+          // non-resilient branch called attemptRecovery which spent
+          // ~90s burning through 6 retries + 3 fresh starts on the
+          // same dead URL before eventually reaching notifyStreamDead.
+          // The user saw constant freezes with no recovery for over
+          // a minute. Now the dead-pipe signal hits the parent (the
+          // PlayerView / MultiViewPage handler) immediately and a
+          // fresh remount is triggered ~3s later — same UX both
+          // modes get from the resilient proxy path.
           notifyStreamDead('buffer_drained');
           return;
         }
