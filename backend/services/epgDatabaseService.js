@@ -9,6 +9,59 @@ const { pool } = require('./postgresService');
 const copyFrom = require('pg-copy-streams').from;
 const { Readable } = require('stream');
 
+// ============================================================================
+// epg_programs partition lifecycle (post-migration 034)
+//
+// After migration 034 epg_programs is LIST-partitioned by source_id. Each
+// EPG source needs its own partition table (epg_programs_p_<source_id>)
+// provisioned before any row can land in it; otherwise rows fall into the
+// DEFAULT partition and the per-source TRUNCATE optimisation can't apply.
+//
+// Both helpers are no-ops on databases that haven't run migration 034 yet
+// (epg_programs is still a regular table → CREATE TABLE PARTITION OF
+// would error). The guard checks pg_class.relkind = 'p'.
+// ============================================================================
+
+const PARTITION_KEY_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+async function isProgramsPartitioned() {
+  const r = await pool.query(
+    `SELECT 1 FROM pg_class WHERE relname = 'epg_programs' AND relkind = 'p'`
+  );
+  return r.rows.length > 0;
+}
+
+async function ensureProgramsPartition(sourceId) {
+  if (!sourceId || typeof sourceId !== 'string') return null;
+  if (!PARTITION_KEY_RE.test(sourceId)) {
+    logger.warn(`[ensureProgramsPartition] sourceId "${sourceId}" fails identifier safety check; falling through to DEFAULT partition`);
+    return null;
+  }
+  if (!(await isProgramsPartitioned())) return null;
+  const partitionName = `epg_programs_p_${sourceId}`;
+  const exists = await pool.query(
+    `SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r'`,
+    [partitionName]
+  );
+  if (exists.rows.length > 0) return partitionName;
+  // sourceId is hex-safe per regex above; LIST partition values can't
+  // be supplied as bind parameters so direct interpolation is the
+  // documented pattern (see migration 034 step 5).
+  await pool.query(
+    `CREATE TABLE "${partitionName}" PARTITION OF epg_programs FOR VALUES IN ('${sourceId}')`
+  );
+  logger.info(`[epg] created partition ${partitionName} for source ${sourceId}`);
+  return partitionName;
+}
+
+async function dropProgramsPartition(sourceId) {
+  if (!sourceId || typeof sourceId !== 'string') return;
+  if (!PARTITION_KEY_RE.test(sourceId)) return;
+  if (!(await isProgramsPartitioned())) return;
+  const partitionName = `epg_programs_p_${sourceId}`;
+  await pool.query(`DROP TABLE IF EXISTS "${partitionName}"`);
+}
+
 const epgDatabaseService = {
   /**
    * Initialize database connection (no-op for PostgreSQL, pool already initialized)
@@ -16,6 +69,11 @@ const epgDatabaseService = {
   async init() {
     logger.info('PostgreSQL EPG service initialized (using shared pool)');
   },
+
+  // Expose lifecycle helpers so the parser service + tests can drive them.
+  ensureProgramsPartition,
+  dropProgramsPartition,
+  isProgramsPartitioned,
 
   /**
    * Save EPG source data
@@ -45,7 +103,18 @@ const epgDatabaseService = {
       ];
 
       const result = await pool.query(query, values);
-      return result.rows[0];
+      const saved = result.rows[0];
+      // Provision the epg_programs partition for this source so the
+      // first parse run can TRUNCATE+COPY into it directly rather
+      // than landing rows in the DEFAULT partition. Safe no-op on
+      // pre-034 databases (regular table) and on rerun for sources
+      // whose partition already exists.
+      try {
+        await ensureProgramsPartition(saved.id);
+      } catch (e) {
+        logger.warn(`[saveSource] failed to provision partition for ${saved.id}: ${e.message}`);
+      }
+      return saved;
     } catch (error) {
       logger.error(`Error saving EPG source: ${error.message}`);
       throw error;
@@ -255,40 +324,80 @@ const epgDatabaseService = {
   /**
    * Save multiple programs in bulk (ultra-fast COPY method)
    */
+  /**
+   * Bulk-save EPG programs via COPY.
+   *
+   * Post-migration 034 (epg_programs partitioned by source_id), the
+   * upstream parser flow is:
+   *   1. epgParserService.parseEpgSource TRUNCATEs the source's
+   *      partition (epg_programs_p_<source_id>) once at the start
+   *   2. xmltvParser streams programs in 10k-row batches and calls
+   *      savePrograms(batch) for each
+   *
+   * Because step 1 emptied the partition, step 2 has nothing to
+   * conflict with — we can COPY straight into epg_programs (the
+   * partition router places each row by its source_id) and skip the
+   * temp-table + INSERT...ON CONFLICT round-trip entirely. That UPSERT
+   * was the bottleneck: ~15-20s per 10k programs because every row
+   * paid for a PK lookup + 7 index updates on the global table.
+   *
+   * For safety we keep the old path as a fallback on pre-034
+   * databases where epg_programs is still a regular (non-partitioned)
+   * table — the UPSERT is needed there because we can't TRUNCATE
+   * per-source without DELETE-ing first.
+   *
+   * The streaming COPY format and category/description escaping are
+   * lifted verbatim from the pre-034 implementation. Don't change the
+   * Readable.from(...) → copyFrom pipeline without verifying it
+   * survives the same edge cases (long descriptions, HTML in
+   * categories, NULL channel_id, etc.).
+   */
   async savePrograms(programs) {
     if (!programs || programs.length === 0) {
       return { acknowledged: true, modifiedCount: 0 };
     }
 
+    const partitioned = await isProgramsPartitioned();
     const client = await pool.connect();
 
     try {
-      // Use COPY for 10-100x faster bulk insert
       await client.query('BEGIN');
 
-      // Create temporary table
+      // Always use a temp table — both pre-034 (target=global) and
+      // post-034 (target=partition). The temp table absorbs intra-
+      // source duplicate IDs (XMLTV feeds occasionally repeat a
+      // programme tag across batches) and lets us INSERT...ON
+      // CONFLICT DO NOTHING into the destination. Without it the
+      // partition-direct COPY would abort the whole refresh on the
+      // first cross-batch dupe — exactly what failed on Starlite
+      // EPG (see backend logs 2026-05-22 16:29:51).
+      //
+      // CREATE TEMP TABLE on each call is ~5-10ms — negligible
+      // compared to the 1-2s COPY itself. The temp drops on commit
+      // so there's no accumulation.
       await client.query(`
         CREATE TEMP TABLE temp_epg_programs (LIKE epg_programs INCLUDING DEFAULTS)
         ON COMMIT DROP
       `);
+      const copyTarget = 'temp_epg_programs';
 
-      // Prepare CSV data for COPY - stream line-by-line to avoid string length limits
-      // Format: id, channel_id, source_id, title, description, start_time, stop_time, categories
+      // Prepare CSV data for COPY - stream line-by-line to avoid
+      // string length limits. Format columns must match the COPY
+      // statement below.
       function* generateCSVLines() {
         for (const program of programs) {
-          // Build PostgreSQL array - strip HTML and problematic characters from categories
+          // Build PostgreSQL array - strip HTML and problematic
+          // characters from categories.
           let categoriesValue = '{}';
           if (program.categories && program.categories.length > 0) {
             const cleanedCategories = program.categories.map(c => {
-              // Strip HTML tags and clean the string
               return String(c)
                 .replace(/<[^>]*>/g, '')  // Remove HTML tags
                 .replace(/&[^;]+;/g, '')  // Remove HTML entities
                 .trim();
-            }).filter(c => c.length > 0);  // Remove empty strings
+            }).filter(c => c.length > 0);
 
             if (cleanedCategories.length > 0) {
-              // Build array with proper escaping: only escape backslashes and quotes
               const escapedCats = cleanedCategories.map(c =>
                 `"${c.replace(/\\/g, '\\\\\\\\').replace(/"/g, '\\\\"')}"`
               );
@@ -301,15 +410,15 @@ const epgDatabaseService = {
             program.channelId || '',
             program.sourceId || '',
             program.title || '',
-            (program.description || '').substring(0, 10000), // Limit description to 10K chars
+            (program.description || '').substring(0, 10000),
             program.start ? new Date(program.start).toISOString() : '',
             program.stop ? new Date(program.stop).toISOString() : '',
             categoriesValue
           ];
 
-          // Escape values for COPY format (but NOT categories - already done)
+          // Escape values for COPY format (but NOT categories — already escaped above).
           const escapedValues = values.map((v, idx) => {
-            if (idx === 7) return v;  // Categories already escaped
+            if (idx === 7) return v;
             return String(v).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
           });
 
@@ -317,76 +426,73 @@ const epgDatabaseService = {
         }
       }
 
-      // Create readable stream from CSV data (no string concatenation!)
       const stream = Readable.from(generateCSVLines());
-
-      // Use COPY to load data into temp table (super fast!)
       const copyStream = client.query(copyFrom(`
-        COPY temp_epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories)
+        COPY ${copyTarget} (id, channel_id, source_id, title, description, start_time, stop_time, categories)
         FROM STDIN
       `));
 
-      // Pipe data to PostgreSQL with proper error handling
       await new Promise((resolve, reject) => {
         let finished = false;
-
-        const cleanup = () => {
-          try {
-            stream.destroy();
-          } catch (e) {
-            // Ignore cleanup errors
-          }
-        };
-
-        const onFinish = () => {
-          if (!finished) {
-            finished = true;
-            resolve();
-          }
-        };
-
-        const onError = (err) => {
-          if (!finished) {
-            finished = true;
-            cleanup();
-            reject(err);
-          }
-        };
-
-        // Handle errors from both streams
+        const cleanup = () => { try { stream.destroy(); } catch (e) {} };
+        const onFinish = () => { if (!finished) { finished = true; resolve(); } };
+        const onError = (err) => { if (!finished) { finished = true; cleanup(); reject(err); } };
         stream.on('error', onError);
         copyStream.on('error', onError);
         copyStream.on('finish', onFinish);
-
-        // Pipe the data
         stream.pipe(copyStream);
       });
 
-      // Upsert from temp table to main table
-      // Use DISTINCT ON to handle duplicate program IDs in source data
-      const result = await client.query(`
-        INSERT INTO epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories, last_updated)
-        SELECT DISTINCT ON (id) id, channel_id, source_id, title, description, start_time, stop_time, categories, CURRENT_TIMESTAMP
-        FROM temp_epg_programs
-        ON CONFLICT (id) DO UPDATE SET
-          channel_id = EXCLUDED.channel_id,
-          source_id = EXCLUDED.source_id,
-          title = EXCLUDED.title,
-          description = EXCLUDED.description,
-          start_time = EXCLUDED.start_time,
-          stop_time = EXCLUDED.stop_time,
-          categories = EXCLUDED.categories,
-          last_updated = CURRENT_TIMESTAMP
-      `);
+      let modifiedCount;
+      if (partitioned) {
+        // Post-034: INSERT from temp into the partitioned parent.
+        // Partition routing auto-places each row by source_id. The
+        // ON CONFLICT target is the COMPOSITE PK (id, source_id) —
+        // matches the partition's local PK created in migration 034.
+        // DO NOTHING (vs DO UPDATE in the pre-034 fallback) — the
+        // partition was TRUNCATEd at the start of the refresh, so
+        // any conflict here is an intra-source duplicate that we
+        // want to silently discard (NOT overwrite, which would be
+        // wasted work). DISTINCT ON within the SELECT swallows
+        // intra-batch dupes; ON CONFLICT handles the cross-batch
+        // case.
+        const result = await client.query(`
+          INSERT INTO epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories, last_updated)
+          SELECT DISTINCT ON (id, source_id) id, channel_id, source_id, title, description, start_time, stop_time, categories, CURRENT_TIMESTAMP
+          FROM temp_epg_programs
+          ON CONFLICT (id, source_id) DO NOTHING
+        `);
+        modifiedCount = result.rowCount;
+      } else {
+        // Pre-034 fallback path — UPSERT from temp into the global
+        // table, with DISTINCT ON to swallow intra-batch dupes.
+        const result = await client.query(`
+          INSERT INTO epg_programs (id, channel_id, source_id, title, description, start_time, stop_time, categories, last_updated)
+          SELECT DISTINCT ON (id) id, channel_id, source_id, title, description, start_time, stop_time, categories, CURRENT_TIMESTAMP
+          FROM temp_epg_programs
+          ON CONFLICT (id) DO UPDATE SET
+            channel_id = EXCLUDED.channel_id,
+            source_id = EXCLUDED.source_id,
+            title = EXCLUDED.title,
+            description = EXCLUDED.description,
+            start_time = EXCLUDED.start_time,
+            stop_time = EXCLUDED.stop_time,
+            categories = EXCLUDED.categories,
+            last_updated = CURRENT_TIMESTAMP
+        `);
+        modifiedCount = result.rowCount;
+      }
 
       await client.query('COMMIT');
 
-      logger.info(`Bulk saved ${programs.length} EPG programs using COPY (ultra-fast)`);
+      logger.info(
+        `Bulk saved ${programs.length} EPG programs using COPY (${partitioned ? 'direct partition' : 'temp+upsert fallback'})`
+      );
 
       return {
         acknowledged: true,
-        modifiedCount: result.rowCount,
-        upsertedCount: result.rowCount
+        modifiedCount,
+        upsertedCount: modifiedCount
       };
     } catch (error) {
       await client.query('ROLLBACK');

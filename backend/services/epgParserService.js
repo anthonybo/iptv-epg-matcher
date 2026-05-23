@@ -89,14 +89,27 @@ async function parseEpgSource(sourceConfig, options = {}) {
       programCount: 0
     });
 
-    // 5. Per-source replace: delete only this source's existing rows so the
-    //    guide stays available for other sources while this one refreshes.
-    //    Autovacuum is explicitly paused during parseAllSources (see Option B
-    //    in plan), so the dead tuples generated here don't trigger a
-    //    concurrent VACUUM that fights the refresh for I/O.
+    // 5. Per-source replace: clear only this source's existing rows
+    //    so the guide stays available for other sources while this
+    //    one refreshes.
+    //
+    //    Post-034: epg_programs is partitioned by source_id. We
+    //    TRUNCATE the source's partition instead of DELETE-ing —
+    //    instant, no dead tuples, sibling partitions untouched. The
+    //    epgDatabaseService.ensureProgramsPartition call is a no-op
+    //    on pre-034 databases; if the partition exists we TRUNCATE
+    //    it, otherwise we fall back to the old DELETE path.
     if (STREAMING_ENABLED) {
       if (onProgress) onProgress(`Clearing old data for ${sourceConfig.name}...`);
-      await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+      const partitionName = await epgDatabaseService.ensureProgramsPartition(sourceId);
+      if (partitionName) {
+        // ONLY clause keeps TRUNCATE scoped to the partition itself —
+        // without it Postgres would cascade-truncate the parent's
+        // partitions which would be catastrophic.
+        await pool.query(`TRUNCATE TABLE ONLY "${partitionName}"`);
+      } else {
+        await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+      }
       await pool.query('DELETE FROM epg_channels WHERE source_id = $1', [sourceId]);
     }
 
@@ -144,13 +157,19 @@ async function parseEpgSource(sourceConfig, options = {}) {
     const duration = Date.now() - startTime;
     logger.error(`[EPG Parser] Failed to process ${sourceConfig.name}: ${error.message}`);
 
-    // In streaming mode we've already deleted old rows and may have streamed
-    // partial new rows before failing. Clean those up so the source ends up
-    // empty rather than half-populated.
+    // In streaming mode we've already cleared old rows and may have
+    // streamed partial new rows before failing. Clean those up so
+    // the source ends up empty rather than half-populated. Use the
+    // same partition-TRUNCATE-or-DELETE strategy as the success path.
     if (STREAMING_ENABLED) {
       try {
         const sourceId = generateSourceId(sourceConfig.url);
-        await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+        const partitionName = await epgDatabaseService.ensureProgramsPartition(sourceId);
+        if (partitionName) {
+          await pool.query(`TRUNCATE TABLE ONLY "${partitionName}"`);
+        } else {
+          await pool.query('DELETE FROM epg_programs WHERE source_id = $1', [sourceId]);
+        }
         await pool.query('DELETE FROM epg_channels WHERE source_id = $1', [sourceId]);
       } catch (cleanupErr) {
         logger.warn(`[EPG Parser] Failure-cleanup error for ${sourceConfig.name}: ${cleanupErr.message}`);
