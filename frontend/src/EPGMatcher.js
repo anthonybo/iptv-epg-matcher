@@ -489,19 +489,29 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                 
                 if (response.data && Array.isArray(response.data.results)) {
                     const results = response.data.results;
-                    
-                    // Format and store the search results
+
+                    // Format and store the search results. CRITICAL:
+                    // `score` MUST be carried through so the
+                    // "Best Match" sort below (sortResults() in this
+                    // file) can honor the backend ranking. Without it
+                    // the sort falls back to alphabetical and
+                    // "[USA] USA Network" / "ACC Network" land at
+                    // the top of a "USA NHL Network" search. Same
+                    // story for programCount/program_count — the
+                    // backend returns snake_case, so we have to
+                    // accept either form.
                     setSearchResults(results.map(result => ({
                         id: result.id || result.channelId || '',
                         name: result.name || result.channelName || result.display_name || '',
                         icon: result.icon || result.logo || '',
                         source_name: result.source_name || 'Unknown',
                         source_id: result.source_id || '',
-                        programCount: result.programCount || 0,
+                        score: typeof result.score === 'number' ? result.score : null,
+                        programCount: result.programCount ?? result.program_count ?? 0,
                         currentProgram: result.currentProgram || result.current_program || null,
                         title: result.title || (result.currentProgram && result.currentProgram.title) || null
                     })));
-                    
+
                     if (results.length === 0) {
                         setSearchStatus(`No results found for "${term}"`);
                     } else {
@@ -530,15 +540,18 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                     
                     if (debugResponse.data && Array.isArray(debugResponse.data.results)) {
                         const results = debugResponse.data.results;
-                        
-                        // Format and store the search results
+
+                        // Same field-passthrough rules as the
+                        // primary mapper above — `score` and the
+                        // snake_case fallback for program_count.
                         setSearchResults(results.map(result => ({
                             id: result.id || result.channelId || '',
                             name: result.name || result.channelName || result.display_name || '',
                             icon: result.icon || result.logo || '',
                             source_name: result.source_name || 'Unknown',
                             source_id: result.source_id || '',
-                            programCount: result.programCount || 0,
+                            score: typeof result.score === 'number' ? result.score : null,
+                            programCount: result.programCount ?? result.program_count ?? 0,
                             currentProgram: result.currentProgram || result.current_program || null,
                             title: result.title || (result.currentProgram && result.currentProgram.title) || null
                         })));
@@ -909,8 +922,19 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
             }
         }
 
-        // Re-fetch EPG data with the new ID
-        fetchEpgData(epgChannel.id);
+        // Re-fetch EPG data using the IPTV channel ID — NOT the EPG
+        // channel ID. The backend's /epg/:session?channelId=… endpoint
+        // looks up the saved match (epg_matches table) by IPTV channel
+        // id and returns the linked EPG channel's programs. Passing
+        // the EPG id directly skips that lookup and falls into a path
+        // that returns {channelInfo:null, programs:[]} — exactly the
+        // bug visible in backend logs around 07:57:43, where the
+        // EpgProgramDisplay then renders nothing because it gates on
+        // epgData.channel which is null.
+        const iptvIdForFetch =
+            (selectedChannel && (selectedChannel.id || selectedChannel.tvgId))
+            || epgChannel.id;
+        fetchEpgData(iptvIdForFetch);
     };
 
     // Sort search results based on selected method
@@ -1279,10 +1303,23 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
 
     return (
         <div className={compactMode ? "epg-matcher-container flex h-full flex-col overflow-hidden p-3" : "epg-matcher-container mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl"}>
-            {/* Header - Hidden in compact mode */}
+            {/* ─── Header strip ─────────────────────────────────────
+                Compact mono-caps label + inline chip for the IPTV
+                channel being matched. Replaces the giant "EPG
+                Information" h3 — every pixel of this panel matters,
+                and the channel context is what the user needs to
+                see while choosing a match. */}
             {!compactMode && (
-                <div className="mb-4 flex items-center justify-between border-b border-slate-800 pb-3">
-                    <h3 className="m-0 text-xl font-semibold text-slate-100">EPG Information</h3>
+                <div className="mb-4 flex items-center gap-3 border-b border-slate-800/80 pb-3">
+                    <span className="inline-flex h-6 items-center rounded bg-cyan-500/[0.08] px-2 ring-1 ring-cyan-500/30 font-mono text-[10px] uppercase tracking-[0.22em] text-cyan-200">
+                        EPG Match
+                    </span>
+                    {selectedChannel?.name && (
+                        <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.16em] text-slate-500">
+                            <span className="text-slate-700">›</span>
+                            <span className="truncate text-slate-300">{selectedChannel.name}</span>
+                        </span>
+                    )}
                 </div>
             )}
 
@@ -1291,141 +1328,65 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
 
             {/* Error message */}
             {error && (
-                <div className={compactMode ? "mb-3" : "mb-6"}>
+                <div className={compactMode ? "mb-3" : "mb-4"}>
                     <StatusDisplay message={error} type="error" />
                 </div>
             )}
 
             {/* Status message (success/info/warning) */}
             {status && statusType !== 'error' && (
-                <div className={compactMode ? "mb-3" : "mb-6"}>
+                <div className={compactMode ? "mb-3" : "mb-4"}>
                     <StatusDisplay message={status} type={statusType} />
                 </div>
             )}
 
-            {/* Search Form - Hidden in compact mode (already watching a channel) */}
+            {/* ─── Search bar + suggestions + post-match callout ────
+                Trimmed-down search row (no surrounding card frame).
+                The bordered results panel below provides enough
+                visual structure on its own; an outer container here
+                would just stack two cards. */}
             {!compactMode && (
-            <div className="mb-6 rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner">
-                <form onSubmit={handleSearchSubmit} className="flex flex-col gap-3">
-                    <div className="flex items-center gap-3">
-                        <input
-                            type="text"
-                            value={epgSearch}
-                            onChange={(e) => setEpgSearch(e.target.value)}
-                            placeholder="Search EPG channels..."
-                            className="flex-1 rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
-                        />
+                <div className="mb-4 space-y-2.5">
+                    <form onSubmit={handleSearchSubmit} className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                            <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-500">
+                                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                    <circle cx="11" cy="11" r="7" />
+                                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                </svg>
+                            </div>
+                            <input
+                                type="text"
+                                value={epgSearch}
+                                onChange={(e) => setEpgSearch(e.target.value)}
+                                placeholder="Search EPG channels…"
+                                className="h-9 w-full rounded-md border border-slate-800/80 bg-slate-950 pl-9 pr-3 text-[13px] text-slate-100 placeholder:text-slate-600 transition focus:border-cyan-500/50 focus:outline-none focus:ring-1 focus:ring-cyan-500/30"
+                            />
+                        </div>
                         <button
                             type="submit"
                             disabled={loading || !epgSearch.trim()}
-                            className="inline-flex items-center gap-2 rounded-lg border border-teal-500/60 bg-teal-500/20 px-4 py-2 text-sm font-semibold text-teal-100 transition hover:border-teal-400 hover:bg-teal-500/30 focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-800/60 disabled:text-slate-500"
-                        >
-                            <svg
-                                xmlns="http://www.w3.org/2000/svg"
-                                className="h-4 w-4"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                            >
-                                <circle cx="11" cy="11" r="8"></circle>
-                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                            </svg>
-                            {loading ? 'Searching...' : 'Search'}
-                        </button>
-                    </div>
-
-                    {/* Add to Guide Button */}
-                    {epgData && epgData.channel && (
-                        <div className="flex items-center gap-3 pt-3 border-t border-slate-800">
-                            <div className="flex-1 text-xs text-slate-400">
-                                Channel has EPG data. Add it to your Guide/IPTV Editor.
-                            </div>
-                            <button
-                                type="button"
-                                onClick={handleAddToGuide}
-                                disabled={!selectedChannel || loading || addedToGuide}
-                                className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition focus:outline-none focus:ring-2 ${
-                                    addedToGuide
-                                        ? 'border-green-500/60 bg-green-500/20 text-green-100 cursor-default'
-                                        : 'border-emerald-500/60 bg-emerald-500/20 text-emerald-100 hover:border-emerald-400 hover:bg-emerald-500/30 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-800/60 disabled:text-slate-500'
-                                }`}
-                                title={addedToGuide ? "Channel added! Check IPTV Editor" : "Add this channel with its EPG data to your Guide"}
-                            >
-                                {loading ? (
-                                    <>
-                                        <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                        Adding...
-                                    </>
-                                ) : addedToGuide ? (
-                                    <>
-                                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                        </svg>
-                                        Added to Guide!
-                                    </>
-                                ) : (
-                                    <>
-                                        <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                                        </svg>
-                                        Add to Guide
-                                    </>
-                                )}
-                            </button>
-                        </div>
-                    )}
-
-                    {/* Use Dummy EPG Button */}
-                    <div className="flex items-center gap-3 pt-3 border-t border-slate-800">
-                        <div className="flex-1 text-xs text-slate-400">
-                            Can't find a match? Add this channel with dummy EPG data instead.
-                        </div>
-                        <button
-                            type="button"
-                            onClick={handleDummyEpgMatch}
-                            disabled={!selectedChannel || loading || dummyEpgAdded}
-                            className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold transition focus:outline-none focus:ring-2 ${
-                                dummyEpgAdded
-                                    ? 'border-green-500/60 bg-green-500/20 text-green-100 cursor-default'
-                                    : 'border-purple-500/60 bg-purple-500/20 text-purple-100 hover:border-purple-400 hover:bg-purple-500/30 focus:ring-purple-500 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-800/60 disabled:text-slate-500'
-                            }`}
-                            title={dummyEpgAdded ? "Channel added! Check IPTV Editor" : "Add channel with dummy EPG (shows channel name as program info)"}
+                            className="inline-flex h-9 items-center gap-1.5 rounded-md border border-cyan-500/40 bg-cyan-500/[0.08] px-3 font-mono text-[10.5px] uppercase tracking-[0.18em] text-cyan-200 transition hover:border-cyan-400/60 hover:bg-cyan-500/[0.14] focus:outline-none focus:ring-1 focus:ring-cyan-500/30 disabled:cursor-not-allowed disabled:border-slate-800/80 disabled:bg-slate-900/40 disabled:text-slate-500"
                         >
                             {loading ? (
-                                <>
-                                    <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                    </svg>
-                                    Adding...
-                                </>
-                            ) : dummyEpgAdded ? (
-                                <>
-                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                    </svg>
-                                    Added!
-                                </>
+                                <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                                    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                                    <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                                </svg>
                             ) : (
-                                <>
-                                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                                    </svg>
-                                    Use Dummy EPG
-                                </>
+                                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                    <circle cx="11" cy="11" r="7" />
+                                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                </svg>
                             )}
+                            {loading ? 'Searching' : 'Search'}
                         </button>
-                    </div>
+                    </form>
 
+                    {/* Suggestion chips — hairline-bordered, mono caps */}
                     {suggestedIds.length > 0 && (
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className="mr-2 text-xs text-slate-500">Suggestions:</span>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="mr-1 font-mono text-[9.5px] uppercase tracking-[0.22em] text-slate-600">Try</span>
                             {suggestedIds.slice(0, 5).map((suggestion, index) => (
                                 <button
                                     key={index}
@@ -1434,124 +1395,370 @@ const EPGMatcher = ({ sessionId, selectedChannel, onEpgMatch, matchedChannels = 
                                         setEpgSearch(suggestion.id);
                                         searchEpgChannels(suggestion.id);
                                     }}
-                                    className="cursor-pointer whitespace-nowrap rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-900 hover:text-white"
+                                    className="inline-flex h-6 items-center rounded border border-slate-800/80 bg-slate-900/40 px-2 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-400 transition hover:border-cyan-500/40 hover:bg-cyan-500/[0.06] hover:text-cyan-200"
                                 >
                                     {suggestion.id}
                                 </button>
                             ))}
                         </div>
                     )}
-                </form>
-            </div>
+
+                    {/* Post-match Save-to-Guide affordance — only when a
+                        match has been confirmed (epgData populated).
+                        Restyled to the chip vocabulary; lives here
+                        rather than in the search form because it's a
+                        follow-on action, not a search control. */}
+                    {epgData && epgData.channel && (
+                        <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-500/25 bg-emerald-500/[0.05] px-3 py-2">
+                            <div className="flex min-w-0 items-center gap-2 text-[12px]">
+                                <svg className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M5 12l5 5L20 7" />
+                                </svg>
+                                <span className="truncate text-slate-200">Matched.</span>
+                                <span className="truncate text-slate-500">Save to Guide for later.</span>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleAddToGuide}
+                                disabled={!selectedChannel || loading || addedToGuide}
+                                className={`inline-flex h-7 flex-shrink-0 items-center gap-1.5 rounded-md border px-2.5 font-mono text-[10px] uppercase tracking-[0.18em] transition disabled:cursor-not-allowed ${
+                                    addedToGuide
+                                        ? 'border-emerald-500/40 bg-emerald-500/[0.14] text-emerald-200'
+                                        : 'border-emerald-500/40 bg-emerald-500/[0.06] text-emerald-200 hover:border-emerald-400/70 hover:bg-emerald-500/[0.16] disabled:opacity-50'
+                                }`}
+                                title={addedToGuide ? "Channel saved — check IPTV Editor" : "Save this channel + EPG to your Guide"}
+                            >
+                                {loading ? (
+                                    <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                                        <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                                    </svg>
+                                ) : addedToGuide ? (
+                                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M5 12l5 5L20 7" />
+                                    </svg>
+                                ) : (
+                                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M12 5v14M5 12h14" />
+                                    </svg>
+                                )}
+                                {addedToGuide ? 'Saved' : 'Save to Guide'}
+                            </button>
+                        </div>
+                    )}
+                </div>
             )}
 
-            {/* Search Results - Hidden in compact mode */}
-            {!compactMode && (searching ? (
-                <div className="py-5 text-center">
-                    <div className="mb-2 text-2xl">⏳</div>
-                    <p className="text-slate-400">Searching EPG data...</p>
-                </div>
-            ) : searchResults && searchResults.length > 0 ? (
-                <div className="mb-5">
-                    <div className="mb-3 flex items-center justify-between">
-                        <h4 className="m-0 text-lg font-semibold text-slate-100">Search Results</h4>
-                        <span className="text-sm text-slate-400">
-                            {searchResults.length} {searchResults.length === 1 ? 'match' : 'matches'} found
-                        </span>
-                    </div>
-
-                    {/* Filter and Sort Controls */}
-                    <div className="mb-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                        <div className="flex items-center gap-2">
-                            <label htmlFor="result-filter" className="text-sm font-medium text-slate-400">Filter:</label>
-                            <input
-                                id="result-filter"
-                                type="text"
-                                value={resultFilter}
-                                onChange={(e) => setResultFilter(e.target.value)}
-                                placeholder="Filter results..."
-                                className="w-48 rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
-                            />
+            {/* ─── Results panel ────────────────────────────────────
+                One bordered container for the whole result domain:
+                count + inline filter header → scrollable list →
+                sticky Dummy-EPG footer. Matches the rest of the
+                app's "card-with-footer-strip" vocabulary. */}
+            {!compactMode && (
+                <div className="overflow-hidden rounded-md border border-slate-800/70 bg-slate-950/60">
+                    {/* Result count + inline filter/sort (only when >3 results to filter) */}
+                    {!searching && searchResults && searchResults.length > 0 && (
+                        <div className="flex h-10 items-center justify-between gap-2 border-b border-slate-800/70 bg-slate-900/30 px-3">
+                            <div className="flex items-center gap-2">
+                                <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-500">
+                                    <span className="tabular-nums text-slate-100">{sortedSearchResults().length}</span>{' '}
+                                    {sortedSearchResults().length === 1 ? 'Match' : 'Matches'}
+                                </span>
+                                {resultFilter && (
+                                    <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-600">
+                                        of <span className="tabular-nums text-slate-400">{searchResults.length}</span>
+                                    </span>
+                                )}
+                            </div>
+                            {searchResults.length > 3 && (
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        value={resultFilter}
+                                        onChange={(e) => setResultFilter(e.target.value)}
+                                        placeholder="Filter…"
+                                        className="h-6 w-32 rounded border border-slate-800/80 bg-slate-950 px-2 text-[11px] text-slate-200 placeholder:text-slate-600 transition focus:border-cyan-500/40 focus:outline-none focus:ring-1 focus:ring-cyan-500/20"
+                                    />
+                                    <select
+                                        value={resultSortMethod}
+                                        onChange={(e) => setResultSortMethod(e.target.value)}
+                                        className="h-6 rounded border border-slate-800/80 bg-slate-950 pl-2 pr-1 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-300 focus:border-cyan-500/40 focus:outline-none"
+                                    >
+                                        <option value="match">By Match</option>
+                                        <option value="name">By Name</option>
+                                        <option value="programs">By Programs</option>
+                                    </select>
+                                </div>
+                            )}
                         </div>
-                        <div className="flex items-center gap-2">
-                            <label htmlFor="result-sort" className="text-sm font-medium text-slate-400">Sort by:</label>
-                            <select
-                                id="result-sort"
-                                value={resultSortMethod}
-                                onChange={(e) => setResultSortMethod(e.target.value)}
-                                className="rounded-md border border-slate-800 bg-slate-950 px-3 py-1.5 text-sm text-slate-100 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
-                            >
-                                <option value="match">Best Match</option>
-                                <option value="name">Channel Name</option>
-                                <option value="programs">Program Count</option>
-                            </select>
-                        </div>
-                    </div>
+                    )}
 
-                    <div className="max-h-[400px] overflow-y-auto rounded-lg border border-slate-800 bg-slate-900/40 shadow-sm">
-                        {sortedSearchResults().length > 0 ? (
-                            sortedSearchResults().map((result, index) => (
-                                <div
-                                    key={index}
-                                    className={`flex items-center justify-between gap-4 p-3 transition-colors ${
-                                        index < sortedSearchResults().length - 1 ? 'border-b border-slate-800/50' : ''
-                                    } ${index % 2 === 0 ? 'bg-slate-950/40' : 'bg-slate-900/40'} hover:bg-slate-800/50`}
-                                >
-                                    <div className="min-w-0 flex-1">
-                                        <div className="truncate font-medium text-slate-100">
-                                            {result.channelName || result.name || result.channelId}
+                    {/* Scroll body — one of four states.
+                        Height: 60vh tracks the viewport so a wider
+                        screen gets more visible rows; a narrow one
+                        still scrolls. Scrollbar styled thin + slate
+                        so macOS users see it without hovering (the
+                        default auto-hide scrollbar made the panel
+                        look unscrollable). overscroll-contain stops
+                        wheel events from leaking to the page once
+                        the user is inside the result list. */}
+                    <div className="max-h-[60vh] min-h-[200px] overflow-y-auto overscroll-contain [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
+                        {searching ? (
+                            /* Searching state */
+                            <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
+                                <div className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-800/80">
+                                    <svg className="h-4 w-4 animate-spin text-cyan-400" viewBox="0 0 24 24" fill="none">
+                                        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                                        <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                                    </svg>
+                                </div>
+                                <div className="space-y-1">
+                                    <div className="font-mono text-[10.5px] uppercase tracking-[0.22em] text-cyan-200">
+                                        Scanning EPG sources
+                                    </div>
+                                    {epgSources && epgSources.length > 0 && (
+                                        <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                                            across <span className="tabular-nums text-slate-300">{epgSources.length}</span> sources
                                         </div>
-                                        <div className="mt-0.5 flex items-center gap-2 text-sm text-slate-400">
-                                            <span className="inline-flex items-center rounded bg-teal-500/20 px-2 py-0.5 text-xs font-medium text-teal-200">
-                                                {result.source_name || 'Unknown Source'}
-                                            </span>
-                                            <span className="text-slate-700">·</span>
-                                            <span className="truncate text-slate-500">ID: {result.channelId || result.id}</span>
-                                        </div>
-                                        {(result.title || result.currentProgram) && (
-                                            <div className="mt-2 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1">
-                                                <div className="flex items-start gap-1.5">
-                                                    <svg className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                    </svg>
+                                    )}
+                                </div>
+                            </div>
+                        ) : searchResults && searchResults.length > 0 ? (
+                            sortedSearchResults().length > 0 ? (
+                                <ul className="divide-y divide-slate-800/60">
+                                    {sortedSearchResults().map((result, index) => {
+                                        const isBest = index === 0;
+                                        const channelName = result.channelName || result.name || result.channelId || 'Unknown';
+                                        const channelId = result.channelId || result.id || '';
+                                        const score = typeof result.score === 'number' ? result.score : 0;
+                                        // Confidence tier: ≥170 = full (3 bars), 130-169 = strong (2), <130 = weak (1)
+                                        const tier = score >= 170 ? 3 : score >= 130 ? 2 : 1;
+                                        // Monogram fallback when no channel logo URL — first 2 alphanumeric chars
+                                        const monogramSrc = String(channelName).replace(/[^A-Za-z0-9]/g, '');
+                                        const monogram = (monogramSrc.slice(0, 2) || '??').toUpperCase();
+                                        // Truncate long EPG ids (Schedules Direct ids can be 40+ chars)
+                                        const idDisplay = channelId.length > 26 ? channelId.slice(0, 24) + '…' : channelId;
+                                        const program = result.currentProgram;
+                                        const programTitle = (program && program.title) || result.title || null;
+
+                                        return (
+                                            <li key={index}>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleMatch(result)}
+                                                    className={`group relative flex w-full items-center gap-3 px-3 text-left transition ${
+                                                        isBest
+                                                            ? 'bg-emerald-500/[0.04] py-3 hover:bg-emerald-500/[0.08]'
+                                                            : 'py-2.5 hover:bg-slate-900/60'
+                                                    }`}
+                                                >
+                                                    {/* Accent left border — emerald for best, cyan on hover for others */}
+                                                    <span
+                                                        aria-hidden
+                                                        className={`absolute inset-y-0 left-0 transition-opacity ${
+                                                            isBest
+                                                                ? 'w-[3px] bg-emerald-400/80 opacity-100'
+                                                                : 'w-[2px] bg-cyan-400/70 opacity-0 group-hover:opacity-80'
+                                                        }`}
+                                                    />
+
+                                                    {/* Logo tile (or 2-letter monogram fallback) */}
+                                                    <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded-md bg-slate-900/70 ring-1 ring-slate-800/80">
+                                                        {result.icon ? (
+                                                            <img
+                                                                src={result.icon}
+                                                                alt=""
+                                                                className="h-full w-full object-contain"
+                                                                onError={(e) => {
+                                                                    e.currentTarget.style.display = 'none';
+                                                                    const fb = e.currentTarget.nextElementSibling;
+                                                                    if (fb) fb.style.display = '';
+                                                                }}
+                                                            />
+                                                        ) : null}
+                                                        <span
+                                                            className="font-mono text-[11px] uppercase tracking-[0.08em] text-slate-500"
+                                                            style={result.icon ? { display: 'none' } : undefined}
+                                                        >
+                                                            {monogram}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Middle column: name, source/id/prog, optional now-playing */}
                                                     <div className="min-w-0 flex-1">
-                                                        <div className="text-xs font-medium text-emerald-200">
-                                                            Currently Playing:
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="truncate text-[13.5px] font-medium text-slate-100">
+                                                                {channelName}
+                                                            </span>
+                                                            {isBest && (
+                                                                <span className="inline-flex h-4 flex-shrink-0 items-center rounded bg-emerald-500/15 px-1 font-mono text-[8.5px] uppercase tracking-[0.20em] text-emerald-200 ring-1 ring-emerald-400/30">
+                                                                    Best Match
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                        <div className="truncate text-sm font-medium text-emerald-100">
-                                                            {result.currentProgram?.title || result.title}
+                                                        <div className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500">
+                                                            <span className="text-slate-400">{result.source_name || 'Source'}</span>
+                                                            {channelId && (
+                                                                <>
+                                                                    <span className="mx-1.5 text-slate-700">·</span>
+                                                                    <span className="text-slate-600">ID</span>{' '}
+                                                                    <span className="text-slate-500">{idDisplay}</span>
+                                                                </>
+                                                            )}
+                                                            {typeof result.programCount === 'number' && result.programCount > 0 && (
+                                                                <>
+                                                                    <span className="mx-1.5 text-slate-700">·</span>
+                                                                    <span className="tabular-nums text-slate-400">{result.programCount}</span>{' '}
+                                                                    <span className="text-slate-600">prog</span>
+                                                                </>
+                                                            )}
                                                         </div>
-                                                        {result.currentProgram?.start && result.currentProgram?.stop && (
-                                                            <div className="mt-0.5 text-xs text-emerald-200/80">
-                                                                {new Date(result.currentProgram.start).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})} - {new Date(result.currentProgram.stop).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
+                                                        {programTitle && (
+                                                            <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[11.5px]">
+                                                                <svg className="h-3 w-3 flex-shrink-0 text-emerald-400/80" viewBox="0 0 24 24" fill="currentColor">
+                                                                    <path d="M8 5v14l11-7L8 5z" />
+                                                                </svg>
+                                                                <span className="truncate text-slate-300">{programTitle}</span>
+                                                                {program && program.start && program.stop && (
+                                                                    <span className="flex-shrink-0 font-mono text-[9.5px] uppercase tracking-[0.16em] tabular-nums text-slate-600">
+                                                                        {formatTime(program.start)}–{formatTime(program.stop)}
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                         )}
                                                     </div>
-                                                </div>
-                                            </div>
-                                        )}
+
+                                                    {/* Confidence meter — three vertical bars, signal-strength style.
+                                                        Reads at-a-glance whether the backend rated this a strong match. */}
+                                                    <div className="flex h-6 flex-shrink-0 items-end gap-[2px]" title={`Match strength ${tier}/3 (score ${score})`}>
+                                                        {[1, 2, 3].map((bar) => {
+                                                            const filled = bar <= tier;
+                                                            const heightClass = bar === 1 ? 'h-2' : bar === 2 ? 'h-4' : 'h-6';
+                                                            let colorClass;
+                                                            if (!filled) {
+                                                                colorClass = 'bg-slate-800';
+                                                            } else if (isBest) {
+                                                                colorClass = 'bg-emerald-400';
+                                                            } else if (tier >= 2) {
+                                                                colorClass = 'bg-cyan-400';
+                                                            } else {
+                                                                colorClass = 'bg-slate-500';
+                                                            }
+                                                            return <span key={bar} className={`w-[3px] rounded-sm ${heightClass} ${colorClass}`} />;
+                                                        })}
+                                                    </div>
+
+                                                    {/* Primary action chip — emerald on best, cyan-on-hover for others */}
+                                                    <span
+                                                        className={`flex-shrink-0 inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 font-mono text-[10px] uppercase tracking-[0.18em] transition ${
+                                                            isBest
+                                                                ? 'border-emerald-500/40 bg-emerald-500/[0.08] text-emerald-200 group-hover:border-emerald-400/70 group-hover:bg-emerald-500/[0.18]'
+                                                                : 'border-slate-700/80 bg-slate-900/50 text-slate-300 group-hover:border-cyan-500/50 group-hover:bg-cyan-500/[0.08] group-hover:text-cyan-200'
+                                                        }`}
+                                                    >
+                                                        <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                                            <path d="M5 12l5 5L20 7" />
+                                                        </svg>
+                                                        Use
+                                                    </span>
+                                                </button>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            ) : (
+                                <div className="px-4 py-10 text-center">
+                                    <div className="font-mono text-[10.5px] uppercase tracking-[0.22em] text-slate-400">
+                                        Filter hides every result
                                     </div>
-                                    <button
-                                        onClick={() => handleMatch(result)}
-                                        className="flex-shrink-0 rounded-md border border-emerald-500/60 bg-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-100 transition-colors hover:border-emerald-400 hover:bg-emerald-500/30 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                    >
-                                        Use This
-                                    </button>
+                                    <div className="mt-1 text-[12px] text-slate-500">
+                                        Clear the filter to see all {searchResults.length} matches.
+                                    </div>
                                 </div>
-                            ))
+                            )
+                        ) : searchStatus ? (
+                            /* No-results state */
+                            <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-slate-900/60 ring-1 ring-slate-800/80">
+                                    <svg className="h-4 w-4 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <circle cx="11" cy="11" r="7" />
+                                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                        <line x1="8" y1="11" x2="14" y2="11" />
+                                    </svg>
+                                </div>
+                                <div className="space-y-1">
+                                    <div className="font-mono text-[10.5px] uppercase tracking-[0.22em] text-slate-300">
+                                        No matches{epgSearch ? ` for "${epgSearch}"` : ''}
+                                    </div>
+                                    <div className="mx-auto max-w-xs text-[12px] text-slate-500">
+                                        Try one of the suggestions above, or attach a dummy EPG below.
+                                    </div>
+                                </div>
+                            </div>
                         ) : (
-                            <div className="p-4 text-center text-slate-500">
-                                No results match your filter criteria
+                            /* Idle / empty state (no query entered yet) */
+                            <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-slate-900/60 ring-1 ring-slate-800/80">
+                                    <svg className="h-4 w-4 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                        <circle cx="11" cy="11" r="7" />
+                                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                    </svg>
+                                </div>
+                                <div className="space-y-1">
+                                    <div className="font-mono text-[10.5px] uppercase tracking-[0.22em] text-slate-400">
+                                        Type a channel name to match
+                                    </div>
+                                    <div className="mx-auto max-w-xs text-[12px] text-slate-500">
+                                        Each EPG source is searched live. Best matches surface first — pick one to attach its program data to this channel.
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </div>
+
+                    {/* Footer strip: Dummy-EPG escape hatch (always visible) */}
+                    <div className="flex h-12 items-center justify-between gap-3 border-t border-slate-800/70 bg-slate-900/40 px-3">
+                        {dummyEpgAdded ? (
+                            <>
+                                <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-emerald-300">
+                                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                        <path d="M5 12l5 5L20 7" />
+                                    </svg>
+                                    Dummy EPG attached
+                                </span>
+                                <span className="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-600">
+                                    Check IPTV Editor to verify
+                                </span>
+                            </>
+                        ) : (
+                            <>
+                                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                                    No match? Attach a dummy EPG
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={handleDummyEpgMatch}
+                                    disabled={!selectedChannel || loading}
+                                    className="inline-flex h-7 items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/[0.08] px-2.5 font-mono text-[10px] uppercase tracking-[0.18em] text-violet-200 transition hover:border-violet-400/70 hover:bg-violet-500/[0.16] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-violet-500/40 disabled:hover:bg-violet-500/[0.08]"
+                                    title={!selectedChannel ? 'Pick a channel first' : 'Attach dummy EPG (uses channel name as program info)'}
+                                >
+                                    {loading ? (
+                                        <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                                            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" className="opacity-20" />
+                                            <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                                        </svg>
+                                    ) : (
+                                        <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M12 5v14M5 12h14" />
+                                        </svg>
+                                    )}
+                                    Dummy EPG
+                                </button>
+                            </>
+                        )}
+                    </div>
                 </div>
-            ) : searchStatus ? (
-                <div className="mb-6">
-                    <StatusDisplay message={searchStatus} type="warning" />
-                </div>
-            ) : null)}
+            )}
 
             {/* Debug Panel (Collapsible) - Hidden in compact mode */}
             {!compactMode && debugMode && (
