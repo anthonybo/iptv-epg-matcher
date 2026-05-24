@@ -135,11 +135,12 @@ const epgDatabaseService = {
    */
   async saveChannel(channel) {
     try {
+      // ON CONFLICT (id, source_id) — composite PK per mig 036.
+      // See bulk saveChannels (line ~313) for the rationale.
       const query = `
         INSERT INTO epg_channels (id, source_id, name, icon, language_code, categories_csv, last_updated)
         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
-        ON CONFLICT (id) DO UPDATE SET
-          source_id = EXCLUDED.source_id,
+        ON CONFLICT (id, source_id) DO UPDATE SET
           name = EXCLUDED.name,
           icon = EXCLUDED.icon,
           language_code = EXCLUDED.language_code,
@@ -298,13 +299,22 @@ const epgDatabaseService = {
         )
       `);
 
-      // Now insert from deduplicated temp table to main table
+      // Insert from deduplicated temp table to main table. Conflict
+      // target is (id, source_id) — the composite PK introduced by
+      // migration 036. Before 036 it was just (id), and that bug
+      // caused every source's saveChannels call to STEAL ownership
+      // of channel ids it shared with other sources (e.g. "a&e.us"
+      // appears in EPG.pw, EPG Talk Guide, AND every Xtream
+      // provider's bundled EPG — the last writer owned it
+      // exclusively, leaving the others with 0 channels and orphan
+      // programs). With (id, source_id) each source owns its own
+      // row independently and refresh of one source never touches
+      // another source's rows.
       const result = await client.query(`
         INSERT INTO epg_channels (id, source_id, name, icon, language_code, categories_csv, last_updated)
         SELECT id, source_id, name, icon, language_code, categories_csv, CURRENT_TIMESTAMP
         FROM temp_epg_channels
-        ON CONFLICT (id) DO UPDATE SET
-          source_id = EXCLUDED.source_id,
+        ON CONFLICT (id, source_id) DO UPDATE SET
           name = EXCLUDED.name,
           icon = EXCLUDED.icon,
           language_code = EXCLUDED.language_code,
