@@ -805,7 +805,17 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         // error (the channels saved fine, that's the user-visible
         // success state). Skipped entirely for sources without
         // credentials or types we don't auto-discover (e.g. stalker).
-        if (!clientGone && (source.type === 'xtream' || source.type === 'm3u')) {
+        //
+        // IMPORTANT: do NOT gate on clientGone. The channel save
+        // committed; the bundled EPG ingest runs entirely
+        // server-side and is valuable independent of whether the
+        // user is still watching the page. Previously gating on
+        // !clientGone meant a "Refresh All" loop where the user
+        // navigated away halfway through left every subsequent
+        // source with null bundled_epg_status — exactly the bug
+        // visible in the iptv_sources table after a real refresh-
+        // all run.
+        if (source.type === 'xtream' || source.type === 'm3u') {
             // Don't await — promise runs in the background.
             bundledEpgService
                 .ingestBundledEpgForSource(sourceId, { force: false })
@@ -910,6 +920,99 @@ router.get('/alternate-feeds', requireAuth, async (req, res) => {
             success: false,
             error: 'Failed to fetch alternate feeds'
         });
+    }
+});
+
+/**
+ * POST /api/iptv/sources/refresh-all-bundled-epg
+ *
+ * Bulk-ingest bundled EPG for every IPTV source the caller owns
+ * that doesn't already have one (or, with force=true, all of them).
+ * Returns immediately and runs ingest in the background — the
+ * iptv_sources.bundled_epg_status column is the source of truth
+ * the UI polls for per-row progress.
+ *
+ * Used by the "Refresh All Bundled EPGs" button to populate the
+ * feature for users who refreshed channels before the bundled-EPG
+ * code shipped (so they have 64 sources with bundled_epg_status =
+ * null and don't want to re-fetch 30k+ channels just to trigger
+ * ingest).
+ *
+ * Concurrency is intentionally low (3) because each ingest:
+ *   - hits a different provider's xmltv.php (cross-provider parallel
+ *     is fine — no shared upstream rate limit)
+ *   - writes into the partitioned epg_programs table (per-partition
+ *     locks, so cross-source DB writes don't contend)
+ *   - holds a Postgres connection for the duration of the COPY
+ *     stream (pool max is 20; keep room for the rest of the app)
+ *
+ * Returns the queued count immediately so the UI can show "queued
+ * 42 sources for bundled-EPG refresh".
+ */
+router.post('/sources/refresh-all-bundled-epg', requireAuth, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const force = req.body && req.body.force === true;
+
+        const sourcesRes = await postgresService.query(
+            `SELECT id, type, bundled_epg_status FROM iptv_sources
+              WHERE user_id = $1
+                AND type IN ('xtream', 'm3u')
+              ORDER BY id`,
+            [userId]
+        );
+        // Without force: skip sources already 'ok' or currently
+        // 'pending'. Failed and no_url get retried — the user
+        // explicitly asked for bulk refresh, presumably to clear
+        // earlier failures.
+        const queued = force
+            ? sourcesRes.rows
+            : sourcesRes.rows.filter((s) =>
+                s.bundled_epg_status !== 'ok' && s.bundled_epg_status !== 'pending'
+            );
+
+        // Respond synchronously so the UI gets the queue count.
+        // Ingest runs in the background.
+        res.json({
+            success: true,
+            queued: queued.length,
+            total: sourcesRes.rows.length,
+            skipped: sourcesRes.rows.length - queued.length
+        });
+
+        // Drain the queue with bounded concurrency. Self-invoking
+        // worker loop pattern — N workers pull from the queue until
+        // empty. Logs each result so the user can grep for progress.
+        const CONCURRENCY = 3;
+        const queue = queued.slice();
+        let completed = 0;
+        const worker = async (workerId) => {
+            while (queue.length > 0) {
+                const next = queue.shift();
+                if (!next) break;
+                logger.info(`[bulk-bundled-epg] worker ${workerId} starting source ${next.id} (${completed + 1}/${queued.length})`);
+                try {
+                    const r = await bundledEpgService.ingestBundledEpgForSource(next.id, { force });
+                    completed++;
+                    logger.info(
+                        `[bulk-bundled-epg] source ${next.id} → ${r?.success ? 'ok' : (r?.reason || 'failed')}` +
+                        (r?.channelCount != null ? ` (${r.channelCount} ch, ${r.programCount} prog)` : '')
+                    );
+                } catch (e) {
+                    completed++;
+                    logger.warn(`[bulk-bundled-epg] source ${next.id} threw: ${e.message}`);
+                }
+            }
+            logger.info(`[bulk-bundled-epg] worker ${workerId} drained`);
+        };
+        const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
+        // Detached — we don't await. The response already went out.
+        Promise.all(workers).then(() => {
+            logger.info(`[bulk-bundled-epg] all done — ${completed}/${queued.length} sources processed`);
+        });
+    } catch (err) {
+        logger.error(`[refresh-all-bundled-epg] failed: ${err.message}`);
+        return res.status(500).json({ success: false, error: err.message });
     }
 });
 
