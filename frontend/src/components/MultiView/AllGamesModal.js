@@ -88,18 +88,129 @@ const SPORT_THEME = {
   default:       { color: '#64748b', tag: 'SPT', label: 'SPORT' }
 };
 
+// ─── League tier classification ───────────────────────────────────────
+// Sport_type alone is too coarse — MLB and NCAA Baseball both
+// resolve to `baseball` and render the badge in the same red. The
+// user can't tell them apart in a 50-event stack. This classifier
+// returns a TIER which the badge uses to add a colored accent stripe
+// (gold = pro top, cream = college, cyan = international, slate =
+// pro-other), modulate saturation, and color-code the league text.
+// Same sport color stays for muscle memory; tier accent is the
+// glanceable differentiator.
+function classifyLeague(leagueName) {
+  if (!leagueName) return 'unknown';
+  const L = String(leagueName).toLowerCase().trim();
+
+  // College / amateur — broadest first so "ncaa baseball" never
+  // matches the pro set below.
+  if (L.includes('ncaa') || L.includes('college') ||
+      L.startsWith('cbb') || L.startsWith('cfb') ||
+      L.includes('high school')) return 'college';
+
+  // Pro-major — household-name top leagues. The eye associates
+  // these with the sport's brand color so they get the strongest
+  // (gold) accent and full saturation.
+  const PRO_MAJOR = new Set([
+    'mlb', 'nfl', 'nba', 'nhl', 'mls',
+    'premier league', 'epl', 'pl',
+    'la liga', 'laliga', 'bundesliga', 'serie a', 'ligue 1',
+    'wnba', 'nwsl',
+    'pga tour', 'pga',
+    'atp', 'wta',
+    'f1', 'formula 1', 'formula one', 'motogp',
+    'ufc'
+  ]);
+  if (PRO_MAJOR.has(L)) return 'pro';
+
+  // International / cross-border tournaments — cyan accent.
+  if (L.includes('champions league') ||
+      L.includes('europa league') ||
+      L.includes('uefa') || L.includes('fifa') ||
+      L.includes('world cup') || L.includes('copa') ||
+      L.includes('olympics') || L.includes('davis cup') ||
+      L.includes('concacaf') || L.includes('afc ') ||
+      L.includes('international')) return 'international';
+
+  // Pro-other — non-major pro leagues. Same sport color, muted
+  // slate accent so they don't compete with pro-major for the eye.
+  const PRO_OTHER = new Set([
+    'liga mx', 'j league', 'j1 league', 'k league', 'kbo', 'npb',
+    'afl', 'cfl',
+    'liv golf', 'liv',
+    'indycar', 'nascar', 'nascar cup series',
+    'bellator', 'one championship', 'pfl', 'glory'
+  ]);
+  if (PRO_OTHER.has(L)) return 'pro-other';
+  if (L.includes('league') || L.includes('tour') ||
+      L.includes('series') || L.includes('championship') ||
+      L.includes('cup')) return 'pro-other';
+
+  return 'minor';
+}
+
+// Tier visual identity — accent color (top stripe + league text)
+// and a saturation modulation factor applied to the badge body.
+const TIER_THEME = {
+  'pro':           { accent: '#fbbf24', satFactor: 1.00, accentGlow: 0.55 },  // gold — top tier
+  'college':       { accent: '#fde68a', satFactor: 0.55, accentGlow: 0.30 },  // cream paper — NCAA pennant vibe
+  'international': { accent: '#22d3ee', satFactor: 0.95, accentGlow: 0.50 },  // cyan — neutral cross-border
+  'pro-other':     { accent: '#94a3b8', satFactor: 0.80, accentGlow: 0.25 },  // slate-400 — minor-pro
+  'minor':         { accent: null,     satFactor: 0.70, accentGlow: 0 },     // no stripe
+  'unknown':       { accent: null,     satFactor: 1.00, accentGlow: 0 }
+};
+
 function themeFor(sportType, leagueName) {
-  if (!sportType) return SPORT_THEME.default;
+  const tier = classifyLeague(leagueName);
+  const tierTheme = TIER_THEME[tier] || TIER_THEME.unknown;
+  const merge = (base) => ({
+    ...base,
+    league: leagueName || base.tag,
+    tier,
+    tierAccent: tierTheme.accent,
+    tierSatFactor: tierTheme.satFactor,
+    tierAccentGlow: tierTheme.accentGlow
+  });
+
+  if (!sportType) return merge(SPORT_THEME.default);
   const k = String(sportType).toLowerCase();
   // Direct hits first; fall back to "starts with" for variations
   // ("Soccer" vs "Soccer (Women's)") that ESPN sometimes returns.
-  if (SPORT_THEME[k]) return { ...SPORT_THEME[k], league: leagueName || SPORT_THEME[k].tag };
+  if (SPORT_THEME[k]) return merge(SPORT_THEME[k]);
   for (const key of Object.keys(SPORT_THEME)) {
-    if (key !== 'default' && k.includes(key)) {
-      return { ...SPORT_THEME[key], league: leagueName || SPORT_THEME[key].tag };
-    }
+    if (key !== 'default' && k.includes(key)) return merge(SPORT_THEME[key]);
   }
-  return { ...SPORT_THEME.default, league: leagueName || SPORT_THEME.default.tag };
+  return merge(SPORT_THEME.default);
+}
+
+// Short league string for the badge's secondary line. Long names
+// like "UEFA Champions League" need shortening to fit 88px; NCAA
+// variants collapse to just "NCAA" because the sport label above
+// already says BASEBALL / FOOTBALL / etc. — no point repeating.
+function shortLeagueLabel(leagueName, tier, fallbackTag) {
+  if (!leagueName) return fallbackTag || '';
+  const L = String(leagueName);
+  if (tier === 'college') {
+    // "NCAA Baseball" / "NCAA Men's Basketball" → just "NCAA"
+    // (sport name is already on the line above)
+    return 'NCAA';
+  }
+  // Smart abbreviations for the long international names.
+  const ABBREV = {
+    'uefa champions league': 'UCL',
+    'uefa europa league': 'UEL',
+    'uefa conference league': 'UECL',
+    'concacaf champions league': 'CCL',
+    'afc champions league': 'ACL',
+    'copa libertadores': 'LIBERTADORES',
+    'copa sudamericana': 'SUDAMERICANA',
+    'fifa world cup': 'WORLD CUP',
+    'fifa club world cup': 'CLUB WC'
+  };
+  const abbrev = ABBREV[L.toLowerCase()];
+  if (abbrev) return abbrev;
+  // Default: uppercase and truncate.
+  const up = L.toUpperCase();
+  return up.length > 14 ? up.slice(0, 13) + '…' : up;
 }
 
 // Status visual identity — broadcast red for LIVE (industry
@@ -126,6 +237,62 @@ function ensureFontsLoaded() {
 const FONT_DISPLAY = "'Anton', 'Bebas Neue', sans-serif";
 const FONT_BODY    = "'DM Sans', system-ui, sans-serif";
 const FONT_MONO    = "'JetBrains Mono', ui-monospace, 'SF Mono', monospace";
+
+// ─── Team display helpers ─────────────────────────────────────────────
+// live_events doesn't carry team logo URLs (the table was built before
+// we cared about per-team branding), so we synthesise a stable 2-3
+// letter monogram + hashed color per team name. Same visual idea as
+// the channel-row monograms — gives the eye a fixed shape/color to
+// anchor on while scanning, without us having to pull team logos from
+// ESPN's CDN (which needs team IDs we don't currently store).
+function teamMonogram(name) {
+  if (!name) return '??';
+  // Words to ignore when picking initials — sport leagues sprinkle
+  // these everywhere and they're never the distinguishing token.
+  const STOP = /^(the|of|fc|cf|sc|ac|cd|de|los|las|le|la|el|al|at|vs)$/i;
+  const words = String(name)
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !STOP.test(w));
+  if (words.length === 0) return name.slice(0, 2).toUpperCase();
+  if (words.length === 1) return words[0].slice(0, 3).toUpperCase();
+  return words.map((w) => w[0]).join('').slice(0, 3).toUpperCase();
+}
+
+function teamHue(name) {
+  if (!name) return 200;
+  // Cheap hash → hue. Same input always yields same color so the
+  // user's Texas Rangers tile is stable across renders/sessions.
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return Math.abs(h) % 360;
+}
+
+function TeamTile({ name }) {
+  const initials = teamMonogram(name);
+  const hue = teamHue(name);
+  return (
+    <span
+      aria-hidden
+      className="inline-flex items-center justify-center flex-shrink-0"
+      style={{
+        width: 32,
+        height: 32,
+        borderRadius: 4,
+        background: `hsla(${hue}, 45%, 24%, 0.55)`,
+        border: `1px solid hsla(${hue}, 60%, 50%, 0.45)`,
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        fontWeight: 800,
+        letterSpacing: '0.06em',
+        color: `hsla(${hue}, 70%, 78%, 1)`,
+        textShadow: '0 1px 0 rgba(0,0,0,0.4)'
+      }}
+    >
+      {initials}
+    </span>
+  );
+}
 
 const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatusChange }) => {
   const [events, setEvents] = useState([]);
@@ -634,39 +801,89 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
                     />
 
                     <div className="flex items-stretch gap-4 pl-6 pr-4 py-4">
-                      {/* ── Sport / League badge (stacked, 2-line) ─── */}
+                      {/* ── Sport / League badge (tier-aware) ────────
+                          Three layers of league differentiation:
+                            1. Top accent stripe (3px) — tier color
+                               (gold=pro-major, cream=NCAA, cyan=
+                               international, slate=pro-other). The
+                               eye reads this band before parsing
+                               text — scanning a 50-event stack, the
+                               user maps "gold-topped row = MLB,
+                               cream-topped = NCAA" within seconds.
+                            2. Body saturation — college tier desats
+                               to ~55% so brighter pro badges win
+                               the eye on a crowded list.
+                            3. League text color — accent-coloured
+                               for non-default tiers, so even if the
+                               stripe is occluded the text still
+                               tier-codes itself.
+                       */}
                       <div className="flex-shrink-0 flex flex-col items-center justify-center w-[88px]">
                         <div
-                          className="text-center w-full px-2 py-2"
+                          className="w-full overflow-hidden text-center"
                           style={{
-                            background: `linear-gradient(180deg, ${sport.color}25, ${sport.color}10)`,
-                            border: `1px solid ${sport.color}55`,
-                            borderRadius: '2px'
+                            // Body gradient — desaturate for college via the
+                            // alpha suffix; pro tiers keep the strong fill.
+                            background: sport.tier === 'college'
+                              ? `linear-gradient(180deg, ${sport.color}15, ${sport.color}06)`
+                              : `linear-gradient(180deg, ${sport.color}25, ${sport.color}0d)`,
+                            border: `1px solid ${sport.color}${sport.tier === 'college' ? '38' : '55'}`,
+                            borderRadius: '2px',
+                            position: 'relative'
                           }}
+                          title={e.league_name || sport.label}
                         >
-                          <div
-                            className="leading-none"
-                            style={{
-                              fontFamily: FONT_DISPLAY,
-                              fontSize: '11px',
-                              letterSpacing: '0.15em',
-                              color: sport.color,
-                              filter: 'brightness(1.4) saturate(1.2)'
-                            }}
-                          >
-                            {sport.label}
-                          </div>
-                          <div
-                            className="mt-1 leading-none"
-                            style={{
-                              fontFamily: FONT_MONO,
-                              fontSize: '9px',
-                              fontWeight: 700,
-                              letterSpacing: '0.1em',
-                              color: '#cbd5e1'
-                            }}
-                          >
-                            {(e.league_name || sport.tag).toUpperCase().slice(0, 18)}
+                          {/* Tier accent stripe — top edge.
+                              Only renders for classifiable tiers; minor
+                              and unknown stay clean. The boxShadow
+                              gives a subtle glow so the stripe reads
+                              even when the row background tints (hover
+                              / picking states). */}
+                          {sport.tierAccent && (
+                            <div
+                              aria-hidden="true"
+                              style={{
+                                height: 3,
+                                background: sport.tierAccent,
+                                boxShadow: `0 1px 6px ${sport.tierAccent}${Math.round(sport.tierAccentGlow * 255).toString(16).padStart(2, '0')}`
+                              }}
+                            />
+                          )}
+                          <div className="px-2 pt-1.5 pb-2">
+                            <div
+                              className="leading-none"
+                              style={{
+                                fontFamily: FONT_DISPLAY,
+                                fontSize: '11px',
+                                letterSpacing: '0.15em',
+                                color: sport.color,
+                                filter: sport.tier === 'college'
+                                  ? 'brightness(0.85) saturate(0.6)'
+                                  : 'brightness(1.4) saturate(1.2)'
+                              }}
+                            >
+                              {sport.label}
+                            </div>
+                            <div
+                              className="mt-1 leading-none"
+                              style={{
+                                fontFamily: FONT_MONO,
+                                fontSize: '9px',
+                                fontWeight: 700,
+                                letterSpacing: '0.1em',
+                                // League text picks up the tier accent
+                                // color so the differentiator is visible
+                                // even without the stripe (e.g. when
+                                // the stripe area is hidden by the
+                                // hover background).
+                                color: sport.tierAccent || '#cbd5e1',
+                                textShadow: sport.tierAccent
+                                  ? `0 0 8px ${sport.tierAccent}40`
+                                  : 'none'
+                              }}
+                            >
+                              {shortLeagueLabel(e.league_name, sport.tier, sport.tag)}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -721,89 +938,84 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
                         </div>
                       </div>
 
-                      {/* ── Matchup + score + broadcasters ─────────── */}
+                      {/* ── Matchup + score + broadcasters ───────────
+                          Stacked vertical layout (away over home) —
+                          each team gets its own line with monogram
+                          tile + full name + per-team score. The old
+                          horizontal "Away AT Home" layout was
+                          competing with the score block for ~250px
+                          of width and aggressively truncated long
+                          city names to 3-5 chars ("Tex…", "Los A…").
+                          Stacked gives each name the full row width,
+                          so "Los Angeles Angels" reads in full. The
+                          `title` attribute carries the full team
+                          name for hover even when truncation kicks
+                          in on a very narrow viewport. */}
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3">
-                          <div className="min-w-0 flex-1">
-                            {/* Teams stacked: AWAY at HOME convention */}
-                            <div className="flex items-baseline gap-2 min-w-0">
-                              <span
-                                className="truncate"
-                                style={{
-                                  fontFamily: FONT_BODY,
-                                  fontSize: '15px',
-                                  fontWeight: 700,
-                                  color: kind === 'final' ? '#cbd5e1' : '#f1f5f9',
-                                  letterSpacing: '-0.01em'
-                                }}
+                        <div className="flex flex-col gap-1.5">
+                          {[
+                            { name: e.away_team, score: e.away_score, side: 'AWAY' },
+                            { name: e.home_team, score: e.home_score, side: 'HOME' }
+                          ].map((t, idx) => {
+                            // Winner detection on finals — bold + bright vs dimmed.
+                            const isFinal = kind === 'final';
+                            const hasOpponentScore = isFinal && hasScore;
+                            const isWinner =
+                              hasOpponentScore &&
+                              t.score != null &&
+                              (idx === 0
+                                ? (e.away_score ?? 0) > (e.home_score ?? 0)
+                                : (e.home_score ?? 0) > (e.away_score ?? 0));
+                            const isLoser =
+                              hasOpponentScore &&
+                              t.score != null &&
+                              !isWinner &&
+                              (e.away_score ?? 0) !== (e.home_score ?? 0);
+                            return (
+                              <div
+                                key={t.side}
+                                className="flex items-center gap-2.5 min-w-0"
+                                title={t.name || ''}
                               >
-                                {e.away_team}
-                              </span>
-                              <span
-                                className="flex-shrink-0"
-                                style={{
-                                  fontFamily: FONT_DISPLAY,
-                                  fontSize: '10px',
-                                  letterSpacing: '0.2em',
-                                  color: '#475569',
-                                  position: 'relative',
-                                  top: '-1px'
-                                }}
-                              >
-                                AT
-                              </span>
-                              <span
-                                className="truncate"
-                                style={{
-                                  fontFamily: FONT_BODY,
-                                  fontSize: '15px',
-                                  fontWeight: 700,
-                                  color: kind === 'final' ? '#cbd5e1' : '#f1f5f9',
-                                  letterSpacing: '-0.01em'
-                                }}
-                              >
-                                {e.home_team}
-                              </span>
-                            </div>
-                          </div>
-
-                          {/* Score block — scoreboard yellow mono */}
-                          {hasScore && (
-                            <div
-                              className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5"
-                              style={{
-                                background: 'rgba(0,0,0,0.4)',
-                                border: '1px solid rgba(251,191,36,0.25)',
-                                borderRadius: '2px'
-                              }}
-                            >
-                              <span
-                                style={{
-                                  fontFamily: FONT_MONO,
-                                  fontSize: '18px',
-                                  fontWeight: 700,
-                                  color: kind === 'final' ? '#fde68a' : '#fbcf3a',
-                                  letterSpacing: '0.05em',
-                                  lineHeight: 1
-                                }}
-                              >
-                                {e.away_score ?? 0}
-                              </span>
-                              <span style={{ color: '#475569', fontFamily: FONT_MONO, fontSize: '14px' }}>:</span>
-                              <span
-                                style={{
-                                  fontFamily: FONT_MONO,
-                                  fontSize: '18px',
-                                  fontWeight: 700,
-                                  color: kind === 'final' ? '#fde68a' : '#fbcf3a',
-                                  letterSpacing: '0.05em',
-                                  lineHeight: 1
-                                }}
-                              >
-                                {e.home_score ?? 0}
-                              </span>
-                            </div>
-                          )}
+                                <TeamTile name={t.name || ''} />
+                                <span
+                                  className="truncate"
+                                  style={{
+                                    fontFamily: FONT_BODY,
+                                    fontSize: '14px',
+                                    fontWeight: isWinner ? 700 : 600,
+                                    color: isLoser ? '#94a3b8' : isFinal ? '#e2e8f0' : '#f1f5f9',
+                                    letterSpacing: '-0.005em',
+                                    flex: '1 1 auto',
+                                    minWidth: 0
+                                  }}
+                                >
+                                  {t.name || <span style={{ color: '#475569' }}>—</span>}
+                                </span>
+                                {/* Per-team score (right-aligned, scoreboard yellow) */}
+                                {hasScore && (
+                                  <span
+                                    className="flex-shrink-0 inline-flex items-center justify-end tabular-nums"
+                                    style={{
+                                      fontFamily: FONT_MONO,
+                                      fontSize: '17px',
+                                      fontWeight: 700,
+                                      color: isLoser
+                                        ? '#cbd5e1'
+                                        : isFinal
+                                          ? '#fde68a'
+                                          : '#fbcf3a',
+                                      letterSpacing: '0.04em',
+                                      lineHeight: 1,
+                                      minWidth: 32
+                                    }}
+                                  >
+                                    {t.score ?? 0}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
 
                         {/* Broadcaster chips — MUCH more legible */}
