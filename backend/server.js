@@ -477,7 +477,14 @@ app.use('/api/user/locations', userLocationsRoutes); // User locations for local
 app.use('/api/live-scores', liveScoresRoutes); // Live sports scores
 app.use('/api/trending', trendingChannelsRoutes); // Live trending TV channels (YT/Twitch/Reddit/Bsky composite)
 app.use('/api/youtube', require('./routes/youtube')); // YouTube channel resolve/search/favorites + live HLS for multi-view tiles
+app.use('/api/llm',     require('./routes/llm'));     // LLM provider rotation status + smoke test
 trendingChannelsService.startRefreshLoop();
+
+// Initialise the LLM provider registry once on boot. Cheap (no network
+// calls) — just reads env vars and builds the in-memory rotation list.
+// Features that depend on LLM (breaking-events synthesis, etc.) call
+// isLlmReady() before invoking generateCompletion().
+require('./services/llm/client').initLlm();
 
 // Create dedicated SSE route for real-time updates
 app.use('/api/stream-updates', require('./routes/sse'));
