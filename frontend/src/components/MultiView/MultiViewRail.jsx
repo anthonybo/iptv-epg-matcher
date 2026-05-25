@@ -40,6 +40,7 @@ const SECTIONS = [
     items: [
       { id: 'trending',       kind: 'modal',  label: 'Trending now',       icon: ICON_FLAME() },
       { id: 'all-games',      kind: 'modal',  label: 'All games today',    icon: ICON_BALL() },
+      { id: 'youtube',        kind: 'modal',  label: 'YouTube channel',    icon: ICON_YOUTUBE() },
       { id: 'coverage',       kind: 'modal',  label: 'Broadcaster coverage', icon: ICON_BROADCAST() },
       { id: 'local-news',     kind: 'action', label: 'Local news',         icon: ICON_NEWS() }
     ]
@@ -68,6 +69,7 @@ const MultiViewRail = ({
   // Modal openers
   onOpenTrending,
   onOpenAllGames,
+  onOpenYouTube,
   onOpenCoverage,
   onOpenBlacklist,
   onOpenSettings,
@@ -99,6 +101,7 @@ const MultiViewRail = ({
       case 'picker':     return onOpenPicker?.();
       case 'trending':   return onOpenTrending?.();
       case 'all-games':  return onOpenAllGames?.();
+      case 'youtube':    return onOpenYouTube?.();
       case 'coverage':   return onOpenCoverage?.();
       case 'local-news': return onLocalNews?.();
       case 'favorites':  return onTogglePanel?.('favorites');
@@ -395,6 +398,15 @@ function ICON_BROADCAST() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" />
       <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+function ICON_YOUTUBE() {
+  // Rounded-rect "play" silhouette — reads as YouTube without using their logo glyph.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="w-4 h-4">
+      <rect x="2.5" y="6" width="19" height="12" rx="3" />
+      <path d="M11 9.5l4 2.5-4 2.5v-5z" fill="currentColor" stroke="none" />
     </svg>
   );
 }

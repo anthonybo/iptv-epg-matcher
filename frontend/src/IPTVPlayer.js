@@ -31,6 +31,9 @@ import {
 import {
   initializeHlsPlayer as initializeHlsPlayerExt
 } from './utils/player/initHls';
+import {
+  initializeYoutubeHlsPlayer as initializeYoutubeHlsPlayerExt
+} from './utils/player/initYoutubeHls';
 import useEpgData from './hooks/player/useEpgData';
 import useSearchProgressListener from './hooks/player/useSearchProgressListener';
 import useHandleCast from './hooks/player/useHandleCast';
@@ -260,7 +263,8 @@ const IPTVPlayer = ({
     loadPlayerScripts({
       log,
       onMpegtsReady: () => {
-        if (selectedChannel && sessionId) {
+        // YouTube tiles don't depend on mpegts.js or sessionId.
+        if (selectedChannel && (sessionId || playbackMethod === 'youtube-hls')) {
           initializePlayer();
         }
       }
@@ -288,7 +292,10 @@ const IPTVPlayer = ({
 
   // Apply playback method when channel or method changes
   useEffect(() => {
-    if (!sessionId || !selectedChannel) {
+    // YouTube tiles don't need a session id — they resolve their own
+    // HLS manifest via /api/youtube/channel/:id/live and play directly.
+    const needsSessionId = playbackMethod !== 'youtube-hls';
+    if (!selectedChannel || (needsSessionId && !sessionId)) {
       cleanupPlayer();
       return;
     }
@@ -417,6 +424,7 @@ const IPTVPlayer = ({
   const initializeTestVideo = () => initializeTestVideoExt(buildPlayerCtx());
   const initializeMpegtsPlayer = () => initializeMpegtsPlayerExt(buildPlayerCtx());
   const initializeHlsPlayer = () => initializeHlsPlayerExt(buildPlayerCtx());
+  const initializeYoutubeHlsPlayer = () => initializeYoutubeHlsPlayerExt(buildPlayerCtx());
 
   // Single dispatch point the recovery hook calls during retry/fresh-start.
   const reinitialize = (method) => {
@@ -430,6 +438,11 @@ const IPTVPlayer = ({
       case 'hls-stream':
         // Backend HLS remux + hls.js. iOS-friendly and self-recovering.
         initializeHlsPlayer();
+        break;
+      case 'youtube-hls':
+        // YouTube channel — backend yt-dlp resolves a fresh HLS manifest
+        // URL, hls.js plays it directly (no backend proxy).
+        initializeYoutubeHlsPlayer();
         break;
       case 'vlc-link':
         initializeVlcLink();
@@ -479,7 +492,7 @@ const IPTVPlayer = ({
     setLoading(true);
     setError(null);
     reinitialize(playbackMethod);
-    if (!['hls-player', 'mpegts-player', 'hls-stream', 'vlc-link', 'test-video'].includes(playbackMethod)) {
+    if (!['hls-player', 'mpegts-player', 'hls-stream', 'youtube-hls', 'vlc-link', 'test-video'].includes(playbackMethod)) {
       setError('Unknown playback method');
       setLoading(false);
       isInitializingRef.current = false;

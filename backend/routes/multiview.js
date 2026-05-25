@@ -89,11 +89,20 @@ router.post('/', async (req, res) => {
     let sourceMac = channel.sourceMac || channel.source_mac;
     let sourceName = channel.sourceName || channel.source_name;
 
-    if (!sourceType && (channel.sourceId || channel.source_id)) {
+    // YouTube tiles aren't backed by an iptv_sources row — use sentinel
+    // sourceId=0 so the (user_id, channel_id, source_id) unique key still
+    // partitions correctly. Same shape for any future external source type
+    // (Twitch, Kick, etc.) — sourceType is the discriminator.
+    const isExternal = sourceType === 'youtube';
+    let sourceIdValue = channel.sourceId ?? channel.source_id;
+    if (sourceIdValue === undefined || sourceIdValue === null) {
+      sourceIdValue = isExternal ? 0 : null;
+    }
+    if (!isExternal && !sourceType && sourceIdValue) {
       // Look up source metadata from iptv_sources table
       const sourceResult = await postgresService.query(
         'SELECT type, url, username, password, mac_address, name FROM iptv_sources WHERE id = $1',
-        [channel.sourceId || channel.source_id]
+        [sourceIdValue]
       );
 
       if (sourceResult.rows.length > 0) {
@@ -106,6 +115,7 @@ router.post('/', async (req, res) => {
         sourceName = source.name;
       }
     }
+    if (isExternal && !sourceName) sourceName = 'YouTube';
 
     // Insert or ignore if already exists
     await postgresService.query(
@@ -121,7 +131,7 @@ router.post('/', async (req, res) => {
         channel.name,
         channel.logo || null,
         channel.url,
-        channel.sourceId || channel.source_id,
+        sourceIdValue,
         sourceType,
         sourceUrl || null,
         sourceUsername || null,

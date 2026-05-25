@@ -54,6 +54,12 @@ const StreamCellInner = memo(({
   onQualityDetected,
   dragHandleProps
 }) => {
+  // YouTube tiles use a dedicated init path that resolves a fresh
+  // HLS URL via yt-dlp on each play. The IPTV-side resilient proxy
+  // / mpegts path doesn't apply.
+  const isYoutube = stream?.sourceType === 'youtube';
+  const effectivePlayerType = isYoutube ? 'youtube-hls' : playerType;
+  const effectiveUseResilientProxy = isYoutube ? false : true;
   return (
     <div
       className={`group/cell relative overflow-hidden h-full ${
@@ -86,10 +92,15 @@ const StreamCellInner = memo(({
           onVolumeChange={onVolumeChange}
           onToggleFavorite={onToggleFavorite}
           onRefresh={onRefresh}
-          onAlternateSources={onAlternateSources}
-          onFindAlternative={onFindAlternative}
-          onFindDifferentGame={onFindDifferentGame}
-          onBlacklist={onBlacklist}
+          /* IPTV-only actions — null for YouTube tiles so the buttons
+             hide entirely. Find-Alternative and Alternate-Sources both
+             walk the IPTV catalog; Find-Different-Game is sports-list
+             driven; Blacklist filters the IPTV random-fill pool. None
+             of those map to a YouTube channel. */
+          onAlternateSources={isYoutube ? null : onAlternateSources}
+          onFindAlternative={isYoutube ? null : onFindAlternative}
+          onFindDifferentGame={isYoutube ? null : onFindDifferentGame}
+          onBlacklist={isYoutube ? null : onBlacklist}
           onRemove={onRemove}
         />
       )}
@@ -99,15 +110,15 @@ const StreamCellInner = memo(({
         <IPTVPlayer
           sessionId={sessionId}
           selectedChannel={stream}
-          playbackMethod={playerType}
+          playbackMethod={effectivePlayerType}
           matchedChannels={{}}
           theatreMode={true}
           muted={isMuted}
           volume={volume}
           onQualityDetected={onQualityDetected}
           onStreamDead={onStreamDead}
-          onVideoElement={onVideoElement}
-          useResilientProxy={true}
+          onVideoElement={isYoutube ? null : onVideoElement}
+          useResilientProxy={effectiveUseResilientProxy}
         />
       </div>
     </div>

@@ -66,6 +66,7 @@ const FavoritesStrip = ({
       case 'xtream':  return 'from-sky-400 to-blue-500';
       case 'stalker': return 'from-violet-400 to-purple-500';
       case 'm3u':     return 'from-emerald-400 to-teal-500';
+      case 'youtube': return 'from-rose-400 to-red-500';
       default:        return 'from-slate-500 to-slate-600';
     }
   };

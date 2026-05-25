@@ -476,6 +476,7 @@ app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news
 app.use('/api/live-scores', liveScoresRoutes); // Live sports scores
 app.use('/api/trending', trendingChannelsRoutes); // Live trending TV channels (YT/Twitch/Reddit/Bsky composite)
+app.use('/api/youtube', require('./routes/youtube')); // YouTube channel resolve/search/favorites + live HLS for multi-view tiles
 trendingChannelsService.startRefreshLoop();
 
 // Create dedicated SSE route for real-time updates

@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import VideoQualityBadge from '../VideoQualityBadge';
 import TileInfoButton from './TileInfoButton';
 
 /**
@@ -72,62 +71,85 @@ const TileOSD = ({
     onToggleFavorite?.(e);
   };
 
+  // Quality string — prefer the short form (height + p) over the full
+  // "1280x720" because it slots cleanly inline with the channel name
+  // and reads as broadcast-ID, not as a measurement.
+  const qualityLabel = (() => {
+    if (!quality?.resolution) return null;
+    if (quality.height) return `${quality.height}p`;
+    // resolution like "1280x720" → take the second component
+    const m = String(quality.resolution).match(/(\d+)x(\d+)/);
+    if (m) return `${m[2]}p`;
+    return String(quality.resolution);
+  })();
+
   return (
     <div
-      className="absolute top-0 left-0 right-0 z-20 px-2 py-1 pointer-events-auto"
-      style={{
-        background:
-          'linear-gradient(to bottom, rgba(2,6,23,0.92) 0%, rgba(2,6,23,0.7) 55%, transparent 100%)'
-      }}
+      className="absolute top-0 left-0 right-0 z-20 px-1.5 pt-1.5 pb-2 pointer-events-none flex items-start gap-1.5"
     >
-      <div className="flex items-center gap-2 min-w-0">
-        {/* ─── LEFT: title slate + drag handle ──────────────────
-            Only this region carries the drag listeners — the right
-            cluster needs free pointer events for clicks. */}
-        <div
-          {...(dragHandleProps || {})}
-          className="flex items-center gap-2 min-w-0 flex-1 cursor-grab active:cursor-grabbing select-none"
+      {/* ─── LEFT: title chip + drag handle ───────────────────
+          Self-contained pill rather than a full-width gradient
+          slab — keeps the title legible on any frame without
+          shadowing scoreboards or lower-thirds. Idle opacity
+          backs the chip off to ~75% so it reads as quiet
+          metadata; hover restores 100% for the "actively
+          working with this tile" state. */}
+      <div
+        {...(dragHandleProps || {})}
+        className="pointer-events-auto flex items-center gap-1.5 min-w-0 max-w-[70%] cursor-grab active:cursor-grabbing select-none px-1.5 py-1 rounded-md bg-slate-950/55 backdrop-blur-sm ring-1 ring-white/[0.06] shadow-[0_2px_8px_rgba(0,0,0,0.35)] opacity-75 group-hover/cell:opacity-100 transition-opacity duration-200"
+      >
+        {/* Source-type marker — tiny solid dot, no ping animation
+            (motion at every tile corner was visually noisy and
+            competed with on-screen graphics). */}
+        <span
+          aria-hidden
+          className={`flex h-1 w-1 flex-shrink-0 rounded-full ${
+            stream.sourceType === 'xtream'  ? 'bg-sky-400' :
+            stream.sourceType === 'stalker' ? 'bg-violet-400' :
+            stream.sourceType === 'm3u'     ? 'bg-emerald-400' :
+            stream.sourceType === 'youtube' ? 'bg-rose-400' :
+                                              'bg-slate-400'
+          }`}
+          title={stream.sourceType || 'source'}
+        />
+
+        {stream.logo && (
+          <img
+            src={stream.logo}
+            alt=""
+            className="w-3.5 h-3.5 rounded-sm object-contain flex-shrink-0 opacity-90"
+            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+          />
+        )}
+
+        <span
+          className="text-[10.5px] font-medium tracking-tight text-slate-100 truncate leading-tight min-w-0"
+          title={stream.name}
         >
-          {/* Source-type rail dot — matches the picker/strip motif. */}
+          {stream.name}
+        </span>
+
+        {qualityLabel && (
           <span
-            className={`relative flex h-1.5 w-1.5 flex-shrink-0 rounded-full ${
-              stream.sourceType === 'xtream'  ? 'bg-sky-400' :
-              stream.sourceType === 'stalker' ? 'bg-violet-400' :
-              stream.sourceType === 'm3u'     ? 'bg-emerald-400' :
-                                                'bg-slate-400'
-            }`}
-            title={stream.sourceType || 'source'}
+            className="flex-shrink-0 inline-flex items-center px-1 py-px rounded-sm font-mono text-[9px] tracking-[0.06em] text-slate-300 bg-white/[0.05] ring-1 ring-white/10 leading-none tabular-nums"
+            title={quality?.resolution ? `${quality.resolution} (detected)` : undefined}
           >
-            <span className="absolute inset-0 rounded-full opacity-50 animate-ping bg-current" />
+            {qualityLabel}
           </span>
+        )}
+      </div>
 
-          {stream.logo && (
-            <img
-              src={stream.logo}
-              alt=""
-              className="w-4 h-4 rounded object-contain flex-shrink-0 opacity-90"
-              onError={(e) => { e.currentTarget.style.display = 'none'; }}
-            />
-          )}
-
-          <span className="text-[12px] font-semibold text-slate-100 truncate leading-tight min-w-0">
-            {stream.name}
-          </span>
-
-          {quality && (
-            <span className="flex-shrink-0">
-              <VideoQualityBadge quality={quality} size="xs" />
-            </span>
-          )}
-        </div>
+      {/* Spacer pushes the controls cluster right. */}
+      <div className="flex-1" />
 
         {/* ─── RIGHT: controls ───────────────────────────────────
-            No drag listeners here, so buttons remain clickable. The
-            cluster is always visible to satisfy "I want to see what
-            I can do at a glance." Volume + overflow popovers open
-            DOWNWARD into the video area so they don't get clipped
-            at the top of the tile. */}
-        <div className="flex items-center gap-0.5 flex-shrink-0">
+            Wrapped in a glass chip with the same backdrop language
+            as the title so icons stay readable on any frame (bright
+            scoreboards, stadium lights, white studio walls). No drag
+            listeners — buttons stay clickable. Volume + overflow
+            popovers open DOWNWARD into the video area so they don't
+            get clipped at the top of the tile. */}
+        <div className="pointer-events-auto flex items-center gap-0.5 flex-shrink-0 px-1 py-0.5 rounded-md bg-slate-950/55 backdrop-blur-sm ring-1 ring-white/[0.06] shadow-[0_2px_8px_rgba(0,0,0,0.35)]">
           <VolumeControl
             isMuted={isMuted}
             volume={volume}
@@ -182,7 +204,14 @@ const TileOSD = ({
             </OSDButton>
           )}
 
-          <span aria-hidden className="mx-0.5 h-4 w-px bg-slate-700/70" />
+          {/* Alternate-source / find-alternative buttons are IPTV-
+              specific (they search the user's IPTV catalog for the
+              same channel on a different account). YouTube tiles get
+              their fresh manifest via Refresh, so neither button
+              applies — they only render when their handler is wired. */}
+          {(onAlternateSources || onFindAlternative) && (
+            <span aria-hidden className="mx-0.5 h-4 w-px bg-slate-700/70" />
+          )}
 
           {onAlternateSources && (
             <OSDButton onClick={onAlternateSources} title="Switch source — alternate accounts carrying this channel" color="emerald">
@@ -193,24 +222,26 @@ const TileOSD = ({
             </OSDButton>
           )}
 
-          <OSDButton
-            onClick={onFindAlternative}
-            disabled={isFindingAlternative}
-            title="Find another stream (if blacked out)"
-            color="cyan"
-            active={isFindingAlternative}
-          >
-            {isFindingAlternative ? (
-              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 animate-spin" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-              </svg>
-            )}
-          </OSDButton>
+          {onFindAlternative && (
+            <OSDButton
+              onClick={onFindAlternative}
+              disabled={isFindingAlternative}
+              title="Find another stream (if blacked out)"
+              color="cyan"
+              active={isFindingAlternative}
+            >
+              {isFindingAlternative ? (
+                <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 animate-spin" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+              )}
+            </OSDButton>
+          )}
 
           <TileInfoButton stream={stream} quality={quality} />
 
@@ -287,7 +318,6 @@ const TileOSD = ({
             </OSDButton>
           )}
         </div>
-      </div>
     </div>
   );
 };

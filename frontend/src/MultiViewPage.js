@@ -11,6 +11,7 @@ import {
   BlacklistModal,
   TrendingModal,
   AllGamesModal,
+  YouTubeModal,
   BroadcasterCoverageModal,
   ChannelPickerModal,
   MultiViewRail,
@@ -36,6 +37,7 @@ import { useFavorites } from './hooks/multiview/useFavorites';
 import { useCommandPalette } from './hooks/multiview/useCommandPalette';
 import { useCommercialOrchestrator } from './hooks/multiview/useCommercialOrchestrator';
 import usePanelManager from './hooks/multiview/usePanelManager';
+import useYouTubeFavorites from './hooks/multiview/useYouTubeFavorites';
 
 /**
  * MultiViewPage — Patchbay-layout multi-stream viewer.
@@ -95,6 +97,7 @@ const MultiViewPage = ({ sessionId }) => {
   // layout). One drawer visible at a time; the rest dock in the
   // bottom taskbar but stay mounted so async work keeps running.
   const panels = usePanelManager();
+  const ytFavs = useYouTubeFavorites({ enabled: true });
   // Destructure the stable callbacks (useCallback'd inside the hook
   // with [] deps) so memoised openers below don't churn on every
   // render — depending on the `panels` object directly would mean
@@ -316,7 +319,33 @@ const MultiViewPage = ({ sessionId }) => {
   // ─── Wired handlers ────────────────────────────────────────────────
 
   // Favorite a currently-playing tile.
+  //
+  // YouTube tiles route through youtube_favorites (separate table —
+  // see migration 037). The IPTV favorites table requires a real
+  // (source_id, channel_id) tuple, which YouTube tiles don't have
+  // (they carry sourceId=0 as a sentinel). Keeping the two domains
+  // separate avoids polluting IPTV favorites with YouTube rows.
   const handleToggleTileFavorite = useCallback(async (stream) => {
+    if (stream?.sourceType === 'youtube') {
+      const channelId = stream.id;
+      const existing = ytFavs.favorites.find((f) => f.channelId === channelId);
+      if (existing) {
+        await ytFavs.removeFavorite(existing.id);
+        showToast(`Removed "${stream.name}" from favorites`, 'success');
+      } else {
+        const added = await ytFavs.addFavorite({
+          channelId,
+          name: stream.name,
+          handle: stream.ytHandle || null,
+          avatarUrl: stream.logo || null,
+          channelUrl: stream.url || null
+        });
+        if (added) showToast(`Saved "${stream.name}" to favorites`, 'success');
+        else showToast(`Failed to save "${stream.name}"`, 'error');
+      }
+      return;
+    }
+
     const wasFavorited = isFavorite(stream.sourceId, stream.id);
     const result = await toggleFavorite(stream);
     if (!result.ok) {
@@ -330,11 +359,16 @@ const MultiViewPage = ({ sessionId }) => {
         : `Saved "${stream.name}" to favorites`,
       'success'
     );
-  }, [isFavorite, toggleFavorite]);
+  }, [isFavorite, toggleFavorite, ytFavs]);
 
   // Play a favorite chip — fast-path: if already on screen, surface a
   // toast (no duplicate tiles); otherwise addToMultiview and bump
   // played-count for future "recent" sort.
+  //
+  // YouTube favorites route through the same addToMultiview path but
+  // skip bumpPlayed (which targets the IPTV favorites table). The fav
+  // object carries the full normalised shape already — see
+  // mergedFavorites below for the merge.
   const handlePlayFavorite = useCallback(async (fav) => {
     const alreadyOnScreen = streams.some(
       (s) => s.id === fav.channelId && s.sourceId === fav.sourceId
@@ -355,18 +389,51 @@ const MultiViewPage = ({ sessionId }) => {
       sourcePassword: fav.sourcePassword,
       sourceMac: fav.sourceMac,
       sourceName: fav.sourceName,
+      ytHandle: fav.ytHandle,
       searchQuery: fav.name
     };
     const ok = await addToMultiview(channel);
     if (ok) {
       window.dispatchEvent(new Event('multiviewUpdate'));
-      bumpPlayed(fav.id);
+      if (fav.sourceType !== 'youtube') bumpPlayed(fav.id);
       showToast(`Added "${fav.name}" to Multi-View`, 'success');
       return true;
     }
     showToast(`Failed to add "${fav.name}"`, 'error');
     return false;
   }, [streams, bumpPlayed]);
+
+  // Merge IPTV + YouTube favorites into a single list for the topbar
+  // strip. YouTube favorites carry sourceType='youtube' and a string
+  // id prefixed with 'yt:' so React keys don't collide with the
+  // numeric IPTV favorite ids.
+  const mergedFavorites = useMemo(() => {
+    const yt = (ytFavs.favorites || []).map((f) => ({
+      id: `yt:${f.id}`,
+      sourceId: 0,
+      channelId: f.channelId,
+      name: f.customName || f.name,
+      logo: f.avatarUrl || null,
+      url: f.channelUrl || null,
+      sourceType: 'youtube',
+      sourceName: 'YouTube',
+      sourceUrl: f.channelUrl || null,
+      ytHandle: f.handle || null
+    }));
+    return [...favorites, ...yt];
+  }, [favorites, ytFavs.favorites]);
+
+  // Remove handler that knows about both tables. The strip passes a
+  // raw favorite id; YouTube ids carry the 'yt:' prefix so we can
+  // route correctly. IPTV ids stay numeric.
+  const handleRemoveFavoriteSmart = useCallback(async (id) => {
+    if (typeof id === 'string' && id.startsWith('yt:')) {
+      const numeric = parseInt(id.slice(3), 10);
+      if (Number.isFinite(numeric)) await ytFavs.removeFavorite(numeric);
+      return;
+    }
+    return removeFavorite(id);
+  }, [removeFavorite, ytFavs]);
 
   // Header search submit — open the picker so generic queries surface
   // every match rather than auto-adding whichever ffprobe-validates
@@ -542,6 +609,10 @@ const MultiViewPage = ({ sessionId }) => {
     openPanel('allgames', { title: "Today's Slate", spineColor: 'amber', icon: BALL_ICON });
   }, [openPanel]);
 
+  const openYouTubePanel = useCallback(() => {
+    openPanel('youtube', { title: 'YouTube', spineColor: 'rose', icon: YOUTUBE_ICON });
+  }, [openPanel]);
+
   const openCoveragePanel = useCallback(() => {
     openPanel('coverage', { title: 'Broadcaster Coverage', spineColor: 'indigo', icon: BROADCAST_ICON });
   }, [openPanel]);
@@ -574,6 +645,7 @@ const MultiViewPage = ({ sessionId }) => {
   const onMinimizeSearch    = useCallback(() => minimizePanel('search'),    [minimizePanel]);
   const onMinimizeTrending  = useCallback(() => minimizePanel('trending'),  [minimizePanel]);
   const onMinimizeAllGames  = useCallback(() => minimizePanel('allgames'),  [minimizePanel]);
+  const onMinimizeYouTube   = useCallback(() => minimizePanel('youtube'),   [minimizePanel]);
   const onMinimizeCoverage  = useCallback(() => minimizePanel('coverage'),  [minimizePanel]);
   const onMinimizeBlacklist = useCallback(() => minimizePanel('blacklist'), [minimizePanel]);
   const onMinimizeSettings  = useCallback(() => minimizePanel('settings'),  [minimizePanel]);
@@ -582,6 +654,7 @@ const MultiViewPage = ({ sessionId }) => {
 
   const onCloseTrending  = useCallback(() => closePanel('trending'),  [closePanel]);
   const onCloseAllGames  = useCallback(() => closePanel('allgames'),  [closePanel]);
+  const onCloseYouTube   = useCallback(() => closePanel('youtube'),   [closePanel]);
   const onCloseCoverage  = useCallback(() => closePanel('coverage'),  [closePanel]);
   const onCloseBlacklist = useCallback(() => closePanel('blacklist'), [closePanel]);
   const onCloseSettings  = useCallback(() => closePanel('settings'),  [closePanel]);
@@ -591,6 +664,7 @@ const MultiViewPage = ({ sessionId }) => {
   const onStatusSearch   = useCallback((s) => setPanelStatus('search',   s), [setPanelStatus]);
   const onStatusTrending = useCallback((s) => setPanelStatus('trending', s), [setPanelStatus]);
   const onStatusAllGames = useCallback((s) => setPanelStatus('allgames', s), [setPanelStatus]);
+  const onStatusYouTube  = useCallback((s) => setPanelStatus('youtube',  s), [setPanelStatus]);
   const onStatusCoverage = useCallback((s) => setPanelStatus('coverage', s), [setPanelStatus]);
 
   const onVisibleFocusSearch = useCallback(() => pickerFocusRef.current?.focus?.(), []);
@@ -618,6 +692,30 @@ const MultiViewPage = ({ sessionId }) => {
     (code, signal) => searchByName(code, { mode: 'brand', signal }),
     [searchByName]
   );
+
+  // YouTube picker hands back a fully-shaped stream payload (sourceType
+  // 'youtube', sourceId 0). Route through the same addToMultiview path
+  // as every other stream source so persistence, dedupe, and layout
+  // ripple work uniformly.
+  const onYouTubePick = useCallback(async (stream) => {
+    if (!stream || !stream.id) return false;
+    const alreadyOnScreen = streams.some(
+      (s) => s.id === stream.id && s.sourceType === 'youtube'
+    );
+    if (alreadyOnScreen) {
+      showToast(`"${stream.name}" is already on screen`, 'info');
+      return false;
+    }
+    const ok = await addToMultiview(stream);
+    if (ok) {
+      window.dispatchEvent(new Event('multiviewUpdate'));
+      showToast(`Added "${stream.name}" to Multi-View`, 'success');
+      return true;
+    }
+    showToast(`Failed to add "${stream.name}"`, 'error');
+    return false;
+  }, [streams]);
+
   const onCoverageTest = useCallback(
     (code, signal, aliases) => searchByName(code, { mode: 'brand', signal, aliases }),
     [searchByName]
@@ -684,6 +782,7 @@ const MultiViewPage = ({ sessionId }) => {
     // DISCOVER
     { id: 'trending',   group: 'Discover', label: 'Trending channels',       hint: 'YT / Twitch / Reddit / Bluesky composite', accent: 'rose', icon: <CmdIcon name="flame" />, run: openTrendingPanel },
     { id: 'allgames',   group: 'Discover', label: 'All games today',         hint: 'Live, scheduled, and final',  accent: 'emerald', icon: <CmdIcon name="ball" />, run: openAllGamesPanel },
+    { id: 'youtube',    group: 'Discover', label: 'Add YouTube channel',     hint: 'Paste URL · search · favorites', accent: 'rose', icon: <CmdIcon name="play" />, run: openYouTubePanel },
     { id: 'coverage',   group: 'Discover', label: 'Broadcaster coverage',    hint: 'Alias gaps and discovery report', accent: 'cyan', icon: <CmdIcon name="broadcast" />, run: openCoveragePanel },
     { id: 'news',       group: 'Discover', label: 'Find local news',         hint: 'Random local news station',   accent: 'amber',   icon: <CmdIcon name="news" />, disabled: searchingNews, run: findLocalNews },
     // SAVED
@@ -698,7 +797,7 @@ const MultiViewPage = ({ sessionId }) => {
   ], [
     openSearch, handleAutoFill, openPickerEmpty, searchingNews, findLocalNews,
     findRandomSportsChannel, findRandomAnyChannel,
-    openTrendingPanel, openAllGamesPanel, openCoveragePanel,
+    openTrendingPanel, openAllGamesPanel, openYouTubePanel, openCoveragePanel,
     openFavoritesPanel, openBlacklistPanel, openSettingsPanel, openLayoutPanel,
     isTheatreMode, streams.length, autoFillSettings.showLiveScoresTicker,
     toggleTicker, setShowClearConfirm, setTheatreMode
@@ -741,6 +840,7 @@ const MultiViewPage = ({ sessionId }) => {
           onOpenPicker={openPickerEmpty}
           onOpenTrending={openTrendingPanel}
           onOpenAllGames={openAllGamesPanel}
+          onOpenYouTube={openYouTubePanel}
           onOpenCoverage={openCoveragePanel}
           onLocalNews={findLocalNews}
           onOpenBlacklist={openBlacklistPanel}
@@ -766,11 +866,11 @@ const MultiViewPage = ({ sessionId }) => {
       <div className="relative flex-1 flex flex-col min-w-0">
         {!isTheatreMode && (
           <MultiViewTopBar
-            favorites={favorites}
+            favorites={mergedFavorites}
             streams={streams}
             streamOrder={streamOrder}
             onPlayFavorite={handlePlayFavorite}
-            onRemoveFavorite={removeFavorite}
+            onRemoveFavorite={handleRemoveFavoriteSmart}
             showSearchInput={showSearchInput}
             setShowSearchInput={setShowSearchInput}
             searchQuery={searchQuery}
@@ -815,7 +915,11 @@ const MultiViewPage = ({ sessionId }) => {
             onAlternateSources={openPickerForStreamPanel}
             onBlacklist={addToBlacklist}
             onRemove={removeStream}
-            isFavorited={isFavorite}
+            isFavorited={(sourceId, id) =>
+              Number(sourceId) === 0
+                ? ytFavs.isFavorite(id)
+                : isFavorite(sourceId, id)
+            }
             onToggleFavorite={handleToggleTileFavorite}
             autoMutedKeys={commercial.autoMutedKeys}
             tileStates={commercial.tileStates}
@@ -918,6 +1022,34 @@ const MultiViewPage = ({ sessionId }) => {
                   onPickBroadcaster={onAllGamesPickBroadcaster}
                   onAfterPick={onMinimizeAllGames}
                   onStatusChange={onStatusAllGames}
+                />
+              </DrawerShell>
+            )}
+
+            {/* YOUTUBE — URL paste / search / favorites tabs. 480px is
+                comfortable for the URL input + paste hints; gives the
+                row layout room for the channel handle + LIVE chip. */}
+            {isPanelMounted('youtube') && (
+              <DrawerShell
+                isMounted={isPanelMounted('youtube')}
+                isVisible={isPanelOpen('youtube')}
+                width={480}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="YouTube"
+                subtitle="URL · search · favorites"
+                icon={YOUTUBE_ICON}
+                spineColor="rose"
+                status={getPanel('youtube')?.status}
+                onMinimize={onMinimizeYouTube}
+                onClose={onCloseYouTube}
+              >
+                <YouTubeModal
+                  isOpen={isPanelMounted('youtube')}
+                  isVisible={isPanelOpen('youtube')}
+                  onPick={onYouTubePick}
+                  onAfterPick={onMinimizeYouTube}
+                  onStatusChange={onStatusYouTube}
                 />
               </DrawerShell>
             )}
@@ -1120,6 +1252,7 @@ const SEARCH_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLine
 const FLAME_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M12 3c1 4 5 5 5 9a5 5 0 11-10 0c0-2 1-3 2-4-1 4 3 4 3 0 0-2 0-3 0-5z" /></svg>);
 const BALL_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3v18M5.5 5.5l13 13M18.5 5.5l-13 13" /></svg>);
 const BROADCAST_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" /><circle cx="12" cy="12" r="1.5" fill="currentColor" /></svg>);
+const YOUTUBE_ICON = (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="w-full h-full"><rect x="2.5" y="6" width="19" height="12" rx="3" /><path d="M11 9.5l4 2.5-4 2.5v-5z" fill="currentColor" stroke="none" /></svg>);
 const BAN_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path strokeLinecap="round" d="M5.6 5.6l12.8 12.8" /></svg>);
 const GEAR_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="3" /><path strokeLinecap="round" strokeLinejoin="round" d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 01-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 01-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 010-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3h0a1.7 1.7 0 001-1.5V3a2 2 0 014 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8v0a1.7 1.7 0 001.5 1H21a2 2 0 010 4h-.1a1.7 1.7 0 00-1.5 1z" /></svg>);
 const HEART_ICON = (<svg viewBox="0 0 24 24" fill="currentColor" className="w-full h-full"><path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" /></svg>);
@@ -1134,6 +1267,7 @@ const CmdIcon = ({ name }) => {
     case 'flame':     return (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={cls}><path strokeLinecap="round" strokeLinejoin="round" d="M12 3c1 4 5 5 5 9a5 5 0 11-10 0c0-2 1-3 2-4-1 4 3 4 3 0 0-2 0-3 0-5z" /></svg>);
     case 'ball':      return (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={cls}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3v18M5.5 5.5l13 13M18.5 5.5l-13 13" /></svg>);
     case 'broadcast': return (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={cls}><path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" /><circle cx="12" cy="12" r="1.5" fill="currentColor" /></svg>);
+    case 'play':      return (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className={cls}><rect x="2.5" y="6" width="19" height="12" rx="3" /><path d="M11 9.5l4 2.5-4 2.5v-5z" fill="currentColor" stroke="none" /></svg>);
     case 'news':      return (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={cls}><path strokeLinecap="round" strokeLinejoin="round" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z" /></svg>);
     case 'heart':     return (<svg viewBox="0 0 24 24" fill="currentColor" className={cls}><path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" /></svg>);
     case 'ban':       return (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={cls}><circle cx="12" cy="12" r="9" /><path strokeLinecap="round" d="M5.6 5.6l12.8 12.8" /></svg>);
