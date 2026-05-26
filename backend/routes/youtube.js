@@ -99,11 +99,12 @@ router.get('/favorites', async (req, res) => {
       `SELECT
           id, channel_id AS "channelId", name, custom_name AS "customName",
           handle, avatar_url AS "avatarUrl", channel_url AS "channelUrl",
+          position,
           EXTRACT(EPOCH FROM added_at) * 1000           AS "addedAt",
           EXTRACT(EPOCH FROM last_seen_live_at) * 1000  AS "lastSeenLiveAt"
         FROM youtube_favorites
         WHERE user_id = $1
-        ORDER BY added_at DESC`,
+        ORDER BY position ASC, added_at DESC`,
       [userId]
     );
     res.json({ success: true, favorites: result.rows });

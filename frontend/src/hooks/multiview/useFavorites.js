@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import logger from '../../utils/logger';
 
 /**
  * useFavorites — owns the per-user channel-favorites slice.
@@ -39,6 +40,7 @@ const keyOf = (sourceId, channelId) => `${sourceId}::${channelId}`;
 
 export function useFavorites({ enabled = true } = {}) {
   const [favorites, setFavorites] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   // The set of currently-favorited keys is derived but cached so callers
@@ -65,6 +67,7 @@ export function useFavorites({ enabled = true } = {}) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
       setFavorites(data.favorites || []);
+      setFolders(data.folders || []);
     } catch (e) {
       console.error('[useFavorites] load failed', e);
       setError(e.message || 'Failed to load favorites');
@@ -232,6 +235,192 @@ export function useFavorites({ enabled = true } = {}) {
     }
   }, [favorites]);
 
+  // ── Folder helpers ───────────────────────────────────────────────
+  //
+  // All four mutations are optimistic-then-confirm. We reload from the
+  // server on success to pull canonical positions back (the backend
+  // computes append positions which the client can't reliably predict).
+
+  const createFolder = useCallback(async ({ name, color, memberIds } = {}) => {
+    try {
+      const res = await fetch('/api/favorites/folders', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          name: name || 'Folder',
+          color: color || null,
+          memberIds: Array.isArray(memberIds) ? memberIds : []
+        })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      await reload();
+      return data.folderId;
+    } catch (e) {
+      console.error('[useFavorites] createFolder failed', e);
+      setError(e.message || 'Failed to create folder');
+      return null;
+    }
+  }, [reload]);
+
+  const renameFolder = useCallback(async (folderId, name) => {
+    // Optimistic — flip name locally first.
+    const prev = folders;
+    setFolders((p) => p.map((f) => (f.id === folderId ? { ...f, name } : f)));
+    try {
+      const res = await fetch(`/api/favorites/folders/${folderId}`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ name })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      return { ok: true };
+    } catch (e) {
+      console.error('[useFavorites] renameFolder failed', e);
+      setFolders(prev);
+      setError(e.message || 'Failed to rename folder');
+      return { ok: false, error: e.message };
+    }
+  }, [folders]);
+
+  const deleteFolder = useCallback(async (folderId) => {
+    // Optimistic — remove folder, promote children to top level. The
+    // server enforces the same via ON DELETE SET NULL.
+    const prevFolders = folders;
+    const prevFavorites = favorites;
+    setFolders((p) => p.filter((f) => f.id !== folderId));
+    setFavorites((p) =>
+      p.map((f) => (f.folderId === folderId ? { ...f, folderId: null, folderPosition: 0 } : f))
+    );
+    try {
+      const res = await fetch(`/api/favorites/folders/${folderId}`, {
+        method: 'DELETE',
+        headers: authHeaders()
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      // Reload so positions are right.
+      await reload();
+      return { ok: true };
+    } catch (e) {
+      console.error('[useFavorites] deleteFolder failed', e);
+      setFolders(prevFolders);
+      setFavorites(prevFavorites);
+      setError(e.message || 'Failed to delete folder');
+      return { ok: false, error: e.message };
+    }
+  }, [folders, favorites, reload]);
+
+  // Top-level reorder — covers both chips and folders in a single
+  // request. The caller passes the desired order as a flat array of
+  // { kind: 'chip' | 'folder', id } items; the server stamps
+  // position = array_index across both tables.
+  const reorderTopLevel = useCallback(async (items) => {
+    logger.info(`[FavStrip:reorderTopLevel] called ${JSON.stringify({ items })}`);
+    if (!Array.isArray(items) || items.length === 0) {
+      logger.info('[FavStrip:reorderTopLevel] bail: empty items');
+      return { ok: false, error: 'Empty items' };
+    }
+
+    // Optimistic — re-stamp local positions immediately so the rail
+    // doesn't snap back to the old order while the request is in flight.
+    const positionByKey = new Map();
+    items.forEach((it, i) => positionByKey.set(`${it.kind}:${it.id}`, i));
+    logger.info(`[FavStrip:reorderTopLevel] positionByKey ${JSON.stringify({
+      entries: Array.from(positionByKey.entries()),
+      currentTopLevelFavorites: favorites.filter(f => f.folderId == null).map(f => ({ id: f.id, name: f.name, position: f.position })),
+      currentFolders: folders.map(f => ({ id: f.id, name: f.name, position: f.position }))
+    })}`);
+    const prevFavorites = favorites;
+    const prevFolders = folders;
+
+    setFavorites((prev) =>
+      prev.map((f) => {
+        if (f.folderId != null) return f;
+        const np = positionByKey.get(`chip:${f.id}`);
+        return Number.isFinite(np) ? { ...f, position: np } : f;
+      })
+    );
+    setFolders((prev) =>
+      prev.map((fld) => {
+        const np = positionByKey.get(`folder:${fld.id}`);
+        return Number.isFinite(np) ? { ...fld, position: np } : fld;
+      })
+    );
+
+    try {
+      const res = await fetch('/api/favorites/order', {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ items })
+      });
+      const data = await res.json().catch(() => null);
+      logger.info(`[FavStrip:reorderTopLevel] server response ${JSON.stringify({ status: res.status, data })}`);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      // Reload from server so the local state's positions match
+      // canonically what the server stamped.
+      await reload();
+      // Log post-reload state from a fresh fetch so we can see what
+      // /api/favorites returned.
+      try {
+        const verify = await fetch('/api/favorites', { headers: authHeaders() });
+        const vd = await verify.json().catch(() => null);
+        const topFavs = (vd?.favorites || []).filter(f => f.folderId == null).map(f => ({ id: f.id, name: f.name, position: f.position }));
+        const fldrs = (vd?.folders || []).map(f => ({ id: f.id, name: f.name, position: f.position }));
+        logger.info(`[FavStrip:reorderTopLevel] reload verify ${JSON.stringify({ topFavs, fldrs })}`);
+      } catch (_) {}
+      return { ok: true };
+    } catch (e) {
+      console.error('[useFavorites] reorderTopLevel failed', e);
+      setFavorites(prevFavorites);
+      setFolders(prevFolders);
+      setError(e.message || 'Failed to reorder');
+      return { ok: false, error: e.message };
+    }
+  }, [favorites, folders, reload]);
+
+  const moveFavorite = useCallback(async (favId, { folderId, position } = {}) => {
+    const prev = favorites;
+    setFavorites((p) =>
+      p.map((f) =>
+        f.id === favId
+          ? {
+              ...f,
+              folderId: folderId === undefined ? f.folderId : folderId,
+              folderPosition: Number.isFinite(position) && position >= 0 ? position : f.folderPosition
+            }
+          : f
+      )
+    );
+    try {
+      const res = await fetch(`/api/favorites/${favId}/move`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ folderId: folderId === undefined ? null : folderId, position: Number.isFinite(position) ? position : -1 })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      await reload();
+      return { ok: true };
+    } catch (e) {
+      console.error('[useFavorites] moveFavorite failed', e);
+      setFavorites(prev);
+      setError(e.message || 'Failed to move favorite');
+      return { ok: false, error: e.message };
+    }
+  }, [favorites, reload]);
+
   // Fire-and-forget — we don't optimistically update play counters in
   // local state, the next reload will pick them up. This is the
   // "telemetry-ish" path so a failed POST shouldn't surface to the user.
@@ -249,6 +438,7 @@ export function useFavorites({ enabled = true } = {}) {
 
   return {
     favorites,
+    folders,
     loading,
     error,
     isFavorite,
@@ -258,6 +448,11 @@ export function useFavorites({ enabled = true } = {}) {
     removeFavorite,
     reorder,
     bumpPlayed,
-    reload
+    reload,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    moveFavorite,
+    reorderTopLevel
   };
 }

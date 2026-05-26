@@ -260,10 +260,13 @@ const RailButton = ({ item, active, busy, disabled, badge, onClick }) => {
         disabled={disabled}
         aria-pressed={active}
         aria-busy={busy || undefined}
-        // Fallback native tooltip — if the portal misses for any
-        // reason (e.g. fast pointer move), the browser still shows
-        // the OS-level tooltip after the usual delay.
-        title={item.label + (item.hint ? `  (${item.hint})` : '')}
+        // Accessibility name comes from aria-label so screen readers
+        // still announce the button. We deliberately don't use `title`
+        // here — the native OS tooltip would render alongside the
+        // portal-rendered RailTooltip on a long hover, producing two
+        // overlapping tooltips. aria-label gives equivalent a11y
+        // without the visual collision.
+        aria-label={item.label + (item.hint ? ` (${item.hint})` : '')}
         className={`relative flex h-9 w-9 items-center justify-center rounded-md transition ${
           disabled
             ? 'text-slate-700 cursor-not-allowed opacity-50'
@@ -317,7 +320,7 @@ const PaletteButton = ({ onClick }) => {
         onMouseLeave={close}
         onFocus={open}
         onBlur={close}
-        title="Command palette  (⌘K)"
+        aria-label="Command palette (⌘K)"
         className="relative flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:text-cyan-200 hover:bg-cyan-500/10 transition"
       >
         <span className="font-mono text-[9px] font-bold tracking-tight">⌘K</span>

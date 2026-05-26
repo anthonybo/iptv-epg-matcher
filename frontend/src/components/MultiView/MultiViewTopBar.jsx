@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import FavoritesStrip from './FavoritesStrip';
+import FavoritesStrip, { computePresetCounts } from './FavoritesStrip';
 
 /**
  * MultiViewTopBar — the slim 40px control panel above the tile grid.
@@ -15,10 +15,16 @@ import FavoritesStrip from './FavoritesStrip';
 const MultiViewTopBar = ({
   // Favorites
   favorites,
+  favoriteFolders = [],
   streams,
   streamOrder,
   onPlayFavorite,
   onRemoveFavorite,
+  onCreateFavoriteFolder,
+  onRenameFavoriteFolder,
+  onDeleteFavoriteFolder,
+  onMoveFavoriteToFolder,
+  onReorderTopLevelFavorites,
   // Inline search input (toggled by rail's "⌕ Search")
   showSearchInput,
   setShowSearchInput,
@@ -54,7 +60,14 @@ const MultiViewTopBar = ({
     };
   }, [showSearchInput, setShowSearchInput, setSearchQuery]);
 
+  // Compute top-level vs total counts so the LED reads correctly when
+  // folders are in play (one folder = one top-level "tile" even if it
+  // holds 6 channels). Falls back to raw length when there are no
+  // folders so the value matches the pre-folder behaviour exactly.
+  const presetCounts = computePresetCounts(favorites || [], favoriteFolders || []);
   const favCount = favorites?.length || 0;
+  const topLevelCount = presetCounts.topLevelCount;
+  const hasFolders = presetCounts.folderCount > 0;
 
   return (
     <header
@@ -81,17 +94,29 @@ const MultiViewTopBar = ({
         </span>
 
         {/* LED-style two-digit count. Recessed border + inset shadow +
-            amber glow when populated; dark/dim when empty. */}
+            amber glow when populated; dark/dim when empty. With
+            folders in play, the LED shows top-level tiles and a
+            secondary mono badge shows "total channels" so the user
+            can tell at a glance how many things are tucked away. */}
         <span
           className={`relative inline-flex items-center px-1.5 py-0.5 rounded-sm font-mono text-[10px] tabular-nums tracking-tight border flex-shrink-0 ${
-            favCount > 0
+            topLevelCount > 0
               ? 'text-amber-200 border-amber-500/30 bg-amber-500/[0.04] shadow-[inset_0_1px_2px_rgba(0,0,0,0.55),0_0_8px_rgba(251,191,36,0.12)]'
               : 'text-slate-600 border-slate-800 bg-slate-950 shadow-[inset_0_1px_2px_rgba(0,0,0,0.55)]'
           }`}
-          aria-label={`${favCount} favorites`}
+          aria-label={`${topLevelCount} top-level presets, ${favCount} channels total`}
+          title={hasFolders ? `${topLevelCount} tiles · ${favCount} channels` : `${favCount} presets`}
         >
-          {String(favCount).padStart(2, '0')}
+          {String(topLevelCount).padStart(2, '0')}
         </span>
+        {hasFolders && (
+          <span
+            className="hidden sm:inline-flex items-center px-1 py-0.5 rounded-sm font-mono text-[9px] tabular-nums tracking-[0.12em] text-slate-500 border border-slate-800/60 bg-slate-950 flex-shrink-0"
+            title={`${favCount} channels grouped across ${presetCounts.folderCount} folder${presetCounts.folderCount === 1 ? '' : 's'}`}
+          >
+            {String(favCount).padStart(2, '0')}<span className="text-slate-700 ml-0.5">CH</span>
+          </span>
+        )}
 
         {/* Slim divider — tiny vertical hairline before the strip. */}
         <span aria-hidden className="h-4 w-px bg-slate-800 flex-shrink-0 mx-0.5" />
@@ -100,13 +125,19 @@ const MultiViewTopBar = ({
             horizontally when it overflows. Single-line chips inside,
             so 28px tall is plenty even after rounding for the icon
             and ring. */}
-        <div className="flex-1 min-w-0 h-[26px]">
+        <div className="flex-1 min-w-0 h-[26px]" data-favstrip-rail>
           <FavoritesStrip
             favorites={favorites}
+            folders={favoriteFolders}
             streams={streams}
             streamOrder={streamOrder}
             onPlay={onPlayFavorite}
             onRemove={onRemoveFavorite}
+            onCreateFolder={onCreateFavoriteFolder}
+            onRenameFolder={onRenameFavoriteFolder}
+            onDeleteFolder={onDeleteFavoriteFolder}
+            onMoveFavorite={onMoveFavoriteToFolder}
+            onReorderTopLevel={onReorderTopLevelFavorites}
           />
         </div>
       </div>

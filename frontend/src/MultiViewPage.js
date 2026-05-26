@@ -243,12 +243,18 @@ const MultiViewPage = ({ sessionId }) => {
 
   const {
     favorites,
+    folders: favoriteFolders,
     loading: favoritesLoading,
     isFavorite,
     toggleFavorite,
     removeFavorite,
     reorder: reorderFavorites,
-    bumpPlayed
+    bumpPlayed,
+    createFolder: createFavoriteFolder,
+    renameFolder: renameFavoriteFolder,
+    deleteFolder: deleteFavoriteFolder,
+    moveFavorite: moveFavoriteToFolder,
+    reorderTopLevel: reorderTopLevelFavorites
   } = useFavorites();
 
   const palette = useCommandPalette();
@@ -419,7 +425,11 @@ const MultiViewPage = ({ sessionId }) => {
       sourceType: 'youtube',
       sourceName: 'YouTube',
       sourceUrl: f.channelUrl || null,
-      ytHandle: f.handle || null
+      ytHandle: f.handle || null,
+      // Position is shared with the IPTV preset positions so the rail
+      // sort can interleave YT and IPTV favorites correctly. Backend's
+      // /api/favorites/order PATCH stamps both tables in lockstep.
+      position: f.position ?? 0
     }));
     return [...favorites, ...yt];
   }, [favorites, ytFavs.favorites]);
@@ -921,10 +931,22 @@ const MultiViewPage = ({ sessionId }) => {
         {!isTheatreMode && (
           <MultiViewTopBar
             favorites={mergedFavorites}
+            favoriteFolders={favoriteFolders}
             streams={streams}
             streamOrder={streamOrder}
             onPlayFavorite={handlePlayFavorite}
             onRemoveFavorite={handleRemoveFavoriteSmart}
+            onCreateFavoriteFolder={createFavoriteFolder}
+            onRenameFavoriteFolder={renameFavoriteFolder}
+            onDeleteFavoriteFolder={deleteFavoriteFolder}
+            onMoveFavoriteToFolder={moveFavoriteToFolder}
+            onReorderTopLevelFavorites={async (items) => {
+              const r = await reorderTopLevelFavorites(items);
+              // YT favs are in a separate hook; refresh them so the
+              // server-stamped position fields land in local state.
+              try { await ytFavs.refresh?.(); } catch (_) {}
+              return r;
+            }}
             showSearchInput={showSearchInput}
             setShowSearchInput={setShowSearchInput}
             searchQuery={searchQuery}

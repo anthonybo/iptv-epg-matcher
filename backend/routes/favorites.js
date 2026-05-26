@@ -5,11 +5,16 @@
  * Same channel name from different sources/accounts is intentionally
  * stored as distinct rows — that's the whole point of this feature.
  *
- *   GET    /api/favorites              → list user's favorites + source meta
- *   POST   /api/favorites              → add { sourceId, channelId, name, logo, url }
- *   DELETE /api/favorites/:id          → remove one
- *   PATCH  /api/favorites/reorder      → body: [{ id, position }, ...]
- *   POST   /api/favorites/:id/played   → bump play count + last_played_at
+ *   GET    /api/favorites                       → { favorites, folders }
+ *   POST   /api/favorites                       → add { sourceId, channelId, name, logo, url }
+ *   DELETE /api/favorites/:id                   → remove one
+ *   PATCH  /api/favorites/reorder               → body: [{ id, position }, ...]
+ *   POST   /api/favorites/:id/played            → bump play count + last_played_at
+ *
+ *   POST   /api/favorites/folders               → { name, color?, memberIds? } → create
+ *   PATCH  /api/favorites/folders/:id           → { name?, color?, position? } → rename/recolor/reorder
+ *   DELETE /api/favorites/folders/:id           → delete folder, children fall back to top level
+ *   PATCH  /api/favorites/:favId/move           → { folderId, position }, null folderId = top level
  */
 
 const express = require('express');
@@ -32,6 +37,8 @@ const SELECT_WITH_SOURCE = `
     f.logo,
     f.url,
     f.position,
+    f.folder_id       AS "folderId",
+    f.folder_position AS "folderPosition",
     f.play_count      AS "playCount",
     EXTRACT(EPOCH FROM f.last_played_at) * 1000 AS "lastPlayedAt",
     EXTRACT(EPOCH FROM f.created_at)     * 1000 AS "createdAt",
@@ -46,18 +53,33 @@ const SELECT_WITH_SOURCE = `
   WHERE f.user_id = $1
 `;
 
+const SELECT_FOLDERS = `
+  SELECT id, name, color, position,
+         EXTRACT(EPOCH FROM created_at) * 1000 AS "createdAt"
+  FROM channel_favorite_folders
+  WHERE user_id = $1
+  ORDER BY position ASC, created_at ASC
+`;
+
 router.get('/', async (req, res) => {
   try {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'Authentication required' });
 
-    const result = await postgresService.query(
-      `${SELECT_WITH_SOURCE}
-       ORDER BY f.position ASC, f.created_at ASC`,
-      [userId]
-    );
+    const [favs, fldrs] = await Promise.all([
+      postgresService.query(
+        `${SELECT_WITH_SOURCE}
+         ORDER BY f.position ASC, f.created_at ASC`,
+        [userId]
+      ),
+      postgresService.query(SELECT_FOLDERS, [userId])
+    ]);
 
-    res.json({ success: true, favorites: result.rows });
+    res.json({
+      success: true,
+      favorites: favs.rows,
+      folders: fldrs.rows
+    });
   } catch (error) {
     logger.error('Get favorites failed:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -197,6 +219,280 @@ router.post('/:id/played', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     logger.error('Bump favorite play stats failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ─── Folder endpoints ─────────────────────────────────────────────
+//
+// Folders sit alongside top-level favorites in the rail. Each
+// channel_favorites row carries a nullable folder_id; null = top-level.
+// Position semantics: folder.position interleaves with top-level
+// favorite.position (both are user-scoped 0..N sequences and the
+// frontend sorts by the union). folder_position orders children
+// *within* the folder.
+
+// POST /folders — create. Optionally accepts memberIds to move
+// existing favorites into the new folder in a single round-trip
+// (this is what the "drop chip on chip → make folder" flow needs).
+router.post('/folders', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const name = String(req.body?.name || '').trim().slice(0, 80) || 'Folder';
+    const color = req.body?.color ? String(req.body.color).slice(0, 16) : null;
+    const memberIds = Array.isArray(req.body?.memberIds)
+      ? req.body.memberIds.map((n) => parseInt(n, 10)).filter(Number.isFinite)
+      : [];
+
+    let folderId;
+    await postgresService.transaction(async (client) => {
+      // Place new folder at the end of the user's top-level row.
+      const posResult = await client.query(
+        `SELECT GREATEST(
+           COALESCE((SELECT MAX(position) FROM channel_favorite_folders WHERE user_id = $1), -1),
+           COALESCE((SELECT MAX(position) FROM channel_favorites WHERE user_id = $1 AND folder_id IS NULL), -1)
+         ) + 1 AS next_pos`,
+        [userId]
+      );
+      const nextPos = posResult.rows[0].next_pos;
+
+      const ins = await client.query(
+        `INSERT INTO channel_favorite_folders (user_id, name, color, position)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [userId, name, color, nextPos]
+      );
+      folderId = ins.rows[0].id;
+
+      if (memberIds.length > 0) {
+        for (let i = 0; i < memberIds.length; i++) {
+          await client.query(
+            `UPDATE channel_favorites
+             SET folder_id = $1, folder_position = $2
+             WHERE id = $3 AND user_id = $4`,
+            [folderId, i, memberIds[i], userId]
+          );
+        }
+      }
+    });
+
+    logger.info(`User ${userId} created folder "${name}" (${folderId}) with ${memberIds.length} members`);
+    res.json({ success: true, folderId });
+  } catch (error) {
+    logger.error('Create favorite folder failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// PATCH /folders/:id — rename / recolor / reposition.
+router.patch('/folders/:id', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const folderId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(folderId)) {
+      return res.status(400).json({ error: 'Invalid folder id' });
+    }
+
+    const updates = [];
+    const params = [folderId, userId];
+    if (typeof req.body?.name === 'string') {
+      const name = req.body.name.trim().slice(0, 80);
+      if (name) {
+        params.push(name);
+        updates.push(`name = $${params.length}`);
+      }
+    }
+    if (req.body?.color !== undefined) {
+      params.push(req.body.color ? String(req.body.color).slice(0, 16) : null);
+      updates.push(`color = $${params.length}`);
+    }
+    if (Number.isFinite(parseInt(req.body?.position, 10))) {
+      params.push(parseInt(req.body.position, 10));
+      updates.push(`position = $${params.length}`);
+    }
+    if (updates.length === 0) {
+      return res.json({ success: true, noop: true });
+    }
+
+    await postgresService.query(
+      `UPDATE channel_favorite_folders
+       SET ${updates.join(', ')}
+       WHERE id = $1 AND user_id = $2`,
+      params
+    );
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Patch favorite folder failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /folders/:id — delete a folder. ON DELETE SET NULL on the FK
+// promotes the children to top-level automatically.
+router.delete('/folders/:id', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const folderId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(folderId)) {
+      return res.status(400).json({ error: 'Invalid folder id' });
+    }
+
+    const result = await postgresService.query(
+      `DELETE FROM channel_favorite_folders WHERE id = $1 AND user_id = $2`,
+      [folderId, userId]
+    );
+    res.json({ success: true, deleted: result.rowCount > 0 });
+  } catch (error) {
+    logger.error('Delete favorite folder failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// PATCH /:favId/move — move a favorite into / out of a folder, or
+// reorder within a folder. position = -1 appends.
+router.patch('/:favId/move', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const favoriteId = parseInt(req.params.favId, 10);
+    if (!Number.isFinite(favoriteId)) {
+      return res.status(400).json({ error: 'Invalid favorite id' });
+    }
+
+    const folderIdRaw = req.body?.folderId;
+    const folderId = folderIdRaw === null || folderIdRaw === undefined
+      ? null
+      : parseInt(folderIdRaw, 10);
+    if (folderId !== null && !Number.isFinite(folderId)) {
+      return res.status(400).json({ error: 'Invalid folderId' });
+    }
+    let position = parseInt(req.body?.position, 10);
+    if (!Number.isFinite(position)) position = -1;
+
+    await postgresService.transaction(async (client) => {
+      // Validate ownership of both rows.
+      const ok = await client.query(
+        `SELECT 1 FROM channel_favorites WHERE id = $1 AND user_id = $2`,
+        [favoriteId, userId]
+      );
+      if (ok.rowCount === 0) throw new Error('Favorite not found');
+      if (folderId !== null) {
+        const f = await client.query(
+          `SELECT 1 FROM channel_favorite_folders WHERE id = $1 AND user_id = $2`,
+          [folderId, userId]
+        );
+        if (f.rowCount === 0) throw new Error('Folder not found');
+      }
+
+      // Compute target position if append.
+      if (position < 0) {
+        if (folderId === null) {
+          const r = await client.query(
+            `SELECT COALESCE(MAX(position) + 1, 0) AS p FROM channel_favorites
+             WHERE user_id = $1 AND folder_id IS NULL`,
+            [userId]
+          );
+          position = r.rows[0].p;
+        } else {
+          const r = await client.query(
+            `SELECT COALESCE(MAX(folder_position) + 1, 0) AS p FROM channel_favorites
+             WHERE user_id = $1 AND folder_id = $2`,
+            [userId, folderId]
+          );
+          position = r.rows[0].p;
+        }
+      }
+
+      if (folderId === null) {
+        await client.query(
+          `UPDATE channel_favorites
+           SET folder_id = NULL, folder_position = 0, position = $1
+           WHERE id = $2 AND user_id = $3`,
+          [position, favoriteId, userId]
+        );
+      } else {
+        await client.query(
+          `UPDATE channel_favorites
+           SET folder_id = $1, folder_position = $2
+           WHERE id = $3 AND user_id = $4`,
+          [folderId, position, favoriteId, userId]
+        );
+      }
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Move favorite failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// PATCH /order — unified top-level reorder for the preset rail.
+// Body: { items: [{ kind: 'chip' | 'folder', id }, ...] }
+// Stamps position = array_index across BOTH tables in a single
+// transaction so a folder and a chip can share the same logical row
+// and the frontend can sort by position regardless of kind.
+//
+// We deliberately keep the existing /reorder endpoint (chip-only)
+// for backward compatibility — but the rail now uses this one.
+router.patch('/order', async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+    const items = Array.isArray(req.body?.items) ? req.body.items : null;
+    if (!items) return res.status(400).json({ error: 'items array required' });
+
+    await postgresService.transaction(async (client) => {
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        // YouTube favorites carry string IDs of the form "yt:N".
+        // Route them to the youtube_favorites table; everything else
+        // goes to the IPTV channel_favorites/folders tables.
+        const rawId = String(it?.id ?? '');
+        const ytMatch = rawId.match(/^yt:(\d+)$/);
+        if (ytMatch) {
+          const ytId = parseInt(ytMatch[1], 10);
+          if (!Number.isFinite(ytId)) continue;
+          await client.query(
+            `UPDATE youtube_favorites SET position = $1
+             WHERE id = $2 AND user_id = $3`,
+            [i, ytId, userId]
+          );
+          continue;
+        }
+        const id = parseInt(rawId, 10);
+        if (!Number.isFinite(id)) continue;
+        if (it.kind === 'folder') {
+          await client.query(
+            `UPDATE channel_favorite_folders SET position = $1
+             WHERE id = $2 AND user_id = $3`,
+            [i, id, userId]
+          );
+        } else if (it.kind === 'chip') {
+          // Only re-stamp top-level chips (folder_id IS NULL). A chip
+          // inside a folder shouldn't show up in this payload, but
+          // guard with the WHERE clause anyway so a stale client can't
+          // accidentally pull rows out of a folder.
+          await client.query(
+            `UPDATE channel_favorites SET position = $1
+             WHERE id = $2 AND user_id = $3 AND folder_id IS NULL`,
+            [i, id, userId]
+          );
+        }
+      }
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Reorder top-level failed:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

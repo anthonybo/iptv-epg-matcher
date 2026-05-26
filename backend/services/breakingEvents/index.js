@@ -137,22 +137,51 @@ function buildUserPrompt({ threads, articles }) {
  * @param {{ force?: boolean }} [opts]
  * @returns {Promise<{ events: Array, cachedAt: number, source: 'llm'|'fallback'|'empty' }>}
  */
-async function synthesizeEvents({ force = false } = {}) {
+async function synthesizeEvents({ force = false, onProgress } = {}) {
+  // onProgress(ev) — optional callback the streaming route uses to push
+  // SSE updates. Shape: { type: 'source_start'|'source_ok'|'source_err'|
+  // 'synthesis_start'|'synthesis_ok'|'cache_hit', ...payload }
+  const emit = (type, payload = {}) => {
+    if (typeof onProgress !== 'function') return;
+    try { onProgress({ type, ...payload }); } catch (_) { /* swallow */ }
+  };
+
   if (!force && synthCache.events && Date.now() - synthCache.ts < SYNTH_CACHE_TTL_MS) {
-    return { events: synthCache.events, cachedAt: synthCache.ts, source: 'llm' };
+    emit('cache_hit', { age: Date.now() - synthCache.ts });
+    return { events: synthCache.events, cachedAt: synthCache.ts, source: 'llm', fromCache: true };
   }
 
   const t0 = Date.now();
-  // Fire both sources in parallel — they're independent. Reddit is the
-  // bottleneck (~25s with rate limiting), GDELT typically lands in
-  // ~2s. Promise.allSettled means a failure in one doesn't stall the
-  // other.
-  const [threadsRes, articlesRes] = await Promise.allSettled([
-    collectHotThreads({ perSub: 8, totalCap: 50 }),
-    collectArticles({ maxRecords: 120, timespanHours: 2 })
-  ]);
-  const threads  = threadsRes.status  === 'fulfilled' ? threadsRes.value  : [];
-  const articles = articlesRes.status === 'fulfilled' ? articlesRes.value : [];
+  // Fire both sources in parallel. Each emits its own start/ok/err
+  // so the SSE consumer can show "Reddit: ✓ 50 signals · GDELT: ✗ 429"
+  // as soon as each individually settles, rather than waiting for the
+  // pair. Promise.all is fine here because each branch swallows its
+  // own error and resolves with [].
+  const threadsPromise = (async () => {
+    const t = Date.now();
+    emit('source_start', { source: 'reddit' });
+    try {
+      const v = await collectHotThreads({ perSub: 8, totalCap: 50 });
+      emit('source_ok', { source: 'reddit', count: v.length, ms: Date.now() - t });
+      return v;
+    } catch (e) {
+      emit('source_err', { source: 'reddit', error: e.message, ms: Date.now() - t });
+      return [];
+    }
+  })();
+  const articlesPromise = (async () => {
+    const t = Date.now();
+    emit('source_start', { source: 'gdelt' });
+    try {
+      const v = await collectArticles({ maxRecords: 120, timespanHours: 2 });
+      emit('source_ok', { source: 'gdelt', count: v.length, ms: Date.now() - t });
+      return v;
+    } catch (e) {
+      emit('source_err', { source: 'gdelt', error: e.message, ms: Date.now() - t });
+      return [];
+    }
+  })();
+  const [threads, articles] = await Promise.all([threadsPromise, articlesPromise]);
   logger.info(`[BreakingEvents] Collected ${threads.length} hot threads + ${articles.length} GDELT articles in ${Date.now() - t0}ms.`);
 
   if (threads.length === 0 && articles.length === 0) {
@@ -189,6 +218,7 @@ async function synthesizeEvents({ force = false } = {}) {
     };
   }
 
+  emit('synthesis_start', { threadCount: threads.length, articleCount: articles.length });
   const tLlm0 = Date.now();
   const result = await generateJson({
     system: SYSTEM_PROMPT,
@@ -198,7 +228,9 @@ async function synthesizeEvents({ force = false } = {}) {
     temperature: 0.3,
     timeoutMs: 45_000
   });
-  logger.info(`[BreakingEvents] LLM synthesis returned in ${Date.now() - tLlm0}ms.`);
+  const llmMs = Date.now() - tLlm0;
+  emit('synthesis_ok', { ms: llmMs, eventCount: result?.events?.length || 0 });
+  logger.info(`[BreakingEvents] LLM synthesis returned in ${llmMs}ms.`);
 
   if (!result || !Array.isArray(result.events)) {
     logger.warn('[BreakingEvents] LLM returned no parseable events; using fallback.');
@@ -465,8 +497,16 @@ async function attachChannelMatches(userId, events) {
  *   // { events: […], cachedAt, source }
  */
 async function getBreakingEvents(userId, opts = {}) {
+  // `opts.onProgress` (if provided) is forwarded into synthesis so
+  // the SSE route can stream per-source updates.
   const synth = await synthesizeEvents(opts);
+  if (typeof opts.onProgress === 'function') {
+    try { opts.onProgress({ type: 'matching_start', count: synth.events.length }); } catch (_) {}
+  }
   const events = await attachChannelMatches(userId, synth.events);
+  if (typeof opts.onProgress === 'function') {
+    try { opts.onProgress({ type: 'matching_ok', count: events.length }); } catch (_) {}
+  }
   return { ...synth, events };
 }
 

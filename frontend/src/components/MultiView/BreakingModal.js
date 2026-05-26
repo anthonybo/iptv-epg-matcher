@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import apiClient from '../../utils/apiClient';
 
 /**
  * BreakingModal — drawer that surfaces real-time real-world events
@@ -34,10 +33,18 @@ const BreakingModal = ({
   const [meta, setMeta] = useState({ source: null, cachedAt: null, elapsedMs: null });
   const [pickingKey, setPickingKey] = useState(null);
   const [expandedEventIdx, setExpandedEventIdx] = useState(null);
-  // Elapsed seconds during a fetch. First-time / cold synth crawls 16
-  // Reddit subs + GDELT and runs the LLM — typically ~25–30s. Showing
-  // the elapsed counter makes "this is working, not frozen" visible.
   const [elapsedSec, setElapsedSec] = useState(0);
+
+  // Per-source progress streamed from the backend SSE pipeline. Each
+  // source moves through 'pending' → 'loading' → 'ok' | 'err'. The
+  // 'stage' captures where the pipeline is overall.
+  const [stage, setStage] = useState('idle'); // idle | sources | synthesis | matching | done
+  const [sourceStatus, setSourceStatus] = useState({
+    reddit: { state: 'pending', count: null, ms: null, error: null },
+    gdelt:  { state: 'pending', count: null, ms: null, error: null }
+  });
+  // EventSource ref so we can close it on unmount / re-fetch.
+  const esRef = useRef(null);
 
   const headerRef = useRef(null);
 
@@ -45,42 +52,105 @@ const BreakingModal = ({
     if (autoFocusRef) autoFocusRef.current = { focus: () => headerRef.current?.focus() };
   }, [autoFocusRef]);
 
-  const fetchEvents = useCallback(async ({ force = false } = {}) => {
+  const fetchEvents = useCallback(({ force = false } = {}) => {
+    // Tear down any in-flight stream before starting a new one.
+    if (esRef.current) {
+      try { esRef.current.close(); } catch (_) {}
+      esRef.current = null;
+    }
     if (force) setRefreshing(true);
     else setLoading(true);
     setError(null);
     setElapsedSec(0);
+    setStage('sources');
+    setSourceStatus({
+      reddit: { state: 'pending', count: null, ms: null, error: null },
+      gdelt:  { state: 'pending', count: null, ms: null, error: null }
+    });
 
-    // Drive the elapsed counter while the request is in flight.
     const t0 = Date.now();
     const tick = setInterval(() => setElapsedSec(Math.floor((Date.now() - t0) / 1000)), 1000);
 
-    try {
-      // First-cold request can take ~25–30s because Reddit rate-limits
-      // the initial 16-sub crawl + GDELT is also rate-limited. Subsequent
-      // calls hit the 15-min server cache. Cap client side at 60s so a
-      // genuinely-stuck backend surfaces an error instead of an
-      // indefinite spinner.
-      const r = await apiClient.get('/breaking-events', {
-        params: force ? { force: 1 } : {},
-        timeout: 60_000
-      });
-      setEvents(Array.isArray(r.data?.events) ? r.data.events : []);
-      setMeta({
-        source: r.data?.source || null,
-        cachedAt: r.data?.cachedAt || null,
-        elapsedMs: r.data?.elapsedMs || null
-      });
-    } catch (e) {
-      const msg = e.code === 'ECONNABORTED'
-        ? 'Synthesis timed out (>60s). Reddit/GDELT may be rate-limiting — try Refresh in a minute.'
-        : (e.response?.data?.error || e.message);
-      setError(msg);
-    } finally {
+    // EventSource doesn't accept Authorization headers — fish the JWT
+    // out of storage and ride along as a query param, same way the
+    // VOD stream endpoints carry auth.
+    const token =
+      localStorage.getItem('auth_token') ||
+      sessionStorage.getItem('token') ||
+      localStorage.getItem('token');
+    const qs = new URLSearchParams();
+    if (force) qs.set('force', '1');
+    if (token) qs.set('token', token);
+    const url = `/api/breaking-events/stream${qs.toString() ? `?${qs.toString()}` : ''}`;
+
+    const es = new EventSource(url, { withCredentials: false });
+    esRef.current = es;
+
+    const finish = () => {
       clearInterval(tick);
       setLoading(false);
       setRefreshing(false);
-    }
+      if (esRef.current === es) {
+        try { es.close(); } catch (_) {}
+        esRef.current = null;
+      }
+    };
+
+    const setSrc = (source, patch) => {
+      setSourceStatus((prev) => ({ ...prev, [source]: { ...prev[source], ...patch } }));
+    };
+
+    es.addEventListener('cache_hit', () => {
+      setStage('done');
+    });
+    es.addEventListener('source_start', (ev) => {
+      const d = JSON.parse(ev.data);
+      setSrc(d.source, { state: 'loading' });
+    });
+    es.addEventListener('source_ok', (ev) => {
+      const d = JSON.parse(ev.data);
+      setSrc(d.source, { state: 'ok', count: d.count, ms: d.ms });
+    });
+    es.addEventListener('source_err', (ev) => {
+      const d = JSON.parse(ev.data);
+      setSrc(d.source, { state: 'err', error: d.error, ms: d.ms });
+    });
+    es.addEventListener('synthesis_start', () => {
+      setStage('synthesis');
+    });
+    es.addEventListener('synthesis_ok', () => {
+      // synthesis done; matching is next (very fast). Stay on synthesis
+      // visually because the user doesn't need a separate stage flash.
+    });
+    es.addEventListener('matching_start', () => setStage('matching'));
+    es.addEventListener('matching_ok', () => setStage('matching'));
+
+    es.addEventListener('complete', (ev) => {
+      const data = JSON.parse(ev.data);
+      setEvents(Array.isArray(data.events) ? data.events : []);
+      setMeta({
+        source: data.source || null,
+        cachedAt: data.cachedAt || null,
+        elapsedMs: data.elapsedMs || null
+      });
+      setStage('done');
+      finish();
+    });
+
+    es.addEventListener('error', (ev) => {
+      // Two flavours: a server-emitted 'error' event with a payload,
+      // OR a transport error (es.readyState === CLOSED). For the
+      // transport case we'd see no `data`.
+      let msg = 'Connection lost — try Refresh.';
+      try {
+        if (ev?.data) {
+          const d = JSON.parse(ev.data);
+          if (d?.error) msg = d.error;
+        }
+      } catch (_) {}
+      setError(msg);
+      finish();
+    });
   }, []);
 
   // First load when the drawer opens.
@@ -88,6 +158,15 @@ const BreakingModal = ({
     if (!isOpen) return;
     fetchEvents();
   }, [isOpen, fetchEvents]);
+
+  // Tear down the SSE on unmount / when the drawer closes — otherwise
+  // it keeps streaming in the background and holds a connection slot.
+  useEffect(() => () => {
+    if (esRef.current) {
+      try { esRef.current.close(); } catch (_) {}
+      esRef.current = null;
+    }
+  }, []);
 
   // Status reporting to the dock chip.
   useEffect(() => {
@@ -184,10 +263,16 @@ const BreakingModal = ({
       <div className="flex-1 overflow-y-auto px-2 pt-2 pb-3 [scrollbar-width:thin] [scrollbar-color:rgb(51_65_85)_transparent]">
         {loading && events.length === 0 && (
           <SpinnerBlock
-            label="Reading the live signals…"
+            label={
+              stage === 'synthesis' ? 'Synthesizing with LLM…' :
+              stage === 'matching'  ? 'Matching channels…' :
+              'Reading the live signals…'
+            }
             elapsedSec={elapsedSec}
-            hint={elapsedSec > 8
-              ? 'Cold call — Reddit + GDELT are rate-limited, this can take 25–30s the first time. Cached for 15 min after.'
+            sourceStatus={sourceStatus}
+            stage={stage}
+            hint={elapsedSec > 8 && stage === 'sources'
+              ? 'Reddit + GDELT can take ~25s when rate-limited. Cached 15 min after.'
               : null}
           />
         )}
@@ -419,8 +504,8 @@ const HelperBlock = ({ children }) => (
   </div>
 );
 
-const SpinnerBlock = ({ label, elapsedSec = 0, hint = null }) => (
-  <div className="px-3 py-10 flex flex-col items-center gap-3 text-slate-400">
+const SpinnerBlock = ({ label, elapsedSec = 0, hint = null, sourceStatus = null, stage = null }) => (
+  <div className="px-3 py-8 flex flex-col items-center gap-3 text-slate-400">
     <div className="relative w-10 h-10">
       <div className="absolute inset-0 rounded-full border-2 border-slate-800" />
       <div className="absolute inset-0 rounded-full border-2 border-t-transparent animate-spin border-cyan-400" />
@@ -431,6 +516,27 @@ const SpinnerBlock = ({ label, elapsedSec = 0, hint = null }) => (
         <span className="text-cyan-400/80 tabular-nums">{elapsedSec}s</span>
       )}
     </div>
+
+    {/* Per-source progress — live updates as each upstream settles.
+        Once the LLM stage starts, the source rows lock to their final
+        state so the user can still see "Reddit ✓ 50 / GDELT ✗ 429" while
+        the LLM is doing its thing. */}
+    {sourceStatus && (
+      <div className="w-full max-w-xs grid grid-cols-2 gap-1.5 mt-1">
+        <SourceProgressRow label="Reddit" status={sourceStatus.reddit} />
+        <SourceProgressRow label="GDELT"  status={sourceStatus.gdelt}  />
+      </div>
+    )}
+    {stage && stage !== 'sources' && (
+      <div className="flex items-center gap-1.5 mt-0.5">
+        <PipelineStageDot label="Sources"   active={stage === 'sources'}   done={stage !== 'sources'} />
+        <PipelineConnector />
+        <PipelineStageDot label="Synthesis" active={stage === 'synthesis'} done={stage === 'matching' || stage === 'done'} />
+        <PipelineConnector />
+        <PipelineStageDot label="Channels"  active={stage === 'matching'}  done={stage === 'done'} />
+      </div>
+    )}
+
     {hint && (
       <p className="max-w-xs text-center text-[10.5px] leading-snug text-slate-500/80 px-2">
         {hint}
@@ -438,6 +544,52 @@ const SpinnerBlock = ({ label, elapsedSec = 0, hint = null }) => (
     )}
   </div>
 );
+
+const SourceProgressRow = ({ label, status }) => {
+  const state = status?.state || 'pending';
+  const tone =
+    state === 'ok'      ? 'text-emerald-300 ring-emerald-500/30 bg-emerald-500/5' :
+    state === 'err'     ? 'text-rose-300    ring-rose-500/30    bg-rose-500/5'    :
+    state === 'loading' ? 'text-amber-300   ring-amber-500/30   bg-amber-500/5'   :
+                          'text-slate-500   ring-slate-800/80   bg-slate-900/40';
+  const trailing =
+    state === 'ok'      ? <span className="font-mono tabular-nums">{status.count} <span className="text-slate-500">· {Math.round((status.ms || 0) / 100) / 10}s</span></span> :
+    state === 'err'     ? <span className="font-mono truncate max-w-[80px]" title={status.error}>{shortenErr(status.error)}</span> :
+    state === 'loading' ? <DotSpinner /> :
+                          <span className="font-mono text-slate-600">pending</span>;
+  return (
+    <div className={`flex items-center justify-between gap-2 h-6 px-2 rounded-sm ring-1 ${tone}`}>
+      <span className="font-mono text-[9.5px] uppercase tracking-[0.18em]">{label}</span>
+      <span className="text-[10px] leading-none">{trailing}</span>
+    </div>
+  );
+};
+
+const PipelineStageDot = ({ label, active, done }) => (
+  <span className={`inline-flex items-center gap-1 font-mono text-[8.5px] uppercase tracking-[0.16em] ${
+    active ? 'text-cyan-200' : done ? 'text-emerald-300' : 'text-slate-600'
+  }`}>
+    <span className={`w-1 h-1 rounded-full ${
+      active ? 'bg-cyan-300 animate-pulse' : done ? 'bg-emerald-400' : 'bg-slate-700'
+    }`} />
+    {label}
+  </span>
+);
+
+const PipelineConnector = () => (
+  <span aria-hidden className="w-3 h-px bg-slate-800" />
+);
+
+const DotSpinner = () => (
+  <span className="inline-block w-2 h-2 rounded-full bg-amber-300 animate-pulse" />
+);
+
+const shortenErr = (msg) => {
+  if (!msg) return 'err';
+  const m = String(msg).match(/\b(429|408|5\d{2})\b/);
+  if (m) return m[1] === '429' ? '429 rate' : m[1];
+  return String(msg).slice(0, 12);
+};
 
 /**
  * Strip a trailing channel-position number from a brand hint so the
