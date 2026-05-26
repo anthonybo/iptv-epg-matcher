@@ -6,6 +6,7 @@ export { default as MultiViewGrid } from './MultiViewGrid';
 export { default as SettingsModal } from './SettingsModal';
 export { default as BlacklistModal } from './BlacklistModal';
 export { default as TrendingModal } from './TrendingModal';
+export { default as BreakingModal } from './BreakingModal';
 export { default as AllGamesModal } from './AllGamesModal';
 export { default as YouTubeModal } from './YouTubeModal';
 export { default as BroadcasterCoverageModal } from './BroadcasterCoverageModal';

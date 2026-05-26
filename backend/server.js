@@ -478,6 +478,7 @@ app.use('/api/live-scores', liveScoresRoutes); // Live sports scores
 app.use('/api/trending', trendingChannelsRoutes); // Live trending TV channels (YT/Twitch/Reddit/Bsky composite)
 app.use('/api/youtube', require('./routes/youtube')); // YouTube channel resolve/search/favorites + live HLS for multi-view tiles
 app.use('/api/llm',     require('./routes/llm'));     // LLM provider rotation status + smoke test
+app.use('/api/breaking-events', require('./routes/breakingEvents')); // Real-time real-world events (fires, pursuits, weather, breaking news) with channel hints
 trendingChannelsService.startRefreshLoop();
 
 // Initialise the LLM provider registry once on boot. Cheap (no network

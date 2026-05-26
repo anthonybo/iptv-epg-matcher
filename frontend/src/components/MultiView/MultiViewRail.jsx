@@ -40,6 +40,7 @@ const SECTIONS = [
     items: [
       { id: 'trending',       kind: 'modal',  label: 'Trending now',       icon: ICON_FLAME() },
       { id: 'all-games',      kind: 'modal',  label: 'All games today',    icon: ICON_BALL() },
+      { id: 'breaking',       kind: 'modal',  label: 'Breaking events',    icon: ICON_BREAKING() },
       { id: 'youtube',        kind: 'modal',  label: 'YouTube channel',    icon: ICON_YOUTUBE() },
       { id: 'coverage',       kind: 'modal',  label: 'Broadcaster coverage', icon: ICON_BROADCAST() },
       { id: 'local-news',     kind: 'action', label: 'Local news',         icon: ICON_NEWS() }
@@ -69,6 +70,7 @@ const MultiViewRail = ({
   // Modal openers
   onOpenTrending,
   onOpenAllGames,
+  onOpenBreaking,
   onOpenYouTube,
   onOpenCoverage,
   onOpenBlacklist,
@@ -101,6 +103,7 @@ const MultiViewRail = ({
       case 'picker':     return onOpenPicker?.();
       case 'trending':   return onOpenTrending?.();
       case 'all-games':  return onOpenAllGames?.();
+      case 'breaking':   return onOpenBreaking?.();
       case 'youtube':    return onOpenYouTube?.();
       case 'coverage':   return onOpenCoverage?.();
       case 'local-news': return onLocalNews?.();
@@ -398,6 +401,17 @@ function ICON_BROADCAST() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" />
       <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+function ICON_BREAKING() {
+  // Pulsing radar / "live-event" silhouette — broadcast tower with a ping arc.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+      <path d="M12 13l-3 8h6l-3-8z" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="9" r="1.5" fill="currentColor" stroke="none" />
+      <path d="M8.5 5.5a5 5 0 017 0" />
+      <path d="M6 3a8 8 0 0112 0" />
     </svg>
   );
 }

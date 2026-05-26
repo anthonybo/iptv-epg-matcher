@@ -11,6 +11,7 @@ import {
   BlacklistModal,
   TrendingModal,
   AllGamesModal,
+  BreakingModal,
   YouTubeModal,
   BroadcasterCoverageModal,
   ChannelPickerModal,
@@ -609,6 +610,10 @@ const MultiViewPage = ({ sessionId }) => {
     openPanel('allgames', { title: "Today's Slate", spineColor: 'amber', icon: BALL_ICON });
   }, [openPanel]);
 
+  const openBreakingPanel = useCallback(() => {
+    openPanel('breaking', { title: 'Breaking', spineColor: 'cyan', icon: BREAKING_ICON });
+  }, [openPanel]);
+
   const openYouTubePanel = useCallback(() => {
     openPanel('youtube', { title: 'YouTube', spineColor: 'rose', icon: YOUTUBE_ICON });
   }, [openPanel]);
@@ -645,6 +650,7 @@ const MultiViewPage = ({ sessionId }) => {
   const onMinimizeSearch    = useCallback(() => minimizePanel('search'),    [minimizePanel]);
   const onMinimizeTrending  = useCallback(() => minimizePanel('trending'),  [minimizePanel]);
   const onMinimizeAllGames  = useCallback(() => minimizePanel('allgames'),  [minimizePanel]);
+  const onMinimizeBreaking  = useCallback(() => minimizePanel('breaking'),  [minimizePanel]);
   const onMinimizeYouTube   = useCallback(() => minimizePanel('youtube'),   [minimizePanel]);
   const onMinimizeCoverage  = useCallback(() => minimizePanel('coverage'),  [minimizePanel]);
   const onMinimizeBlacklist = useCallback(() => minimizePanel('blacklist'), [minimizePanel]);
@@ -654,6 +660,7 @@ const MultiViewPage = ({ sessionId }) => {
 
   const onCloseTrending  = useCallback(() => closePanel('trending'),  [closePanel]);
   const onCloseAllGames  = useCallback(() => closePanel('allgames'),  [closePanel]);
+  const onCloseBreaking  = useCallback(() => closePanel('breaking'),  [closePanel]);
   const onCloseYouTube   = useCallback(() => closePanel('youtube'),   [closePanel]);
   const onCloseCoverage  = useCallback(() => closePanel('coverage'),  [closePanel]);
   const onCloseBlacklist = useCallback(() => closePanel('blacklist'), [closePanel]);
@@ -664,6 +671,7 @@ const MultiViewPage = ({ sessionId }) => {
   const onStatusSearch   = useCallback((s) => setPanelStatus('search',   s), [setPanelStatus]);
   const onStatusTrending = useCallback((s) => setPanelStatus('trending', s), [setPanelStatus]);
   const onStatusAllGames = useCallback((s) => setPanelStatus('allgames', s), [setPanelStatus]);
+  const onStatusBreaking = useCallback((s) => setPanelStatus('breaking', s), [setPanelStatus]);
   const onStatusYouTube  = useCallback((s) => setPanelStatus('youtube',  s), [setPanelStatus]);
   const onStatusCoverage = useCallback((s) => setPanelStatus('coverage', s), [setPanelStatus]);
 
@@ -692,6 +700,51 @@ const MultiViewPage = ({ sessionId }) => {
     (code, signal) => searchByName(code, { mode: 'brand', signal }),
     [searchByName]
   );
+
+  // Breaking-events modal hands back a pre-resolved channel object:
+  //   { id, sourceId, name, url, sourceType, sourceName, logo, ... }
+  // — or, when a hint has no catalog match, an unresolved pick with
+  // only `name` set. For the resolved case we go straight to
+  // addToMultiview (the backend POST fills in sourceUrl/username/etc
+  // from iptv_sources via the sourceId). For the unresolved case we
+  // fall through to searchByName so the user still gets a result.
+  const onBreakingPick = useCallback(async (pick) => {
+    if (!pick || !pick.name) return false;
+
+    const isResolved = pick.id && pick.sourceId !== null && pick.sourceId !== undefined && pick.url;
+    if (!isResolved) {
+      // Unresolved hint — brand-search fallback.
+      return searchByName(pick.name, { mode: 'brand' });
+    }
+
+    // Already on screen? Don't double-add.
+    const alreadyOnScreen = streams.some(
+      (s) => s.id === pick.id && s.sourceId === pick.sourceId
+    );
+    if (alreadyOnScreen) {
+      showToast(`"${pick.name}" is already on screen`, 'info');
+      return false;
+    }
+
+    const channel = {
+      id: pick.id,
+      sourceId: pick.sourceId,
+      name: pick.name,
+      logo: pick.logo || null,
+      url: pick.url,
+      sourceType: pick.sourceType || null,    // backend looks up the rest from iptv_sources
+      sourceName: pick.sourceName || null,
+      searchQuery: pick.searchQuery || pick.name
+    };
+    const ok = await addToMultiview(channel);
+    if (ok) {
+      window.dispatchEvent(new Event('multiviewUpdate'));
+      showToast(`Added "${pick.name}" to Multi-View`, 'success');
+      return true;
+    }
+    showToast(`Failed to add "${pick.name}"`, 'error');
+    return false;
+  }, [searchByName, streams]);
 
   // YouTube picker hands back a fully-shaped stream payload (sourceType
   // 'youtube', sourceId 0). Route through the same addToMultiview path
@@ -840,6 +893,7 @@ const MultiViewPage = ({ sessionId }) => {
           onOpenPicker={openPickerEmpty}
           onOpenTrending={openTrendingPanel}
           onOpenAllGames={openAllGamesPanel}
+          onOpenBreaking={openBreakingPanel}
           onOpenYouTube={openYouTubePanel}
           onOpenCoverage={openCoveragePanel}
           onLocalNews={findLocalNews}
@@ -1022,6 +1076,35 @@ const MultiViewPage = ({ sessionId }) => {
                   onPickBroadcaster={onAllGamesPickBroadcaster}
                   onAfterPick={onMinimizeAllGames}
                   onStatusChange={onStatusAllGames}
+                />
+              </DrawerShell>
+            )}
+
+            {/* BREAKING — real-time real-world events (fires, pursuits,
+                weather, big sports moments) synthesized by the LLM
+                rotation from Reddit / sports-event signals. 500px gives
+                event chips room for title + summary + channel chips
+                without wrapping prematurely. */}
+            {isPanelMounted('breaking') && (
+              <DrawerShell
+                isMounted={isPanelMounted('breaking')}
+                isVisible={isPanelOpen('breaking')}
+                width={500}
+                topGap={drawerTopGap}
+                bottomGap={drawerBottomGap}
+                title="Breaking"
+                subtitle="AI-synthesized live events"
+                icon={BREAKING_ICON}
+                spineColor="cyan"
+                status={getPanel('breaking')?.status}
+                onMinimize={onMinimizeBreaking}
+                onClose={onCloseBreaking}
+              >
+                <BreakingModal
+                  isOpen={isPanelMounted('breaking')}
+                  onPick={onBreakingPick}
+                  onAfterPick={onMinimizeBreaking}
+                  onStatusChange={onStatusBreaking}
                 />
               </DrawerShell>
             )}
@@ -1253,6 +1336,7 @@ const FLAME_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinej
 const BALL_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3v18M5.5 5.5l13 13M18.5 5.5l-13 13" /></svg>);
 const BROADCAST_ICON = (<svg {...ICON_PROPS}><path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" /><circle cx="12" cy="12" r="1.5" fill="currentColor" /></svg>);
 const YOUTUBE_ICON = (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="w-full h-full"><rect x="2.5" y="6" width="19" height="12" rx="3" /><path d="M11 9.5l4 2.5-4 2.5v-5z" fill="currentColor" stroke="none" /></svg>);
+const BREAKING_ICON = (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className="w-full h-full"><path d="M12 13l-3 8h6l-3-8z" fill="currentColor" stroke="none" /><circle cx="12" cy="9" r="1.5" fill="currentColor" stroke="none" /><path d="M8.5 5.5a5 5 0 017 0" /><path d="M6 3a8 8 0 0112 0" /></svg>);
 const BAN_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="9" /><path strokeLinecap="round" d="M5.6 5.6l12.8 12.8" /></svg>);
 const GEAR_ICON = (<svg {...ICON_PROPS}><circle cx="12" cy="12" r="3" /><path strokeLinecap="round" strokeLinejoin="round" d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 01-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 01-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 010-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3h0a1.7 1.7 0 001-1.5V3a2 2 0 014 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8v0a1.7 1.7 0 001.5 1H21a2 2 0 010 4h-.1a1.7 1.7 0 00-1.5 1z" /></svg>);
 const HEART_ICON = (<svg viewBox="0 0 24 24" fill="currentColor" className="w-full h-full"><path d="M12 21s-7.5-4.7-9.6-9.4C1.1 8.4 3.4 5 7 5c2 0 3.8 1.1 5 2.7C13.2 6.1 15 5 17 5c3.6 0 5.9 3.4 4.6 6.6C19.5 16.3 12 21 12 21z" /></svg>);

@@ -119,6 +119,10 @@ const StreamCellInner = memo(({
           onStreamDead={onStreamDead}
           onVideoElement={isYoutube ? null : onVideoElement}
           useResilientProxy={effectiveUseResilientProxy}
+          /* Cancel button on the loading overlay routes to onRemove
+             so the user can ALWAYS bail out of a hung tile, even when
+             the overlay would otherwise be covering the OSD's × button. */
+          onCancel={onRemove}
         />
       </div>
     </div>

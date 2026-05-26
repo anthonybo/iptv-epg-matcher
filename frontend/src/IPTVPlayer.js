@@ -68,7 +68,8 @@ const IPTVPlayer = ({
   onStreamPlaying = null, // Callback when stream starts playing successfully
   onStreamError = null, // Callback when stream fails (after skipRecovery or exhausted retries)
   onStreamDead = null, // Callback when stream is dead and needs alternative (for multi-view auto-recovery)
-  onVideoElement = null // Callback(videoEl|null) — fires when the underlying <video> ref changes so external code (e.g. commercial detector) can attach Web Audio + canvas analyzers
+  onVideoElement = null, // Callback(videoEl|null) — fires when the underlying <video> ref changes so external code (e.g. commercial detector) can attach Web Audio + canvas analyzers
+  onCancel = null // Optional: when set, the loading overlay shows a Cancel button that calls this. Used by multi-view to let the user × a hung tile.
 }) => {
   // Determine if we should use the resilient proxy
   // Auto mode: use resilient proxy in theatre mode (multi-view) by default
@@ -558,7 +559,11 @@ const IPTVPlayer = ({
       
       <PlayerRecoveryBanner recoveryStatus={recoveryStatus} />
 
-      <PlayerLoadingOverlay visible={loading} />
+      <PlayerLoadingOverlay
+        visible={loading}
+        status={recoveryStatus || (loading ? 'Connecting…' : null)}
+        onCancel={onCancel}
+      />
 
       <PlayerEmptyState visible={!selectedChannel} />
       
