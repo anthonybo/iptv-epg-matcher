@@ -26,21 +26,121 @@ const ArrowOutSvg = () => (
   </svg>
 );
 
-const SourceChip = ({ source, active, onClick }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    title={source.source_nickname || source.source_name}
-    className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border font-mono text-[10.5px] uppercase tracking-[0.14em] transition ${
-      active
-        ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
-        : 'border-slate-800 bg-slate-900/40 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-    }`}
-  >
-    <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-cyan-400' : 'bg-slate-600'}`} />
-    {(source.source_nickname || source.source_name || '').slice(0, 20)}
-  </button>
-);
+// Strip protocol + trailing slashes from a source URL/name so the host
+// reads cleanly as the headline. "http://lordstreams.live/" →
+// "lordstreams.live"; nicknames pass through untouched.
+const hostOf = (raw) => String(raw || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+
+// Type-color mapping — matches the rest of the app (multi-view rail,
+// channel picker rail, etc.). xtream=sky, stalker=violet, m3u=emerald.
+const TYPE_THEME = {
+  xtream:  { dot: 'bg-sky-400',     rail: 'from-sky-400 to-blue-500',         label: 'XTREAM'  },
+  stalker: { dot: 'bg-violet-400',  rail: 'from-violet-400 to-purple-500',    label: 'STALKER' },
+  m3u:     { dot: 'bg-emerald-400', rail: 'from-emerald-400 to-teal-500',     label: 'M3U'     },
+  default: { dot: 'bg-slate-500',   rail: 'from-slate-500 to-slate-600',      label: 'SOURCE'  }
+};
+
+/**
+ * SourceCard — replaces the old single-line truncated pill. Shows the
+ * three pieces of information needed to disambiguate one IPTV account
+ * from another on the same upstream host:
+ *
+ *   1. Host — large mono headline ("lordstreams.live")
+ *   2. Account — username pill underneath ("sanders13")
+ *   3. Type badge — color-coded rail (xtream / stalker / m3u)
+ *
+ * Plus optional health signals when the source flags itself as dead:
+ *   - Inactive/expired/error account_status → rose ring + tag
+ *   - The active source gets a cyan rail + a pulsing "● PLAYING" chip.
+ *
+ * Sized for a 2-column grid on the detail page (min 220px wide), so a
+ * dozen+ sources stack cleanly without wrapping into a meaningless pill
+ * jungle.
+ */
+const SourceCard = ({ source, active, onClick, index }) => {
+  const type = (source.source_type || '').toLowerCase();
+  const theme = TYPE_THEME[type] || TYPE_THEME.default;
+  const host = source.source_nickname || hostOf(source.source_name) || 'unknown';
+  const account = source.source_username || null;
+  const status = (source.source_account_status || '').toLowerCase();
+  const isUnhealthy = status && !['active', 'ok', '', 'good'].includes(status);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`${host}${account ? ` · ${account}` : ''}${status ? ` · ${status}` : ''}`}
+      className={`group/src relative flex items-stretch gap-2.5 overflow-hidden rounded-lg border text-left transition ${
+        active
+          ? 'border-cyan-500/40 bg-cyan-500/[0.06] shadow-[0_0_0_1px_rgba(34,211,238,0.15)_inset,0_4px_18px_-8px_rgba(34,211,238,0.4)]'
+          : isUnhealthy
+          ? 'border-rose-500/25 bg-slate-900/40 hover:border-rose-500/40 hover:bg-rose-500/[0.04]'
+          : 'border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:bg-slate-900/70'
+      }`}
+    >
+      {/* Color rail — same idiom as MultiViewRail / FavoritesStrip / etc. */}
+      <span
+        aria-hidden
+        className={`relative w-[3px] flex-shrink-0 self-stretch bg-gradient-to-b ${
+          active ? 'from-cyan-300 to-cyan-500 shadow-[0_0_10px_rgba(34,211,238,0.5)]' : theme.rail + ' opacity-70 group-hover/src:opacity-100'
+        } transition`}
+      >
+        {active && (
+          <span className="absolute -top-0.5 -left-0.5 -right-0.5 h-1.5 rounded-full bg-cyan-300 animate-pulse" />
+        )}
+      </span>
+
+      {/* Body */}
+      <div className="flex-1 min-w-0 py-2 pr-2.5">
+        {/* Top row — host + type pill + active indicator */}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className={`flex-shrink-0 inline-flex items-center px-1.5 py-px rounded-sm font-mono text-[8.5px] tracking-[0.12em] ring-1 ${
+            active ? 'ring-cyan-500/40 text-cyan-200 bg-cyan-500/10'
+                   : 'ring-slate-700/60 text-slate-400 bg-slate-900/60'
+          }`}>
+            {theme.label}
+          </span>
+          <span
+            className={`flex-1 min-w-0 truncate font-mono text-[12px] tracking-tight leading-tight ${
+              active ? 'text-cyan-100' : 'text-slate-100'
+            }`}
+          >
+            {host}
+          </span>
+          {active && (
+            <span className="flex-shrink-0 inline-flex items-center gap-1 px-1 py-px rounded-sm font-mono text-[8.5px] uppercase tracking-[0.14em] text-cyan-300">
+              <span className="w-1 h-1 rounded-full bg-cyan-400 animate-pulse" />
+              playing
+            </span>
+          )}
+        </div>
+
+        {/* Bottom row — account chip + index + health tag */}
+        <div className="mt-1 flex items-center gap-1.5 min-w-0">
+          {account ? (
+            <span className="flex-shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm font-mono text-[10px] text-slate-400 bg-slate-900/60 ring-1 ring-slate-800">
+              <svg viewBox="0 0 24 24" className="w-2.5 h-2.5 opacity-60" fill="none" stroke="currentColor" strokeWidth={2}>
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 22a8 8 0 0116 0" />
+              </svg>
+              <span className="truncate max-w-[140px]">{account}</span>
+            </span>
+          ) : (
+            <span className="text-[10px] font-mono text-slate-600">no account</span>
+          )}
+          <span className="flex-shrink-0 text-[9px] font-mono text-slate-600 tabular-nums">
+            #{(index ?? 0) + 1}
+          </span>
+          {isUnhealthy && (
+            <span className="flex-shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm font-mono text-[9px] uppercase tracking-[0.12em] text-rose-300 bg-rose-500/[0.08] ring-1 ring-rose-500/25" title={`Account status: ${status}`}>
+              {status}
+            </span>
+          )}
+        </div>
+      </div>
+    </button>
+  );
+};
 
 const StreamPlayer = ({ src, poster }) => {
   const videoRef = useRef(null);
@@ -157,6 +257,12 @@ const VodDetail = ({ kind, id, onBack }) => {
   const [episodesError, setEpisodesError] = useState(null);
   const [seasons, setSeasons] = useState([]);
   const [activeSeason, setActiveSeason] = useState(null);
+
+  // Collapse/expand the per-source list. Default collapsed so the
+  // "Big Cats 24/7 has 13 sources" case doesn't push the episode list
+  // way off-screen; the user only needs the list when their active
+  // source dies or they want to try a different account.
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
 
   // Initial fetch — single canonical row + sources list.
   useEffect(() => {
@@ -544,24 +650,90 @@ const VodDetail = ({ kind, id, onBack }) => {
               </div>
             </div>
 
-            {/* Source chips */}
-            {sources.length > 0 && (
-              <div className="pt-2">
-                <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600 mb-1.5">
-                  Available on {sources.length} source{sources.length === 1 ? '' : 's'}
+            {/* Source list — collapsed by default. Shows just the
+                active source as a single full-width card with a
+                "Switch source · N more" toggle. Expanded: full grid
+                of every source. Saves screen height when the same
+                title is on 10+ sources but keeps everything one click
+                away. */}
+            {sources.length > 0 && (() => {
+              const activeIndex = Math.max(0, sources.findIndex((s) => s.source_id === activeSourceId));
+              const activeSrc = sources[activeIndex] || sources[0];
+              const moreCount = Math.max(0, sources.length - 1);
+              return (
+                <div className="pt-2">
+                  {/* Section header — always shown */}
+                  <div className="flex items-baseline gap-2 mb-2">
+                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600">
+                      Source
+                    </span>
+                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600">·</span>
+                    <span className="font-mono text-[14px] tabular-nums text-slate-200">
+                      {sources.length}
+                    </span>
+                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-600">
+                      available
+                    </span>
+                  </div>
+
+                  {/* Always-visible: the active source */}
+                  <SourceCard
+                    source={activeSrc}
+                    active
+                    index={activeIndex}
+                    onClick={() => { /* clicking the active card is a no-op */ }}
+                  />
+
+                  {/* Expand toggle — collapsed shows "Switch source · 12 more ▾",
+                      expanded shows "Hide alternates ▴" */}
+                  {moreCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSourcesExpanded((v) => !v)}
+                      className="mt-1.5 w-full flex items-center justify-center gap-2 h-8 px-3 rounded-md border border-dashed border-slate-800 bg-slate-900/30 hover:bg-slate-900/60 hover:border-slate-700 text-slate-500 hover:text-slate-300 font-mono text-[10px] uppercase tracking-[0.18em] transition"
+                      aria-expanded={sourcesExpanded}
+                    >
+                      {sourcesExpanded ? (
+                        <>
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="18 15 12 9 6 15" />
+                          </svg>
+                          Hide alternates
+                        </>
+                      ) : (
+                        <>
+                          <span>Switch source</span>
+                          <span className="text-slate-700">·</span>
+                          <span className="tabular-nums normal-case">{moreCount}</span>
+                          <span>more</span>
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Expanded — the rest of the sources in a 2-col grid */}
+                  {sourcesExpanded && moreCount > 0 && (
+                    <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      {sources
+                        .map((s, i) => ({ s, i }))
+                        .filter(({ i }) => i !== activeIndex)
+                        .map(({ s, i }) => (
+                          <SourceCard
+                            key={s.movie_stream_id || s.series_source_id}
+                            source={s}
+                            active={false}
+                            index={i}
+                            onClick={() => setActiveSourceId(s.source_id)}
+                          />
+                        ))}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {sources.map((s) => (
-                    <SourceChip
-                      key={s.movie_stream_id || s.series_source_id}
-                      source={s}
-                      active={s.source_id === activeSourceId}
-                      onClick={() => setActiveSourceId(s.source_id)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Actions row — Play + Trailer */}
             {(kind === 'movie' && activeSource) || row.trailer_youtube_id ? (

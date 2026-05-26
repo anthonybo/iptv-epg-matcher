@@ -29,7 +29,10 @@ async function getMovies(opts = {}) {
       cursor: opts.cursor || undefined,
       pageSize: opts.pageSize || 30,
       sort: opts.sort || 'recent'
-    }
+    },
+    // AbortSignal so superseding fetches cancel in-flight requests.
+    // Same rationale as getSeriesList.
+    signal: opts.signal
   });
   return r.data;
 }
@@ -58,7 +61,13 @@ async function getSeriesList(opts = {}) {
       cursor: opts.cursor || undefined,
       pageSize: opts.pageSize || 30,
       sort: opts.sort || 'recent'
-    }
+    },
+    // Caller can pass an AbortSignal to cancel an in-flight request
+    // when a newer one supersedes it. Without this, a slow TV-series
+    // page load + a filter change fires both requests and they pile
+    // up on the DB; even with the query rewrite the wasted work is
+    // worth avoiding. Mirror for /vod/movies if needed.
+    signal: opts.signal
   });
   return r.data;
 }

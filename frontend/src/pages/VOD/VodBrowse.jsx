@@ -230,8 +230,16 @@ const VodBrowse = ({ kind, onOpen }) => {
   // Cursor-paginated fetch. cursor === null → fresh load (replace);
   // cursor set → append. The server tells us whether there's more and
   // gives us the next cursor.
+  //
+  // AbortController per effect run so a superseding fetch (filter
+  // changes, debounce flush) cancels the previous HTTP request — not
+  // just the result handler. Without this, axios calls pile up on the
+  // backend; for the TV-series page with 300k series_sources this
+  // meant 6+ identical queries running concurrently on the DB and
+  // contending with each other.
   useEffect(() => {
     const seq = ++requestSeqRef.current;
+    const controller = new AbortController();
     if (cursor == null) setLoading(true);
     else setLoadingMore(true);
     setError(null);
@@ -242,12 +250,21 @@ const VodBrowse = ({ kind, onOpen }) => {
       categoryId: categoryId || undefined,
       cursor,
       pageSize: PAGE_SIZE,
-      sort
+      sort,
+      signal: controller.signal
     })
       .then((data) => {
         if (requestSeqRef.current !== seq) return; // stale
         const incoming = kind === 'movie' ? (data.movies || []) : (data.series || []);
-        setItems((prev) => (cursor == null ? incoming : [...prev, ...incoming]));
+        setItems((prev) => {
+          if (cursor == null) return incoming;
+          // Defensive dedup on append: even with the group-level cursor
+          // filter, an exact updated_at collision between two groups
+          // could surface a row that's already on screen. Drop those
+          // before React notices.
+          const seenIds = new Set(prev.map((it) => it.id));
+          return [...prev, ...incoming.filter((it) => it.id && !seenIds.has(it.id))];
+        });
         setHasMore(Boolean(data.hasMore));
         setNextCursor(data.nextCursor || null);
         setLoading(false);
@@ -255,10 +272,19 @@ const VodBrowse = ({ kind, onOpen }) => {
       })
       .catch((err) => {
         if (requestSeqRef.current !== seq) return;
+        // Aborts surface as either CanceledError (axios) or DOMException
+        // with name='AbortError'. Neither is a real error — just the
+        // next request taking over. Stay silent.
+        if (err?.name === 'CanceledError' || err?.name === 'AbortError'
+            || err?.code === 'ERR_CANCELED') {
+          return;
+        }
         setError(err.response?.data?.error || err.message || 'Failed to load');
         setLoading(false);
         setLoadingMore(false);
       });
+
+    return () => controller.abort();
   }, [kind, debouncedSearch, sort, sourceId, categoryId, cursor]);
 
   // Infinite scroll — when the sentinel scrolls into view (with a

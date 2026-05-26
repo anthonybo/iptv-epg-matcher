@@ -124,6 +124,99 @@ router.get('/movies', requireAuth, async (req, res) => {
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
     const cursor = decodeCursor(req.query.cursor);
 
+    // ── FAST PATH ──────────────────────────────────────────────────
+    // Mirror of /series fast path (see that route for context). The
+    // movie_streams table is even bigger (~1.4M rows) than series_sources
+    // (~300K), so the seq-scan-plus-double-sort original query was
+    // worse — and the movie-enrichment background job runs against the
+    // same table, contending for I/O constantly.
+    //
+    // With migration 039's (source_id, added_at DESC NULLS LAST, id DESC)
+    // composite index, LATERAL grabs the top ~50 most-recent rows per
+    // user source, so we aggregate over ~3,800 candidates instead of
+    // 1.4M. Only fires for the default (recent + no filters) path —
+    // search/category/single-source/non-recent sorts keep the original
+    // GROUP BY path for correctness.
+    if (sortKey === 'recent' && !search && !sourceId && !categoryId) {
+      const fastParams = [userId];
+      let havingClause = '';
+      if (cursor) {
+        // Group-level cursor filter via HAVING — see /series fast path
+        // for the full reasoning. Row-level filtering inside LATERAL
+        // caused duplicate React keys when the same movie's sources
+        // had different added_at across providers.
+        fastParams.push(cursor.k);
+        havingClause = `HAVING MAX(cand.added_at) < $${fastParams.length}::timestamptz`;
+      }
+      const perSourceLimit = Math.max(80, pageSize * 3);
+      fastParams.push(perSourceLimit);
+      const perSourceLimitIdx = fastParams.length;
+      fastParams.push(pageSize + 1);
+      const outerLimitIdx = fastParams.length;
+
+      // Dedup key: prefer the canonical movie_id (`m:5`) so all
+      // provider rows that the enrichment job has linked together
+      // collapse into one chip. For unenriched rows (movie_id IS NULL)
+      // fall back to an md5 of the normalised provider name — same
+      // title across multiple sources collapses to one chip instead
+      // of N separate ms:<id> rows. The response `id` returns the
+      // existing format (`m:<canonical>` or `ms:<representative>`)
+      // so /api/vod/movies/:id stays unchanged.
+      const fastSql = `
+        WITH user_sources AS (
+          SELECT id FROM iptv_sources WHERE user_id = $1
+        ),
+        candidates AS (
+          SELECT
+            ms.id, ms.movie_id, ms.provider_name, ms.poster_fallback,
+            ms.rating, ms.rating_fallback, ms.source_id, ms.added_at
+          FROM user_sources us,
+               LATERAL (
+                 SELECT id, movie_id, provider_name, poster_fallback,
+                        rating, rating_fallback, source_id, added_at
+                 FROM movie_streams
+                 WHERE source_id = us.id
+                 ORDER BY added_at DESC NULLS LAST, id DESC
+                 LIMIT $${perSourceLimitIdx}
+               ) ms
+        )
+        SELECT
+          COALESCE('m:' || MIN(m.id)::text, 'ms:' || MIN(cand.id)::text) AS id,
+          COALESCE(MIN(m.title), MIN(cand.provider_name)) AS title,
+          MIN(m.year) AS year,
+          COALESCE(MIN(m.poster_url), MIN(cand.poster_fallback)) AS poster_url,
+          MAX(COALESCE(m.rating_tmdb, cand.rating, cand.rating_fallback)) AS rating,
+          BOOL_OR(m.id IS NOT NULL) AS enriched,
+          COUNT(*)::int AS source_count,
+          MAX(cand.added_at) AS sort_added
+        FROM candidates cand
+        LEFT JOIN movies m ON m.id = cand.movie_id
+        GROUP BY COALESCE(
+          'm:' || m.id::text,
+          'pn:' || md5(LOWER(TRIM(cand.provider_name)))
+        )
+        ${havingClause}
+        ORDER BY MAX(cand.added_at) DESC NULLS LAST,
+                 COALESCE('m:' || MIN(m.id)::text, 'ms:' || MIN(cand.id)::text) DESC
+        LIMIT $${outerLimitIdx}
+      `;
+
+      const dataResult = await postgresService.query(fastSql, fastParams);
+      const hasMore = dataResult.rows.length > pageSize;
+      const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
+
+      let nextCursor = null;
+      if (hasMore && rows.length > 0) {
+        const last = rows[rows.length - 1];
+        const keyValue = last.sort_added ? new Date(last.sort_added).toISOString() : null;
+        if (keyValue != null) nextCursor = encodeCursor(keyValue, last.id);
+      }
+
+      const movies = rows.map(({ sort_added, ...rest }) => rest);
+      return res.json({ success: true, pageSize, hasMore, nextCursor, movies });
+    }
+
+    // ── SLOW PATH (search / category / non-recent sort) ────────────
     // Build dynamic WHERE. Same shape as before — joins, scoping,
     // filters; just no longer does COUNT(*) or runtime JSONB extract.
     const params = [userId];
@@ -235,6 +328,108 @@ router.get('/series', requireAuth, async (req, res) => {
     const pageSize = Math.min(PAGE_MAX, Math.max(5, parseInt(req.query.pageSize, 10) || PAGE_DEFAULT));
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
     const cursor = decodeCursor(req.query.cursor);
+
+    // ── FAST PATH ──────────────────────────────────────────────────
+    // Default "browse newest series" hits this every time the user
+    // opens the TV Series tab. Pre-rewrite: 4-6s seq-scanning all 300k
+    // series_sources rows then double-sorting to GROUP BY a synthesized
+    // expression. Post-rewrite: LATERAL grabs the top ~50 most-recent
+    // rows per source using migration-038's
+    // (source_id, updated_at DESC NULLS LAST, id DESC) index, so we
+    // aggregate over ~3,800 candidates instead of 300k. End-to-end
+    // sub-500ms.
+    //
+    // Only triggers when no filter narrows the dataset — for search /
+    // category / single-source / non-recent sort the existing GROUP BY
+    // path is already adequate (trgm index + small candidate set).
+    if (sortKey === 'recent' && !search && !sourceId && !categoryId) {
+      const fastParams = [userId];
+      let havingClause = '';
+      if (cursor) {
+        // CURSOR FILTERING AT THE GROUP LEVEL, NOT THE ROW LEVEL.
+        //
+        // Previously the cursor filtered inside the LATERAL on
+        // ss.updated_at < cursor.k, but a single series often has
+        // rows on multiple sources with different updated_at values.
+        // The cursor records MAX(updated_at) for the group; rows from
+        // OTHER sources of the same series might have updated_at <
+        // cursor.k, which means they sneak through the row-level
+        // filter and re-form the same group on the next page. Result:
+        // React "duplicate key" warning + visual duplicates.
+        //
+        // Filtering on HAVING MAX(updated_at) < cursor.k correctly
+        // excludes the WHOLE group whose MAX we've already shown.
+        // Strict `<` skips the boundary; rare case of two groups
+        // sharing an exact MAX is acceptable to skip.
+        fastParams.push(cursor.k);
+        havingClause = `HAVING MAX(cand.updated_at) < $${fastParams.length}::timestamptz`;
+      }
+      // Per-source slice — bump higher than before because the LATERAL
+      // no longer filters by cursor, so we need a larger pool to ensure
+      // enough groups remain after HAVING.
+      const perSourceLimit = Math.max(80, pageSize * 3);
+      fastParams.push(perSourceLimit);
+      const perSourceLimitIdx = fastParams.length;
+      fastParams.push(pageSize + 1);
+      const outerLimitIdx = fastParams.length;
+
+      const fastSql = `
+        WITH user_sources AS (
+          SELECT id FROM iptv_sources WHERE user_id = $1
+        ),
+        candidates AS (
+          SELECT
+            ss.id, ss.series_id, ss.provider_name, ss.poster_fallback,
+            ss.source_id, ss.updated_at
+          FROM user_sources us,
+               LATERAL (
+                 SELECT id, series_id, provider_name, poster_fallback, source_id, updated_at
+                 FROM series_sources
+                 WHERE source_id = us.id
+                 ORDER BY updated_at DESC NULLS LAST, id DESC
+                 LIMIT $${perSourceLimitIdx}
+               ) ss
+        )
+        SELECT
+          COALESCE('s:' || MIN(sr.id)::text, 'ss:' || MIN(cand.id)::text) AS id,
+          COALESCE(MIN(sr.title), MIN(cand.provider_name)) AS title,
+          MIN(sr.year) AS year,
+          COALESCE(MIN(sr.poster_url), MIN(cand.poster_fallback)) AS poster_url,
+          MAX(sr.rating_tmdb) AS rating,
+          BOOL_OR(sr.id IS NOT NULL) AS enriched,
+          COUNT(*)::int AS source_count,
+          MAX(cand.updated_at) AS sort_updated
+        FROM candidates cand
+        LEFT JOIN series sr ON sr.id = cand.series_id
+        GROUP BY COALESCE(
+          's:' || sr.id::text,
+          'pn:' || md5(LOWER(TRIM(cand.provider_name)))
+        )
+        ${havingClause}
+        ORDER BY MAX(cand.updated_at) DESC NULLS LAST,
+                 COALESCE('s:' || MIN(sr.id)::text, 'ss:' || MIN(cand.id)::text) DESC
+        LIMIT $${outerLimitIdx}
+      `;
+
+      const dataResult = await postgresService.query(fastSql, fastParams);
+      const hasMore = dataResult.rows.length > pageSize;
+      const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
+
+      let nextCursor = null;
+      if (hasMore && rows.length > 0) {
+        const last = rows[rows.length - 1];
+        const keyValue = last.sort_updated ? new Date(last.sort_updated).toISOString() : null;
+        if (keyValue != null) nextCursor = encodeCursor(keyValue, last.id);
+      }
+
+      const series = rows.map(({ sort_updated, ...rest }) => rest);
+      return res.json({ success: true, pageSize, hasMore, nextCursor, series });
+    }
+
+    // ── SLOW PATH (search / category / non-recent sort) ────────────
+    // The original GROUP BY query — kept as the fallback for paths
+    // where the LATERAL pre-filter would lose correctness (title /
+    // rating sorts need to see every row to find the global top-N).
 
     const params = [userId];
     const whereParts = [`ss.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
@@ -367,13 +562,25 @@ router.get('/movies/:id', requireAuth, async (req, res) => {
     // All per-source rows for this movie (or just the one provider row
     // when there's no canonical link). raw_meta is included so the
     // synthetic canonical can fall back to the provider's own poster.
+    // source_username + source_type let the frontend disambiguate
+    // multiple sources that share the same host (e.g., 6 different
+    // lordstreams.live accounts). source_account_status surfaces dead
+    // / expired accounts so the user can skip them without clicking.
     const sourcesSql = movieId
-      ? `SELECT ms.id AS movie_stream_id, ms.source_id, s.name AS source_name, s.nickname AS source_nickname,
+      ? `SELECT ms.id AS movie_stream_id, ms.source_id,
+                s.name AS source_name, s.nickname AS source_nickname,
+                s.username AS source_username, s.type AS source_type,
+                s.account_status AS source_account_status,
+                s.exp_date AS source_exp_date,
                 ms.provider_stream_id, ms.container_extension, ms.added_at, ms.provider_name, ms.rating,
                 ms.raw_meta
          FROM movie_streams ms JOIN iptv_sources s ON s.id = ms.source_id
          WHERE ms.movie_id = $1 AND s.user_id = $2 ORDER BY ms.added_at DESC NULLS LAST`
-      : `SELECT ms.id AS movie_stream_id, ms.source_id, s.name AS source_name, s.nickname AS source_nickname,
+      : `SELECT ms.id AS movie_stream_id, ms.source_id,
+                s.name AS source_name, s.nickname AS source_nickname,
+                s.username AS source_username, s.type AS source_type,
+                s.account_status AS source_account_status,
+                s.exp_date AS source_exp_date,
                 ms.provider_stream_id, ms.container_extension, ms.added_at, ms.provider_name, ms.rating,
                 ms.raw_meta
          FROM movie_streams ms JOIN iptv_sources s ON s.id = ms.source_id
@@ -459,13 +666,25 @@ router.get('/series/:id', requireAuth, async (req, res) => {
       canonical = cr.rows[0] || null;
     }
 
+    // Same enriched per-source payload as /movies/:id (username + type
+    // + account_status) so the SourceCard UI can disambiguate accounts.
     const sourcesSql = seriesId
-      ? `SELECT ss.id AS series_source_id, ss.source_id, s.name AS source_name, s.nickname AS source_nickname,
-                ss.provider_series_id, ss.last_episode_fetch, ss.provider_name, ss.raw_meta
+      ? `SELECT ss.id AS series_source_id, ss.source_id,
+                s.name AS source_name, s.nickname AS source_nickname,
+                s.username AS source_username, s.type AS source_type,
+                s.account_status AS source_account_status,
+                s.exp_date AS source_exp_date,
+                ss.provider_series_id, ss.last_episode_fetch, ss.provider_name, ss.raw_meta,
+                ss.updated_at
          FROM series_sources ss JOIN iptv_sources s ON s.id = ss.source_id
-         WHERE ss.series_id = $1 AND s.user_id = $2`
-      : `SELECT ss.id AS series_source_id, ss.source_id, s.name AS source_name, s.nickname AS source_nickname,
-                ss.provider_series_id, ss.last_episode_fetch, ss.provider_name, ss.raw_meta
+         WHERE ss.series_id = $1 AND s.user_id = $2 ORDER BY ss.updated_at DESC NULLS LAST`
+      : `SELECT ss.id AS series_source_id, ss.source_id,
+                s.name AS source_name, s.nickname AS source_nickname,
+                s.username AS source_username, s.type AS source_type,
+                s.account_status AS source_account_status,
+                s.exp_date AS source_exp_date,
+                ss.provider_series_id, ss.last_episode_fetch, ss.provider_name, ss.raw_meta,
+                ss.updated_at
          FROM series_sources ss JOIN iptv_sources s ON s.id = ss.source_id
          WHERE ss.id = $1 AND s.user_id = $2`;
     const sourcesResult = await postgresService.query(sourcesSql, [seriesId || idNum, userId]);
