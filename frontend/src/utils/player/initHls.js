@@ -1,6 +1,7 @@
 import Hls from 'hls.js';
 import { addAuthToStreamUrl } from '../streamAuth';
 import { detectVideoQuality } from '../videoQuality';
+import { streamBase } from '../streamBase';
 
 /**
  * hls.js playback for IPTVPlayer. Used in tandem with the backend's
@@ -30,8 +31,11 @@ import { detectVideoQuality } from '../videoQuality';
  */
 
 function buildPlaylistUrl({ sessionId, getChannelId, selectedChannel }) {
+    // Prefix the backend host in dev so the long-lived HLS playlist
+    // request doesn't burn an HTTP/1.1 slot on the Vite proxy origin.
+    // See utils/streamBase.js.
     const cid = encodeURIComponent(getChannelId());
-    let url = `/api/stream/hls/${sessionId}/${cid}/index.m3u8`;
+    let url = `${streamBase()}/api/stream/hls/${sessionId}/${cid}/index.m3u8`;
     if (selectedChannel?.sourceId) {
         url += `?source_id=${selectedChannel.sourceId}`;
     }

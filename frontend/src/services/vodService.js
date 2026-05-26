@@ -94,6 +94,13 @@ async function getSeriesEpisodes(id, { sourceId } = {}) {
  * query param because <video> elements can't carry Authorization
  * headers.
  */
+// VOD streaming stays on the relative same-origin path because (a) it's
+// a single-stream-at-a-time use case so it doesn't compete for slots
+// with anything else, and (b) cross-origin autoplay policies are
+// stricter — Chrome silently rejected the autoplay when these URLs
+// targeted localhost:5001 in dev. Live multi-view tiles still use
+// streamBase() (see initMpegts.js / initHls.js) where the connection-
+// pool isolation matters and the players don't rely on autoplay.
 function buildMovieStreamUrl(movieStreamId) {
   const token = getAuthToken();
   const base = `/api/vod-stream/movie/${encodeURIComponent(movieStreamId)}`;
@@ -106,6 +113,81 @@ function buildEpisodeStreamUrl(episodeStreamId) {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
+/**
+ * GET /api/vod-stream/probe/movie/:id → { container, vcodec, acodec, width, height, duration_s, ... }
+ * Caller passes this to pickPlaybackTier() to decide direct/transmux/transcode.
+ */
+async function probeMovie(movieStreamId) {
+  const r = await apiClient.get(`/vod-stream/probe/movie/${encodeURIComponent(movieStreamId)}`);
+  return r.data;
+}
+
+async function probeEpisode(episodeStreamId) {
+  const r = await apiClient.get(`/vod-stream/probe/episode/${encodeURIComponent(episodeStreamId)}`);
+  return r.data;
+}
+
+/**
+ * Build the transmux URL for a given mode (copy / audio_only /
+ * video_only / full). The frontend tier picker chooses the mode; we
+ * just build a token-bearing URL.
+ */
+function buildMovieTransmuxUrl(movieStreamId, mode, opts = {}) {
+  const token = getAuthToken();
+  const qs = new URLSearchParams({ mode });
+  if (token) qs.set('token', token);
+  if (opts.height) qs.set('height', String(opts.height));
+  return `/api/vod-stream/transmux/movie/${encodeURIComponent(movieStreamId)}?${qs.toString()}`;
+}
+
+function buildEpisodeTransmuxUrl(episodeStreamId, mode, opts = {}) {
+  const token = getAuthToken();
+  const qs = new URLSearchParams({ mode });
+  if (token) qs.set('token', token);
+  if (opts.height) qs.set('height', String(opts.height));
+  return `/api/vod-stream/transmux/episode/${encodeURIComponent(episodeStreamId)}?${qs.toString()}`;
+}
+
+/**
+ * Single entry point used by VodDetail. Probes, picks the tier, and
+ * returns the URL the <video> should load + a debug `reason` string
+ * the UI can surface.
+ */
+async function buildPlaybackUrl(kind, streamId, container, pickPlaybackTier, opts = {}) {
+  const probeFn = kind === 'movie' ? probeMovie : probeEpisode;
+  const directBuilder = kind === 'movie' ? buildMovieStreamUrl : buildEpisodeStreamUrl;
+  const transmuxBuilder = kind === 'movie' ? buildMovieTransmuxUrl : buildEpisodeTransmuxUrl;
+
+  let probe = null;
+  try {
+    const r = await probeFn(streamId);
+    if (r?.success && r.probe) probe = r.probe;
+  } catch (e) {
+    // Probe failed — fall through and let the tier picker fall back to
+    // the container hint. We don't want a probe outage to break
+    // playback for natively-playable content.
+  }
+
+  const decision = pickPlaybackTier(probe, container);
+  const forcedHeight = Number(opts.height) || 0;
+
+  // Quality override: when the user picks a specific output height,
+  // we must transcode video (and re-encode video bitrate is the
+  // bigger cost). Force the tier into video_only or full depending on
+  // whether the audio also needs work. This overrides the picker's
+  // direct/copy choice.
+  let tier = decision.tier;
+  if (forcedHeight > 0) {
+    if (tier === 'audio_only' || tier === 'full') tier = 'full';
+    else tier = 'video_only';
+  }
+
+  const url = tier === 'direct'
+    ? directBuilder(streamId)
+    : transmuxBuilder(streamId, tier, forcedHeight ? { height: forcedHeight } : {});
+  return { url, tier, reason: decision.reason, probe };
+}
+
 export default {
   getCategories,
   getMovies,
@@ -116,5 +198,10 @@ export default {
   enrichSeries,
   getSeriesEpisodes,
   buildMovieStreamUrl,
-  buildEpisodeStreamUrl
+  buildEpisodeStreamUrl,
+  buildMovieTransmuxUrl,
+  buildEpisodeTransmuxUrl,
+  probeMovie,
+  probeEpisode,
+  buildPlaybackUrl
 };

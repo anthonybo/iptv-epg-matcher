@@ -1,5 +1,6 @@
 import { addAuthToStreamUrl } from '../streamAuth';
 import { detectVideoQuality } from '../videoQuality';
+import { streamBase } from '../streamBase';
 
 /**
  * Alternate playback backends for IPTVPlayer. We almost always use
@@ -48,7 +49,7 @@ export function initializeClapprPlayer(ctx) {
     return;
   }
 
-  let baseUrl = `/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
+  let baseUrl = `${streamBase()}/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}`;
   // Scope the search to the originating source so we don't match a
   // same-named channel from a different IPTV provider.
   if (selectedChannel?.sourceId) {
@@ -236,7 +237,7 @@ export function initializeVlcLink(ctx) {
 
   log('info', 'Initializing VLC link page');
 
-  let baseTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+  let baseTsUrl = `${streamBase()}/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
   if (selectedChannel?.sourceId) {
     baseTsUrl += `&source_id=${selectedChannel.sourceId}`;
   }

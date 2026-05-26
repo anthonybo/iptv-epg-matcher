@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import vodService from '../../services/vodService';
 import PosterFallback from './PosterFallback';
+import { pickPlaybackTier, browserCapabilities } from '../../utils/browserCapabilities';
 
 /**
  * VodDetail — single movie OR single series detail page. Triggered
@@ -30,6 +31,213 @@ const ArrowOutSvg = () => (
 // reads cleanly as the headline. "http://lordstreams.live/" →
 // "lordstreams.live"; nicknames pass through untouched.
 const hostOf = (raw) => String(raw || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+
+// Container-extension playability. Chrome's <video> element handles
+// mp4 universally (H.264/AAC); mkv plays for H.264-in-mkv but fails on
+// HEVC; ts (MPEG transport stream) almost never plays natively — it
+// silently shows the poster forever, which is what the user keeps
+// hitting on CAM-rip movies that ship as .ts. Used both to pick a
+// sensible default source and to badge sources visually so the user
+// can pick a different account when their default fails.
+const CONTAINER_PLAYABILITY = {
+  mp4: { rank: 0, label: 'MP4', tone: 'ok' },
+  m4v: { rank: 1, label: 'M4V', tone: 'ok' },
+  mkv: { rank: 2, label: 'MKV', tone: 'mixed' },
+  webm: { rank: 3, label: 'WEBM', tone: 'ok' },
+  mov: { rank: 4, label: 'MOV', tone: 'mixed' },
+  avi: { rank: 5, label: 'AVI', tone: 'bad' },
+  ts: { rank: 6, label: 'TS', tone: 'bad' },
+  mpg: { rank: 7, label: 'MPG', tone: 'bad' },
+  flv: { rank: 8, label: 'FLV', tone: 'bad' }
+};
+
+/**
+ * QualityMenu — small dropdown for the Now-Playing bar. Lives outside
+ * the player so the controls don't block the picture.
+ *
+ * "Source (native)" returns to the picker's natural choice (direct or
+ * `-c copy` transmux). Any other choice forces a server-side ffmpeg
+ * re-encode at that height. Heights above the source are hidden — no
+ * point upscaling, just costs CPU.
+ */
+const QualityMenu = ({ sourceHeight, qualityHeight, onChange }) => {
+  const [open, setOpen] = useState(false);
+  // Click-outside handler — gives the menu the usual dismiss-on-blur
+  // behavior without pulling in a popover library.
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const handler = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1.5 h-6 px-2 rounded-md border border-slate-700/60 bg-slate-900/60 hover:border-slate-600 hover:bg-slate-800 font-mono text-[10px] uppercase tracking-[0.18em] text-slate-300 hover:text-cyan-200 transition"
+        title="Pick output quality — non-Source options force a server re-encode"
+      >
+        Quality
+        <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.4}>
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute top-full right-0 mt-1 min-w-[160px] rounded-md bg-slate-950/95 ring-1 ring-slate-700/80 shadow-xl overflow-hidden z-10">
+          {[null, 1080, 720, 480].map((h) => {
+            if (h && sourceHeight && h > sourceHeight) return null;
+            const isActive = (qualityHeight || null) === h;
+            const label = h === null ? 'Source (native)' : `${h}p (re-encode)`;
+            return (
+              <button
+                key={String(h)}
+                type="button"
+                onClick={() => { setOpen(false); onChange(h); }}
+                className={`w-full text-left px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.14em] transition ${
+                  isActive
+                    ? 'bg-cyan-500/20 text-cyan-100'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-slate-100'
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Map a pixel height to the conventional resolution label that
+// matches detectVideoQuality()'s buckets. Used by the player's
+// resolution chip — keeps the same vocabulary the live tile uses
+// ("4K" / "2K" / "1080p" / "720p" / "480p") for cross-feature
+// consistency.
+const labelForHeight = (h) => {
+  if (!h) return '';
+  if (h >= 2160) return '4K';
+  if (h >= 1440) return '2K';
+  if (h >= 1080) return '1080p';
+  if (h >= 720) return '720p';
+  if (h >= 480) return '480p';
+  return `${h}p`;
+};
+
+// Detect platform for the VLC deep-link handoff. iOS/Android get
+// native URL schemes; desktop falls back to a copy-to-clipboard
+// because there's no universal "open VLC with URL" affordance from
+// a browser.
+const detectPlatform = () => {
+  if (typeof navigator === 'undefined') return 'desktop';
+  const ua = (navigator.userAgent || '').toLowerCase();
+  if (/iphone|ipad|ipod/.test(ua)) return 'ios';
+  if (/android/.test(ua)) return 'android';
+  return 'desktop';
+};
+
+/**
+ * Hand a stream URL off to the user's external VLC.
+ *
+ * Schemes (verified working in 2026):
+ *   iOS:     vlc-x-callback://x-callback-url/stream?url=<encoded>
+ *            (Infuse: infuse://x-callback-url/play?url=<encoded>)
+ *   Android: intent://<url>#Intent;package=org.videolan.vlc;type=video/*;end
+ *   Desktop: there's no universal scheme — best UX is copy-to-clipboard
+ *            with a toast, since users on macOS/Win typically have VLC
+ *            already and can paste into "Open Network Stream".
+ *
+ * On every platform the URL we hand off is our proxy URL (so auth /
+ * Stalker headers / range support all keep flowing through us) — NEVER
+ * the raw upstream URL.
+ */
+const openInVlc = (proxyUrl) => {
+  if (!proxyUrl) return;
+  const platform = detectPlatform();
+  if (platform === 'ios') {
+    window.location.href = `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(proxyUrl)}`;
+    return;
+  }
+  if (platform === 'android') {
+    window.location.href = `intent:${proxyUrl}#Intent;package=org.videolan.vlc;type=video/*;end`;
+    return;
+  }
+  // Desktop: clipboard + minimal feedback. We can't reliably launch
+  // VLC from a browser context without a custom protocol handler the
+  // user has registered; copy-paste is the universally-known path.
+  try {
+    navigator.clipboard.writeText(proxyUrl).then(
+      () => {
+        // eslint-disable-next-line no-alert
+        alert('Stream URL copied. Open VLC → File → Open Network → paste.');
+      },
+      () => {
+        // eslint-disable-next-line no-alert
+        prompt('Copy this URL into VLC:', proxyUrl);
+      }
+    );
+  } catch (_) {
+    // eslint-disable-next-line no-alert
+    prompt('Copy this URL into VLC:', proxyUrl);
+  }
+};
+
+// Absolute URL builder for the "Open in VLC" handoff. The frontend
+// uses relative URLs for the <video> element (cross-origin autoplay
+// fights, see streamBase.js), but VLC handlers want a fully-qualified
+// URL it can paste into a network stream.
+const buildAbsoluteUrl = (relativePath) => {
+  if (!relativePath) return null;
+  if (/^https?:\/\//i.test(relativePath)) return relativePath;
+  try {
+    return new URL(relativePath, window.location.origin).toString();
+  } catch (_) { return relativePath; }
+};
+
+// Short human-readable label for the chip rendered on the player.
+// Examples:
+//   direct       → "DIRECT"
+//   copy         → "TRANSMUX TS→MP4" (or just "TRANSMUX" if no probe)
+//   audio_only   → "AUDIO RE-ENCODE"
+//   video_only   → "VIDEO RE-ENCODE"
+//   full         → "TRANSCODE HEVC→H264"
+const formatTierLabel = ({ tier, probe }) => {
+  switch (tier) {
+    case 'direct':
+      return 'DIRECT';
+    case 'copy':
+      return probe?.container
+        ? `TRANSMUX ${String(probe.container).toUpperCase()}→MP4`
+        : 'TRANSMUX';
+    case 'audio_only':
+      return probe?.acodec ? `AUDIO RE-ENC ${String(probe.acodec).toUpperCase()}→AAC` : 'AUDIO RE-ENC';
+    case 'video_only':
+      return probe?.vcodec ? `VIDEO RE-ENC ${String(probe.vcodec).toUpperCase()}→H264` : 'VIDEO RE-ENC';
+    case 'full':
+      return 'TRANSCODE';
+    default:
+      return null;
+  }
+};
+
+const pickPlayableSource = (sources) => {
+  if (!sources || !sources.length) return null;
+  // Sort by playability rank (lower is better), keep added_at order as
+  // the tiebreaker by using a stable sort and not touching ordering
+  // within the same rank.
+  const scored = sources.map((s, i) => {
+    const ext = String(s.container_extension || '').toLowerCase();
+    const rank = CONTAINER_PLAYABILITY[ext]?.rank ?? 99;
+    return { s, i, rank };
+  });
+  scored.sort((a, b) => a.rank - b.rank || a.i - b.i);
+  return scored[0].s;
+};
 
 // Type-color mapping — matches the rest of the app (multi-view rail,
 // channel picker rail, etc.). xtream=sky, stalker=violet, m3u=emerald.
@@ -64,6 +272,8 @@ const SourceCard = ({ source, active, onClick, index }) => {
   const account = source.source_username || null;
   const status = (source.source_account_status || '').toLowerCase();
   const isUnhealthy = status && !['active', 'ok', '', 'good'].includes(status);
+  const ext = String(source.container_extension || '').toLowerCase();
+  const containerInfo = CONTAINER_PLAYABILITY[ext] || null;
 
   return (
     <button
@@ -131,6 +341,26 @@ const SourceCard = ({ source, active, onClick, index }) => {
           <span className="flex-shrink-0 text-[9px] font-mono text-slate-600 tabular-nums">
             #{(index ?? 0) + 1}
           </span>
+          {containerInfo && (
+            <span
+              className={`flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-sm font-mono text-[9px] uppercase tracking-[0.12em] ring-1 ${
+                containerInfo.tone === 'ok'
+                  ? 'text-emerald-300 bg-emerald-500/[0.08] ring-emerald-500/25'
+                  : containerInfo.tone === 'mixed'
+                  ? 'text-amber-300 bg-amber-500/[0.08] ring-amber-500/25'
+                  : 'text-rose-300 bg-rose-500/[0.08] ring-rose-500/25'
+              }`}
+              title={
+                containerInfo.tone === 'bad'
+                  ? `.${ext} repackaged server-side via ffmpeg — plays, but mp4/mkv is lighter on the backend`
+                  : containerInfo.tone === 'mixed'
+                  ? `.${ext} plays for common codecs; HEVC/AC-3 trigger a backend transcode`
+                  : `.${ext} plays natively in browser`
+              }
+            >
+              {containerInfo.label}
+            </span>
+          )}
           {isUnhealthy && (
             <span className="flex-shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm font-mono text-[9px] uppercase tracking-[0.12em] text-rose-300 bg-rose-500/[0.08] ring-1 ring-rose-500/25" title={`Account status: ${status}`}>
               {status}
@@ -142,34 +372,94 @@ const SourceCard = ({ source, active, onClick, index }) => {
   );
 };
 
-const StreamPlayer = ({ src, poster }) => {
+/**
+ * StreamPlayer — now a thin wrapper around <video>. Everything weird
+ * about codecs/containers is solved server-side by the transmux
+ * pipeline (see backend/services/ffmpegService.js + the tier picker
+ * in utils/browserCapabilities.js). By the time a URL gets here it's
+ * either:
+ *   - a direct passthrough of a browser-native mp4/mkv-h264, OR
+ *   - a fragmented MP4 stream from /api/vod-stream/transmux/...
+ * Both play via plain <video src=...> with native seek + controls.
+ * `tierLabel` is just a human-readable string from the picker so the
+ * UI can surface "Transmuxing (TS → fMP4)" etc. when the user wants
+ * to know what's happening.
+ */
+const StreamPlayer = ({ src, poster, onVlcLink, onHeightChange }) => {
   const videoRef = useRef(null);
-  // The user's Play-button click is a valid user gesture for autoplay,
-  // but the <video> wasn't reaching .play() automatically — they had
-  // to click the native controls a second time. Kicking off play() in
-  // an effect tied to src removes that second click.
+  const [loadError, setLoadError] = useState(null);
+
   useEffect(() => {
-    if (!videoRef.current || !src) return;
+    setLoadError(null);
+    if (onHeightChange) onHeightChange(null);
+    if (!videoRef.current || !src) return undefined;
+    // The user's Play-button click is a valid gesture for autoplay,
+    // but the element doesn't always reach .play() on its own — calling
+    // it here removes the need for a second click on native controls.
+    videoRef.current.src = src;
     const p = videoRef.current.play();
     if (p && typeof p.catch === 'function') {
-      p.catch(() => {});
+      p.catch(() => { /* autoplay blocked — user can click */ });
     }
+    const onMeta = () => {
+      const h = videoRef.current?.videoHeight;
+      if (h && onHeightChange) onHeightChange(h);
+    };
+    videoRef.current.addEventListener('loadedmetadata', onMeta);
+    videoRef.current.addEventListener('resize', onMeta);
+    const el = videoRef.current;
+    return () => {
+      try {
+        el.removeEventListener('loadedmetadata', onMeta);
+        el.removeEventListener('resize', onMeta);
+        el.src = '';
+      } catch (_) {}
+    };
+    // onHeightChange intentionally not in deps — it's a stable
+    // callback from the parent and including it would re-mount the
+    // <video> every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
+
+  // Surface real media errors so the user knows when something failed
+  // (vs the previous silent-poster behavior with unsupported codecs).
+  const handleVideoError = () => {
+    const code = videoRef.current?.error?.code;
+    const map = {
+      1: 'Playback aborted',
+      2: 'Network error fetching stream',
+      3: 'Decode error (codec issue)',
+      4: 'Source not supported — try a different account or use VLC'
+    };
+    setLoadError(map[code] || `Playback error (code ${code || '?'})`);
+  };
 
   if (!src) return null;
   return (
     <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-slate-800 bg-black">
       <video
         ref={videoRef}
-        key={src}
-        src={src}
         poster={poster || undefined}
         controls
         playsInline
-        autoPlay
         preload="metadata"
         className="w-full h-full"
+        onError={handleVideoError}
       />
+      {loadError && (
+        <div className="absolute inset-x-0 bottom-12 mx-4 rounded-md bg-rose-950/85 ring-1 ring-rose-500/40 px-3 py-2 backdrop-blur-sm flex items-start gap-3">
+          <p className="flex-1 font-mono text-[11px] text-rose-200">{loadError}</p>
+          {onVlcLink && (
+            <button
+              type="button"
+              onClick={onVlcLink}
+              className="flex-shrink-0 font-mono text-[10px] uppercase tracking-[0.14em] px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 ring-1 ring-rose-400/40 text-rose-100"
+            >
+              Open in VLC
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -242,8 +532,30 @@ const VodDetail = ({ kind, id, onBack }) => {
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
   const [activeSourceId, setActiveSourceId] = useState(null);
+  // Set when the user explicitly picks a source from the SourceCard
+  // list. Tells the self-correcting effect to back off — otherwise it
+  // snaps back to a .mp4 the moment the user tries to test a .ts/.flv
+  // source, and they can never reach the mpegts.js path.
+  const userPickedSourceRef = useRef(false);
   const [playingEpisodeStreamId, setPlayingEpisodeStreamId] = useState(null);
   const [streamSrc, setStreamSrc] = useState(null);
+  // Human-readable label for the current playback tier — shown as a
+  // small chip on the player so the user can see "transmux: ts → fMP4"
+  // without opening devtools. Set by handlePlayMovie/Episode.
+  const [streamTier, setStreamTier] = useState(null);
+  const [streamVlcUrl, setStreamVlcUrl] = useState(null);
+  // Width/height from the most recent probe — used to populate the
+  // resolution chip on the player and the quality-selector menu (no
+  // point offering 1080p if the source itself is 480p).
+  const [streamProbe, setStreamProbe] = useState(null);
+  // Forced output height (null = source). When set, the next call to
+  // startPlayback wires it into the transmux URL → ffmpeg scales the
+  // re-encode down to that height.
+  const [qualityHeight, setQualityHeight] = useState(null);
+  // Live videoHeight from the <video> element — the most accurate
+  // signal of what's actually rendering. Falls back to the probe's
+  // source height before metadata loads.
+  const [streamPlayerHeight, setStreamPlayerHeight] = useState(null);
   const [trailerYtId, setTrailerYtId] = useState(null);
   // True while we're firing an on-demand enrichment for this row.
   const [enriching, setEnriching] = useState(false);
@@ -270,13 +582,22 @@ const VodDetail = ({ kind, id, onBack }) => {
     setLoading(true);
     setError(null);
     enrichTriedRef.current = false;
+    // Each new movie/series page starts fresh — let the auto-picker
+    // pick a playable default until the user overrides.
+    userPickedSourceRef.current = false;
     const fetcher = kind === 'movie' ? vodService.getMovie : vodService.getSeries;
     fetcher(id)
       .then((d) => {
         if (cancelled) return;
         setData(d);
-        const first = (d.sources || [])[0];
-        if (first) setActiveSourceId(first.source_id);
+        // Prefer a browser-playable container for the default source
+        // (.mp4 > .mkv > everything else). Picking the first row by
+        // added_at means we frequently land on a .ts CAM rip that
+        // Chrome's <video> can't decode — the user sees the poster at
+        // 0:00 and assumes the player is broken.
+        const sources = d.sources || [];
+        const playable = pickPlayableSource(sources);
+        if (playable) setActiveSourceId(playable.source_id);
         setLoading(false);
       })
       .catch((e) => {
@@ -286,6 +607,37 @@ const VodDetail = ({ kind, id, onBack }) => {
       });
     return () => { cancelled = true; };
   }, [kind, id]);
+
+  // Self-correcting source pick: when the data loads (or changes
+  // after enrichment), make sure the active source isn't one Chrome
+  // can't decode — if it is, and there's a playable alternative,
+  // switch to it. Belt-and-suspenders for the initial pick above,
+  // since React fast-refresh and component re-mounts can leave a
+  // stale activeSourceId pointing at a .ts/.avi source.
+  useEffect(() => {
+    if (!data) return;
+    // Once the user has manually picked a source, stop second-guessing
+    // them — even if it's a .ts that we'd normally avoid. mpegts.js
+    // will handle it. Without this guard the user can never reach a
+    // .ts source because we snap right back to .mp4 on every click.
+    if (userPickedSourceRef.current) return;
+    const sources = data.sources || [];
+    if (!sources.length) return;
+    const current = sources.find((s) => s.source_id === activeSourceId);
+    if (current) {
+      const ext = String(current.container_extension || '').toLowerCase();
+      const info = CONTAINER_PLAYABILITY[ext];
+      // Only override when the active source is EXPLICITLY known to
+      // need software demuxing (.ts/.avi/.mpg/.flv = "bad" tone).
+      // Even though mpegts.js handles .ts, .mp4 is cheaper at startup
+      // so it's still the better default. Unknown / mixed pass through.
+      if (!info || info.tone !== 'bad') return;
+    }
+    const playable = pickPlayableSource(sources);
+    if (playable && playable.source_id !== activeSourceId) {
+      setActiveSourceId(playable.source_id);
+    }
+  }, [data, activeSourceId]);
 
   // On-demand enrichment: when the detail loads and the row hasn't
   // been enriched yet, kick off the lookup immediately instead of
@@ -368,20 +720,115 @@ const VodDetail = ({ kind, id, onBack }) => {
     return null;
   }, [playingEpisodeStreamId, seasons]);
 
+  /**
+   * Resolve a playback URL through the probe → tier-pick flow.
+   *
+   * Three states drive the player:
+   *   - streamSrc    — the URL <video> loads (direct or transmux)
+   *   - streamTier   — short label rendered as a chip on the player
+   *   - streamVlcUrl — absolute proxy URL handed to "Open in VLC"
+   *                    when playback fails (or via an explicit button)
+   *
+   * Probing is fire-and-forget from the caller's perspective: while it
+   * runs we optimistically set the direct URL so the user sees PLAY
+   * react immediately, then upgrade to the transmux URL once the
+   * probe + tier-pick complete. For .mp4-with-h264 (the 60% case)
+   * the probe lands on `direct` and nothing changes.
+   */
+  // overrideHeight: when provided, takes precedence over the
+  // `qualityHeight` state — used by handleQualityChange to avoid
+  // reading its own stale closure right after setQualityHeight(...).
+  const startPlayback = async (kindLocal, streamId, containerExt, overrideHeight) => {
+    if (!streamId) return;
+    setTrailerYtId(null);
+    const directBuilder = kindLocal === 'movie'
+      ? vodService.buildMovieStreamUrl
+      : vodService.buildEpisodeStreamUrl;
+
+    // Optimistic direct mount only when the container is plausibly
+    // browser-native given THIS browser's capabilities. mp4/m4v/mov
+    // are universal; mkv only works on Chrome. For anything else (.ts
+    // / .avi / unknown) we wait for the probe before setting src —
+    // otherwise the <video> hits a decode error and flashes a red
+    // overlay before the probe upgrades the URL.
+    const ext = String(containerExt || '').toLowerCase();
+    const caps = browserCapabilities();
+    const canTryDirect = ext === 'mp4' || ext === 'm4v' || ext === 'mov' ||
+                         (ext === 'mkv' && caps.canMkv);
+    if (canTryDirect) {
+      setStreamSrc(directBuilder(streamId));
+      setStreamTier(null);
+    } else {
+      // Clear stream + show a soft "probing" label so the player area
+      // doesn't disappear (jarring), but no video element mounts yet.
+      setStreamSrc(null);
+      setStreamTier('PROBING…');
+    }
+    setStreamVlcUrl(buildAbsoluteUrl(directBuilder(streamId)));
+
+    try {
+      // overrideHeight defaults to undefined; treat that as "use the
+      // current state". null is a meaningful caller intent ("Source —
+      // no forced height") and must override the state.
+      const effectiveHeight = overrideHeight === undefined ? qualityHeight : overrideHeight;
+      const decision = await vodService.buildPlaybackUrl(
+        kindLocal,
+        streamId,
+        containerExt,
+        pickPlaybackTier,
+        { height: effectiveHeight || 0 }
+      );
+      setStreamSrc(decision.url);
+      setStreamTier(formatTierLabel(decision));
+      setStreamProbe(decision.probe || null);
+      setStreamVlcUrl(buildAbsoluteUrl(directBuilder(streamId)));
+    } catch (e) {
+      // Probe failed — fall back to direct so something plays, and
+      // let the <video> surface its own error if the codec doesn't
+      // work.
+      setStreamSrc(directBuilder(streamId));
+      setStreamTier('DIRECT (probe failed)');
+      setStreamProbe(null);
+    }
+  };
+
+  // Quality switch — user picked a different output height. Track
+  // current playing (movie or episode) and rebuild the playback URL.
+  // We pass newHeight through to startPlayback as the override so it
+  // doesn't read the stale `qualityHeight` state from its closure.
+  const handleQualityChange = (newHeight) => {
+    setQualityHeight(newHeight);
+    if (kind === 'movie' && activeSource) {
+      startPlayback('movie', activeSource.movie_stream_id, activeSource.container_extension, newHeight);
+    } else if (kind === 'series' && playingEpisode) {
+      startPlayback('episode', playingEpisode.episode_stream_id, playingEpisode.container_extension, newHeight);
+    }
+  };
+
+  // Reset quality override when the user navigates between movies or
+  // picks a different source/episode — the previous override may not
+  // make sense for the new source (different resolution).
+  useEffect(() => { setQualityHeight(null); }, [id, kind]);
+
   const handlePlayMovie = () => {
     if (!activeSource) return;
-    setStreamSrc(vodService.buildMovieStreamUrl(activeSource.movie_stream_id));
+    startPlayback('movie', activeSource.movie_stream_id, activeSource.container_extension);
   };
+
+  // Mid-playback source switch: when the user is already watching and
+  // picks a different account from the SourceCard list, rerun the
+  // probe + tier pick for the new source. Without this the URL stays
+  // pinned to whatever source was active at the initial PLAY click.
+  useEffect(() => {
+    if (kind !== 'movie' || !streamSrc || !activeSource) return;
+    startPlayback('movie', activeSource.movie_stream_id, activeSource.container_extension);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSource?.movie_stream_id]);
 
   const handlePlayEpisode = (episode) => {
     if (!episode.episode_stream_id) return;
-    // Clear the trailer iframe — otherwise the player render branch
-    // (trailerYtId ? iframe : streamSrc ? video) keeps showing the
-    // trailer even though a new stream is being requested, making it
-    // look like clicking the episode did nothing.
-    setTrailerYtId(null);
     setPlayingEpisodeStreamId(episode.episode_stream_id);
-    setStreamSrc(vodService.buildEpisodeStreamUrl(episode.episode_stream_id));
+    startPlayback('episode', episode.episode_stream_id, episode.container_extension);
   };
 
   if (loading) {
@@ -726,7 +1173,10 @@ const VodDetail = ({ kind, id, onBack }) => {
                             source={s}
                             active={false}
                             index={i}
-                            onClick={() => setActiveSourceId(s.source_id)}
+                            onClick={() => {
+                              userPickedSourceRef.current = true;
+                              setActiveSourceId(s.source_id);
+                            }}
                           />
                         ))}
                     </div>
@@ -772,7 +1222,7 @@ const VodDetail = ({ kind, id, onBack }) => {
             stream player otherwise. Single shared region so switching
             between Play and Trailer never doubles up the UI. Wrapped
             in a ref so we can scrollIntoView when playback starts. */}
-        {(trailerYtId || streamSrc) && (
+        {(trailerYtId || streamSrc || streamTier) && (
           <div ref={playerSectionRef} className="mt-6 scroll-mt-4">
             {/* Now-Playing pill — gives immediate context after the
                 page scrolls. For series, surfaces the active S/E +
@@ -796,6 +1246,43 @@ const VodDetail = ({ kind, id, onBack }) => {
                 <span className="font-mono text-[11px] tabular-nums text-slate-400 normal-case tracking-normal">
                   {row.title}
                 </span>
+              )}
+              {/* Spacer pushes the playback chips to the right edge */}
+              <span className="flex-1 min-w-2" />
+              {/* Tier + resolution + quality chips — moved out of the
+                  player overlay so they don't block the picture. They
+                  sit in the Now-Playing bar alongside the title for
+                  the same horizontal real estate. */}
+              {!trailerYtId && streamTier && (
+                <span
+                  className="inline-flex items-center h-6 px-2 rounded-md border border-slate-700/60 bg-slate-900/60 font-mono text-[10px] uppercase tracking-[0.18em] text-slate-300"
+                  title="Backend playback path"
+                >
+                  {streamTier}
+                </span>
+              )}
+              {!trailerYtId && (qualityHeight || streamPlayerHeight || streamProbe?.height) && (
+                <span
+                  className="inline-flex items-center h-6 px-2 rounded-md border border-cyan-500/30 bg-cyan-500/[0.06] font-mono text-[10px] uppercase tracking-[0.18em] text-cyan-200"
+                  title={qualityHeight ? 'Output forced via server re-encode' : 'Source resolution (native)'}
+                >
+                  {/* qualityHeight is the user's explicit choice — show
+                      it first so a fresh "switch to 480" doesn't flash
+                      the previous stream's stale videoHeight while the
+                      new ffmpeg pipe spins up. Without a forced height
+                      the real <video> videoHeight is the ground truth. */}
+                  {labelForHeight(qualityHeight || streamPlayerHeight || streamProbe?.height)}
+                  {qualityHeight ? (
+                    <span className="ml-1.5 text-amber-300 normal-case tracking-normal">· forced</span>
+                  ) : null}
+                </span>
+              )}
+              {!trailerYtId && streamSrc && (
+                <QualityMenu
+                  sourceHeight={streamProbe?.height || null}
+                  qualityHeight={qualityHeight}
+                  onChange={handleQualityChange}
+                />
               )}
             </div>
 
@@ -823,7 +1310,28 @@ const VodDetail = ({ kind, id, onBack }) => {
                 </div>
               </>
             ) : (
-              <StreamPlayer src={streamSrc} poster={row.backdrop_url || row.poster_url} />
+              streamSrc ? (
+                <StreamPlayer
+                  src={streamSrc}
+                  poster={row.backdrop_url || row.poster_url}
+                  onVlcLink={streamVlcUrl ? () => openInVlc(streamVlcUrl) : null}
+                  onHeightChange={setStreamPlayerHeight}
+                />
+              ) : (
+                // Probing phase — soft placeholder so the player area
+                // doesn't blink in/out while the probe runs.
+                <div className="relative aspect-video w-full rounded-lg overflow-hidden border border-slate-800 bg-black flex items-center justify-center">
+                  {(row.backdrop_url || row.poster_url) && (
+                    <img src={row.backdrop_url || row.poster_url} alt="" className="absolute inset-0 w-full h-full object-cover opacity-30" />
+                  )}
+                  <div className="relative z-10 flex flex-col items-center gap-3">
+                    <div className="w-10 h-10 rounded-full border-2 border-slate-700 border-t-cyan-400 animate-spin" />
+                    <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-slate-400">
+                      {streamTier || 'Probing…'}
+                    </span>
+                  </div>
+                </div>
+              )
             )}
           </div>
         )}

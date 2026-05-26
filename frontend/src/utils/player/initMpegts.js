@@ -1,5 +1,6 @@
 import { addAuthToStreamUrl } from '../streamAuth';
 import { detectVideoQuality } from '../videoQuality';
+import { streamBase } from '../streamBase';
 
 /**
  * mpegts.js playback setup for IPTVPlayer — the primary path for
@@ -137,12 +138,16 @@ export function initializeMpegtsPlayerInstance(ctx) {
   // standard endpoint relies on our frontend recovery logic. Cache-bust
   // only the standard endpoint — the resilient one is a long-lived
   // proxy connection we don't want to churn.
+  // streamBase() points us at the backend port directly in dev so the
+  // long-running stream connection doesn't burn an HTTP/1.1 slot on
+  // localhost:3000. See utils/streamBase.js for the full reasoning.
+  const SB = streamBase();
   let baseTsUrl;
   if (shouldUseResilientProxy) {
-    baseTsUrl = `/api/stream/resilient/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    baseTsUrl = `${SB}/api/stream/resilient/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
     log('info', 'Using resilient stream proxy (backend-level retry)');
   } else {
-    baseTsUrl = `/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
+    baseTsUrl = `${SB}/api/stream/${sessionId}/${encodeURIComponent(getChannelId())}?format=ts`;
   }
   if (selectedChannel?.sourceId) {
     baseTsUrl += `&source_id=${selectedChannel.sourceId}`;

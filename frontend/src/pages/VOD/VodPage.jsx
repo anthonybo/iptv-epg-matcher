@@ -12,6 +12,15 @@ import VodDetail from './VodDetail';
 const VodPage = ({ kind }) => {
   const [openItem, setOpenItem] = useState(null);
 
+  // When the sidebar flips between Movies and TV Series, clear any
+  // open detail page — otherwise the previous tab's ID (e.g. a
+  // movie's `m:2118`) gets passed to the new tab's detail view and
+  // the wrong endpoint barfs 400 "Invalid id" because the prefix
+  // doesn't match (movies use `m:`, series use `s:`).
+  useEffect(() => {
+    setOpenItem(null);
+  }, [kind]);
+
   // Reset the scroll container when the user switches between Movies
   // and TV Series (or opens/closes a detail page). AppLayout's <main>
   // is the scrollable element — window.scrollTo wouldn't do anything
