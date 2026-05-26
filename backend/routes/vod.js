@@ -219,19 +219,69 @@ router.get('/movies', requireAuth, async (req, res) => {
     // ── SLOW PATH (search / category / non-recent sort) ────────────
     // Build dynamic WHERE. Same shape as before — joins, scoping,
     // filters; just no longer does COUNT(*) or runtime JSONB extract.
+    //
+    // Search: same UNION rewrite as /series — see comment there. A
+    // plain `WHERE COALESCE(m.title, ms.provider_name) ILIKE $X`
+    // can't push the predicate down to either trgm index because
+    // COALESCE is an expression, so the planner falls back to a
+    // Parallel Seq Scan of all 1.4M movie_streams rows.
+
     const params = [userId];
-    const whereParts = [`ms.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
+    let sourceClause = '';
+    let catClause = '';
     if (sourceId) {
       params.push(sourceId);
-      whereParts.push(`ms.source_id = $${params.length}`);
+      sourceClause = `AND ms.source_id = $${params.length}`;
     }
     if (categoryId) {
       params.push(categoryId);
-      whereParts.push(`ms.provider_category_id = $${params.length}`);
+      catClause = `AND ms.provider_category_id = $${params.length}`;
     }
+
+    let candidatesCte = '';
+    let fromTable;
+    let whereClause = '';
     if (search && search.length >= 2) {
-      params.push(`%${search}%`);
-      whereParts.push(`(COALESCE(m.title, ms.provider_name) ILIKE $${params.length})`);
+      // See /series for the rationale — same tokenization trick to
+      // beat punctuation gaps in titles ("On Patrol: Live" vs
+      // "on patrol live"). Each token gets its own ILIKE; the AND
+      // intersection still hits the GIN trgm index.
+      const tokens = search.split(/\s+/).filter((t) => t.length >= 2).slice(0, 6);
+      const effectiveTokens = tokens.length ? tokens : [search];
+      const titleAnds = [];
+      const provAnds = [];
+      effectiveTokens.forEach((tok) => {
+        params.push(`%${tok}%`);
+        titleAnds.push(`m.title ILIKE $${params.length}`);
+        provAnds.push(`ms.provider_name ILIKE $${params.length}`);
+      });
+      candidatesCte = `
+        WITH candidates AS (
+          SELECT ms.id, ms.movie_id, ms.provider_name, ms.poster_fallback,
+                 ms.source_id, ms.added_at, ms.rating, ms.rating_fallback,
+                 ms.provider_category_id
+          FROM movie_streams ms
+          WHERE ms.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)
+            ${sourceClause} ${catClause}
+            AND ${provAnds.join(' AND ')}
+          UNION
+          SELECT ms.id, ms.movie_id, ms.provider_name, ms.poster_fallback,
+                 ms.source_id, ms.added_at, ms.rating, ms.rating_fallback,
+                 ms.provider_category_id
+          FROM movie_streams ms
+          JOIN movies m ON m.id = ms.movie_id
+          WHERE ms.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)
+            ${sourceClause} ${catClause}
+            AND ${titleAnds.join(' AND ')}
+        )
+      `;
+      fromTable = `candidates ms`;
+    } else {
+      const whereParts = [`ms.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
+      if (sourceClause) whereParts.push(sourceClause.replace(/^AND /, ''));
+      if (catClause) whereParts.push(catClause.replace(/^AND /, ''));
+      fromTable = `movie_streams ms`;
+      whereClause = `WHERE ${whereParts.join(' AND ')}`;
     }
 
     const groupKey = `COALESCE('m:' || m.id::text, 'ms:' || ms.id::text)`;
@@ -265,6 +315,7 @@ router.get('/movies', requireAuth, async (req, res) => {
     // running a separate COUNT(*) — if the over-fetch returns N+1
     // rows, we trim the last and emit a next_cursor.
     const dataSql = `
+      ${candidatesCte}
       SELECT
         ${groupKey} AS id,
         COALESCE(MIN(m.title), MIN(ms.provider_name)) AS title,
@@ -275,9 +326,9 @@ router.get('/movies', requireAuth, async (req, res) => {
         COUNT(*)::int AS source_count,
         MAX(ms.added_at) AS sort_added,
         MIN(COALESCE(m.title, ms.provider_name)) AS sort_title
-      FROM movie_streams ms
+      FROM ${fromTable}
       LEFT JOIN movies m ON m.id = ms.movie_id
-      WHERE ${whereParts.join(' AND ')}
+      ${whereClause}
       GROUP BY ${groupKey}
       ${havingCursor ? `HAVING ${havingCursor}` : ''}
       ORDER BY ${orderBy}
@@ -430,20 +481,82 @@ router.get('/series', requireAuth, async (req, res) => {
     // The original GROUP BY query — kept as the fallback for paths
     // where the LATERAL pre-filter would lose correctness (title /
     // rating sorts need to see every row to find the global top-N).
+    //
+    // Search rewrite: a naive `WHERE COALESCE(sr.title, ss.provider_name)
+    // ILIKE $1` defeats both trgm indexes because COALESCE is an
+    // expression the planner can't push down to either underlying
+    // column. EXPLAIN ANALYZE on a real query showed Parallel Seq Scan
+    // over all 307k series_sources rows → 10+ second timeouts. The
+    // fix is to UNION two index-friendly halves: one matches
+    // ss.provider_name (uses idx_series_sources_provider_name_trgm),
+    // the other joins through to series and matches sr.title (uses
+    // idx_series_title_trgm). UNION dedupes so a series matching both
+    // sides counts once. Search drops from timeout → ~500ms.
 
     const params = [userId];
-    const whereParts = [`ss.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
+    let sourceClause = '';
+    let catClause = '';
     if (sourceId) {
       params.push(sourceId);
-      whereParts.push(`ss.source_id = $${params.length}`);
+      sourceClause = `AND ss.source_id = $${params.length}`;
     }
     if (categoryId) {
       params.push(categoryId);
-      whereParts.push(`ss.provider_category_id = $${params.length}`);
+      catClause = `AND ss.provider_category_id = $${params.length}`;
     }
+
+    // Build the FROM table reference + an optional WHERE that runs
+    // AFTER the LEFT JOIN. They have to be separate strings: SQL
+    // requires JOINs before WHERE, so we can't inline the WHERE into
+    // the FROM expression for the no-search path.
+    let candidatesCte = '';
+    let fromTable;
+    let whereClause = '';
     if (search && search.length >= 2) {
-      params.push(`%${search}%`);
-      whereParts.push(`(COALESCE(sr.title, ss.provider_name) ILIKE $${params.length})`);
+      // Tokenize on whitespace so "on patrol live" matches
+      // "On Patrol: Live" (punctuation breaks a literal ILIKE
+      // substring match). Each token becomes its own ILIKE that
+      // can still leverage the GIN trgm index, and the AND'd
+      // bitmap intersection filters to rows containing all tokens.
+      // Cap at 6 tokens — anything beyond is degenerate user input
+      // and would just balloon the bitmap intersection cost.
+      const tokens = search.split(/\s+/).filter((t) => t.length >= 2).slice(0, 6);
+      // Fall back to the whole-string match if every token is
+      // ultra-short (e.g. "a b") so we don't end up with an empty
+      // predicate that returns the entire catalog.
+      const effectiveTokens = tokens.length ? tokens : [search];
+      const titleAnds = [];
+      const provAnds = [];
+      effectiveTokens.forEach((tok) => {
+        params.push(`%${tok}%`);
+        titleAnds.push(`sr.title ILIKE $${params.length}`);
+        provAnds.push(`ss.provider_name ILIKE $${params.length}`);
+      });
+      candidatesCte = `
+        WITH candidates AS (
+          SELECT ss.id, ss.series_id, ss.provider_name, ss.poster_fallback,
+                 ss.source_id, ss.updated_at, ss.provider_category_id
+          FROM series_sources ss
+          WHERE ss.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)
+            ${sourceClause} ${catClause}
+            AND ${provAnds.join(' AND ')}
+          UNION
+          SELECT ss.id, ss.series_id, ss.provider_name, ss.poster_fallback,
+                 ss.source_id, ss.updated_at, ss.provider_category_id
+          FROM series_sources ss
+          JOIN series sr ON sr.id = ss.series_id
+          WHERE ss.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)
+            ${sourceClause} ${catClause}
+            AND ${titleAnds.join(' AND ')}
+        )
+      `;
+      fromTable = `candidates ss`;
+    } else {
+      const whereParts = [`ss.source_id IN (SELECT id FROM iptv_sources WHERE user_id = $1)`];
+      if (sourceClause) whereParts.push(sourceClause.replace(/^AND /, ''));
+      if (catClause) whereParts.push(catClause.replace(/^AND /, ''));
+      fromTable = `series_sources ss`;
+      whereClause = `WHERE ${whereParts.join(' AND ')}`;
     }
 
     const groupKey = `COALESCE('s:' || sr.id::text, 'ss:' || ss.id::text)`;
@@ -470,6 +583,7 @@ router.get('/series', requireAuth, async (req, res) => {
     }
 
     const dataSql = `
+      ${candidatesCte}
       SELECT
         ${groupKey} AS id,
         COALESCE(MIN(sr.title), MIN(ss.provider_name)) AS title,
@@ -480,9 +594,9 @@ router.get('/series', requireAuth, async (req, res) => {
         COUNT(*)::int AS source_count,
         MAX(ss.updated_at) AS sort_updated,
         MIN(COALESCE(sr.title, ss.provider_name)) AS sort_title
-      FROM series_sources ss
+      FROM ${fromTable}
       LEFT JOIN series sr ON sr.id = ss.series_id
-      WHERE ${whereParts.join(' AND ')}
+      ${whereClause}
       GROUP BY ${groupKey}
       ${havingCursor ? `HAVING ${havingCursor}` : ''}
       ORDER BY ${orderBy}
