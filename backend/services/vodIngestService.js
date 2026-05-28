@@ -2,6 +2,8 @@ const logger = require('../config/logger');
 const postgresService = require('./postgresService');
 const xtreamVod = require('./xtreamVodService');
 const stalkerVod = require('./stalkerVodService');
+const { from: copyFrom } = require('pg-copy-streams');
+const { tabEscape, streamRowsToCopy, dedupeBy } = require('../utils/pgCopyHelpers');
 
 /**
  * vodIngestService — orchestrator for the eager-list phase of VOD
@@ -85,38 +87,91 @@ async function upsertCategories(sourceId, kind, categories) {
 
 async function upsertMovieStreams(sourceId, movies) {
   if (!movies.length) return { upserted: 0 };
-  let upserted = 0;
-  const seenIds = new Set();
+  const sourceIdStr = String(parseInt(sourceId, 10));
 
-  for (let i = 0; i < movies.length; i += BATCH_SIZE) {
-    const batch = movies.slice(i, i + BATCH_SIZE);
-    const values = [];
-    const params = [];
+  // Dedupe by provider_stream_id (last-wins) before COPY. See dedupeBy
+  // for why — providers sometimes list the same stream_id twice and
+  // the staging table can't tolerate that without a server-side
+  // ErrorResponse mid-COPY, which the pg-copy-streams race can
+  // convert into an uncaught exception.
+  const deduped = dedupeBy(movies, (m) => m.providerStreamId);
 
-    batch.forEach((m, idx) => {
-      seenIds.add(m.providerStreamId);
-      const off = idx * 9;
-      values.push(
-        `($${off + 1}, $${off + 2}, $${off + 3}, $${off + 4}, $${off + 5}, $${off + 6}, $${off + 7}, $${off + 8}, $${off + 9})`
-      );
-      params.push(
-        sourceId,                  // 1
-        m.providerStreamId,        // 2
-        m.rawName,                 // 3 provider_name (preserves "Title (1999)")
-        m.categoryId,              // 4 provider_category_id
-        m.containerExtension,      // 5
-        null,                      // 6 stream_url — populated by proxy on-demand from creds
-        m.addedAt,                 // 7
-        m.rating,                  // 8
-        JSON.stringify(m.raw || null) // 9 raw_meta
-      );
-    });
+  // UNLOGGED-TEMP staging + single planned upsert. Replaces the prior
+  // batched multi-VALUES INSERTs:
+  //
+  //   * COPY into a TEMP table writes no WAL — temp tables are
+  //     session-local and crash-discardable by definition, so the
+  //     bulk write skips the WAL pipeline entirely.
+  //   * One INSERT...SELECT...ON CONFLICT lets the planner run the
+  //     whole upsert as a single hash/merge pass instead of N
+  //     500-row batches with N round-trips. The IS DISTINCT FROM
+  //     filter is preserved — unchanged rows touch zero tuple
+  //     versions, same as before.
+  //   * The cull becomes "DELETE WHERE NOT EXISTS (SELECT 1 FROM
+  //     stage)" — uniform fast path for any catalog size, no
+  //     chunked NOT IN dance.
+  //
+  // Whole thing is one transaction: a mid-flight failure rolls back
+  // the upsert + cull together so movie_streams never sits in a
+  // half-loaded state.
+  await postgresService.transaction(async (client) => {
+    // GIN bulk-load knobs (movie_streams.provider_name has a trgm
+    // GIN, the LIKE-search index for VOD browse). Same pending-list
+    // story as saveChannels: crank gin_pending_list_limit so the
+    // entire merge's GIN inserts queue into the buffer, then we
+    // implicitly flush once at COMMIT (or could explicitly call
+    // gin_clean_pending_list — but for ~50k row catalogs the
+    // implicit COMMIT flush is fine).
+    await client.query(`SET LOCAL maintenance_work_mem = '512MB'`);
+    await client.query(`SET LOCAL gin_pending_list_limit = '256MB'`);
 
-    const sql = `
+    // No PRIMARY KEY on staging: we dedupe inputs in JS above so a
+    // PK would be redundant, and not having one means COPY can't
+    // emit a server-side ErrorResponse mid-stream (which historically
+    // raced with pg-copy-streams' _final and crashed the process).
+    // The INSERT...SELECT into the real movie_streams below enforces
+    // the actual unique constraint via ON CONFLICT.
+    await client.query(`
+      CREATE TEMP TABLE _stage_movie_streams (
+        source_id            INTEGER NOT NULL,
+        provider_stream_id   TEXT    NOT NULL,
+        provider_name        TEXT,
+        provider_category_id TEXT,
+        container_extension  TEXT,
+        stream_url           TEXT,
+        added_at             TIMESTAMPTZ,
+        rating               NUMERIC,
+        raw_meta             JSONB
+      ) ON COMMIT DROP
+    `);
+
+    const copyStream = client.query(copyFrom(`
+      COPY _stage_movie_streams (
+        source_id, provider_stream_id, provider_name, provider_category_id,
+        container_extension, stream_url, added_at, rating, raw_meta
+      ) FROM STDIN WITH (FORMAT text, FREEZE)
+    `));
+
+    await streamRowsToCopy(copyStream, deduped, (m) => [
+      sourceIdStr,
+      m.providerStreamId,
+      m.rawName,
+      m.categoryId,
+      m.containerExtension,
+      null, // stream_url — proxy-resolved on demand from creds
+      m.addedAt,
+      m.rating,
+      m.raw == null ? null : JSON.stringify(m.raw)
+    ].map(tabEscape).join('\t') + '\n');
+
+    await client.query(`
       INSERT INTO movie_streams
         (source_id, provider_stream_id, provider_name, provider_category_id,
          container_extension, stream_url, added_at, rating, raw_meta)
-      VALUES ${values.join(', ')}
+      SELECT
+        source_id, provider_stream_id, provider_name, provider_category_id,
+        container_extension, stream_url, added_at, rating, raw_meta
+      FROM _stage_movie_streams
       ON CONFLICT (source_id, provider_stream_id) DO UPDATE SET
         provider_name        = EXCLUDED.provider_name,
         provider_category_id = EXCLUDED.provider_category_id,
@@ -125,117 +180,100 @@ async function upsertMovieStreams(sourceId, movies) {
         rating               = EXCLUDED.rating,
         raw_meta             = EXCLUDED.raw_meta,
         updated_at           = NOW()
-    `;
-    await postgresService.query(sql, params);
-    upserted += batch.length;
-  }
+      WHERE
+        movie_streams.provider_name        IS DISTINCT FROM EXCLUDED.provider_name
+        OR movie_streams.provider_category_id IS DISTINCT FROM EXCLUDED.provider_category_id
+        OR movie_streams.container_extension  IS DISTINCT FROM EXCLUDED.container_extension
+        OR movie_streams.added_at             IS DISTINCT FROM EXCLUDED.added_at
+        OR movie_streams.rating               IS DISTINCT FROM EXCLUDED.rating
+        OR movie_streams.raw_meta             IS DISTINCT FROM EXCLUDED.raw_meta
+    `);
 
-  // Cull rows the provider no longer carries. Keep this last so a
-  // mid-ingest failure doesn't leave the table empty.
-  if (seenIds.size > 0) {
-    // Chunk the NOT IN list to keep parameter counts sane.
-    const idList = Array.from(seenIds);
-    const NOT_IN_CHUNK = 5000;
-    if (idList.length <= NOT_IN_CHUNK) {
-      const placeholders = idList.map((_, idx) => `$${idx + 2}`).join(',');
-      await postgresService.query(
-        `DELETE FROM movie_streams
-         WHERE source_id = $1 AND provider_stream_id NOT IN (${placeholders})`,
-        [sourceId, ...idList]
-      );
-    } else {
-      // For very large catalogues, stage into a temp table and
-      // delete the complement. Single SQL trip, no chunking dance.
-      await postgresService.transaction(async (client) => {
-        await client.query(
-          `CREATE TEMP TABLE _vod_seen (provider_stream_id TEXT PRIMARY KEY) ON COMMIT DROP`
-        );
-        // Use COPY-style bulk insert via UNNEST.
-        await client.query(
-          `INSERT INTO _vod_seen (provider_stream_id) SELECT unnest($1::text[])`,
-          [idList]
-        );
-        await client.query(
-          `DELETE FROM movie_streams ms
-           USING (SELECT $1::int AS sid) p
-           WHERE ms.source_id = p.sid
-             AND NOT EXISTS (SELECT 1 FROM _vod_seen s WHERE s.provider_stream_id = ms.provider_stream_id)`,
-          [sourceId]
-        );
-      });
-    }
-  }
-  return { upserted };
+    // Cull rows the provider no longer carries. "NOT EXISTS" against
+    // the staging table is uniform-fast regardless of catalog size,
+    // so we don't need the prior chunked NOT IN fallback.
+    await client.query(`
+      DELETE FROM movie_streams ms
+       WHERE ms.source_id = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM _stage_movie_streams st
+            WHERE st.source_id          = ms.source_id
+              AND st.provider_stream_id = ms.provider_stream_id
+         )
+    `, [sourceId]);
+  });
+
+  return { upserted: deduped.length };
 }
 
 // ─── Series upsert ─────────────────────────────────────────────────
 
 async function upsertSeriesSources(sourceId, seriesList) {
   if (!seriesList.length) return { upserted: 0 };
-  let upserted = 0;
-  const seenIds = new Set();
+  const sourceIdStr = String(parseInt(sourceId, 10));
 
-  for (let i = 0; i < seriesList.length; i += BATCH_SIZE) {
-    const batch = seriesList.slice(i, i + BATCH_SIZE);
-    const values = [];
-    const params = [];
-    batch.forEach((s, idx) => {
-      seenIds.add(s.providerSeriesId);
-      const off = idx * 5;
-      values.push(`($${off + 1}, $${off + 2}, $${off + 3}, $${off + 4}, $${off + 5})`);
-      params.push(
-        sourceId,
-        s.providerSeriesId,
-        s.rawName,
-        s.categoryId,
-        JSON.stringify(s.raw || null)
-      );
-    });
-    const sql = `
+  // Dedupe + no-PK pattern — see upsertMovieStreams for the rationale.
+  const deduped = dedupeBy(seriesList, (s) => s.providerSeriesId);
+
+  // Mirror of upsertMovieStreams — see the long comment there for
+  // why we stage into a TEMP table and do a single planned upsert.
+  await postgresService.transaction(async (client) => {
+    await client.query(`SET LOCAL maintenance_work_mem = '512MB'`);
+    await client.query(`SET LOCAL gin_pending_list_limit = '256MB'`);
+
+    await client.query(`
+      CREATE TEMP TABLE _stage_series_sources (
+        source_id            INTEGER NOT NULL,
+        provider_series_id   TEXT    NOT NULL,
+        provider_name        TEXT,
+        provider_category_id TEXT,
+        raw_meta             JSONB
+      ) ON COMMIT DROP
+    `);
+
+    const copyStream = client.query(copyFrom(`
+      COPY _stage_series_sources (
+        source_id, provider_series_id, provider_name, provider_category_id, raw_meta
+      ) FROM STDIN WITH (FORMAT text, FREEZE)
+    `));
+
+    await streamRowsToCopy(copyStream, deduped, (s) => [
+      sourceIdStr,
+      s.providerSeriesId,
+      s.rawName,
+      s.categoryId,
+      s.raw == null ? null : JSON.stringify(s.raw)
+    ].map(tabEscape).join('\t') + '\n');
+
+    await client.query(`
       INSERT INTO series_sources
         (source_id, provider_series_id, provider_name, provider_category_id, raw_meta)
-      VALUES ${values.join(', ')}
+      SELECT
+        source_id, provider_series_id, provider_name, provider_category_id, raw_meta
+      FROM _stage_series_sources
       ON CONFLICT (source_id, provider_series_id) DO UPDATE SET
         provider_name        = EXCLUDED.provider_name,
         provider_category_id = EXCLUDED.provider_category_id,
         raw_meta             = EXCLUDED.raw_meta,
         updated_at           = NOW()
-    `;
-    await postgresService.query(sql, params);
-    upserted += batch.length;
-  }
+      WHERE
+        series_sources.provider_name        IS DISTINCT FROM EXCLUDED.provider_name
+        OR series_sources.provider_category_id IS DISTINCT FROM EXCLUDED.provider_category_id
+        OR series_sources.raw_meta             IS DISTINCT FROM EXCLUDED.raw_meta
+    `);
 
-  // Cull missing — same approach as movies above.
-  if (seenIds.size > 0) {
-    const idList = Array.from(seenIds);
-    const NOT_IN_CHUNK = 5000;
-    if (idList.length <= NOT_IN_CHUNK) {
-      const placeholders = idList.map((_, idx) => `$${idx + 2}`).join(',');
-      await postgresService.query(
-        `DELETE FROM series_sources
-         WHERE source_id = $1 AND provider_series_id NOT IN (${placeholders})`,
-        [sourceId, ...idList]
-      );
-    } else {
-      await postgresService.transaction(async (client) => {
-        await client.query(
-          `CREATE TEMP TABLE _series_seen (provider_series_id TEXT PRIMARY KEY) ON COMMIT DROP`
-        );
-        await client.query(
-          `INSERT INTO _series_seen (provider_series_id) SELECT unnest($1::text[])`,
-          [idList]
-        );
-        await client.query(
-          `DELETE FROM series_sources ss
-           USING (SELECT $1::int AS sid) p
-           WHERE ss.source_id = p.sid
-             AND NOT EXISTS (SELECT 1 FROM _series_seen s WHERE s.provider_series_id = ss.provider_series_id)`,
-          [sourceId]
-        );
-      });
-    }
-  }
-  return { upserted };
+    await client.query(`
+      DELETE FROM series_sources ss
+       WHERE ss.source_id = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM _stage_series_sources st
+            WHERE st.source_id          = ss.source_id
+              AND st.provider_series_id = ss.provider_series_id
+         )
+    `, [sourceId]);
+  });
+
+  return { upserted: deduped.length };
 }
 
 // ─── Public entry point ────────────────────────────────────────────
@@ -252,16 +290,88 @@ async function upsertSeriesSources(sourceId, seriesList) {
  * failure (e.g. authentication wall). Per-step failures are
  * logged and reflected in the returned counts.
  */
-async function ingestVodForSource(source) {
+// Global concurrency cap. VOD ingest hits movie_streams (~1.4M rows)
+// and series_sources (~300k rows) with bulk UPSERTs that contend
+// heavily for DB I/O and locks. When refresh-account-info became
+// fire-and-forget (responds after channel save, spawns VOD detached),
+// we discovered that N background VOD ingests can run simultaneously
+// and turn a 4-second channel save into a 99-second one because the
+// COPY is fighting the UPSERTs for the same disk.
+//
+// MAX_CONCURRENT_VOD=1 — fully sequential. Same WAL-fsync story as
+// saveChannels: bulk UPSERTs into movie_streams (1.4M rows) and
+// series_sources (300k rows) generate huge WAL volume. Running two
+// at a time, combined with concurrent channel saves, stretched what
+// should have been a 4 s save into 135 s. With both knobs at 1, the
+// DB has one heavy writer at a time and everything stays responsive.
+// Excess ingests queue and drain naturally; since VOD is now fire-
+// and-forget on the refresh route, the user never waits on this.
+const MAX_CONCURRENT_VOD = 1;
+let _activeVod = 0;
+const _vodWaiters = [];
+async function _acquireVodSlot() {
+  if (_activeVod < MAX_CONCURRENT_VOD) {
+    _activeVod += 1;
+    return;
+  }
+  await new Promise((resolve) => _vodWaiters.push(resolve));
+  _activeVod += 1;
+}
+function _releaseVodSlot() {
+  _activeVod = Math.max(0, _activeVod - 1);
+  const next = _vodWaiters.shift();
+  if (next) next();
+}
+
+async function ingestVodForSource(source, opts = {}) {
+  // `opts.movies` / `opts.series` let the caller cut the pipeline in
+  // half. Default is both (matches the old behaviour). The Refresh-
+  // page's per-kind bulk buttons pass exactly one of them so the
+  // user can refresh movies without re-pulling 300k series rows
+  // they don't care about right now.
+  const wantMovies = opts.movies !== false;
+  const wantSeries = opts.series !== false;
+
   if (isStalkerSource(source)) return ingestVodFromStalker(source);
   if (!isXtreamSource(source)) {
     logger.debug(`[vodIngest] Source ${source?.id}: not an Xtream/Stalker source, skipping VOD ingest`);
     return { skipped: true };
   }
   const sourceId = source.id;
+
+  // Wait for a free VOD slot before grabbing DB resources. Without this
+  // cap, multiple fire-and-forget VOD ingests from concurrent refreshes
+  // collectively starve the channel COPY path — a 4s save balloons to
+  // 99s. The wait happens BEFORE buildAccount / the started timestamp
+  // so the elapsed log reflects real work, not queue time.
+  const _vodWaitStart = Date.now();
+  await _acquireVodSlot();
+  if (Date.now() - _vodWaitStart > 100) {
+    logger.info(`[vodIngest] Source ${sourceId}: waited ${Date.now() - _vodWaitStart}ms for ingest slot (active=${_activeVod}, max=${MAX_CONCURRENT_VOD})`);
+  }
+  // Pause the TMDB enrichment worker for the duration of the
+  // ingest. Both touch movie_streams; the enrichment's seqscan
+  // UPDATE holds row-level locks our INSERT...SELECT...ON CONFLICT
+  // needs. When source 319's VOD ran while enrichment was active,
+  // the same 42k-row catalog that took 34s on source 320 took 578s
+  // — a 17× slowdown from lock contention. Pausing the worker
+  // (require'd lazily to avoid a circular dep) lets the ingest run
+  // unblocked.
+  const tmdbEnrichmentService = require('./tmdbEnrichmentService');
+  const releaseEnrichmentPause = tmdbEnrichmentService.pause();
+  try {
+    return await _ingestVodForSourceInner(source, opts, wantMovies, wantSeries);
+  } finally {
+    releaseEnrichmentPause();
+    _releaseVodSlot();
+  }
+}
+
+async function _ingestVodForSourceInner(source, opts, wantMovies, wantSeries) {
+  const sourceId = source.id;
   const account = buildAccount(source);
   const started = Date.now();
-  logger.info(`[vodIngest] Source ${sourceId}: starting VOD catalog ingest`);
+  logger.info(`[vodIngest] Source ${sourceId}: starting VOD catalog ingest (movies=${wantMovies}, series=${wantSeries})`);
 
   const summary = {
     movieCategories: 0,
@@ -271,45 +381,55 @@ async function ingestVodForSource(source) {
     errors: []
   };
 
-  // STEP 1 + 2 — MOVIES ─────────────────────────────────────────
-  try {
-    const cats = await xtreamVod.getVodCategories(account);
-    summary.movieCategories = await upsertCategories(sourceId, 'movie', cats);
-    logger.info(`[vodIngest] Source ${sourceId}: ${summary.movieCategories} movie categories`);
-  } catch (err) {
-    summary.errors.push({ step: 'movie_categories', message: err.message });
-    logger.warn(`[vodIngest] Source ${sourceId}: movie categories failed: ${err.message}`);
-  }
+  // Movies + Series ingest in PARALLEL — they hit different Xtream
+  // endpoints and write to different tables, so there's no contention.
+  // Previously these ran sequentially; for a typical source that was
+  // ~90s movies + ~90s series = ~180s VOD ingest. In parallel it's
+  // ~90s total (whichever finishes first sets the floor). Saves ~40-
+  // 50% of the dominant cost in the refresh pipeline.
+  const movieJob = (async () => {
+    if (!wantMovies) return;
+    try {
+      const cats = await xtreamVod.getVodCategories(account);
+      summary.movieCategories = await upsertCategories(sourceId, 'movie', cats);
+      logger.info(`[vodIngest] Source ${sourceId}: ${summary.movieCategories} movie categories`);
+    } catch (err) {
+      summary.errors.push({ step: 'movie_categories', message: err.message });
+      logger.warn(`[vodIngest] Source ${sourceId}: movie categories failed: ${err.message}`);
+    }
+    try {
+      const movies = await xtreamVod.getVodStreams(account);
+      const result = await upsertMovieStreams(sourceId, movies);
+      summary.movies = result.upserted;
+      logger.info(`[vodIngest] Source ${sourceId}: ${summary.movies} movies upserted (${Date.now() - started}ms)`);
+    } catch (err) {
+      summary.errors.push({ step: 'movies', message: err.message });
+      logger.warn(`[vodIngest] Source ${sourceId}: movies failed: ${err.message}`);
+    }
+  })();
 
-  try {
-    const movies = await xtreamVod.getVodStreams(account);
-    const result = await upsertMovieStreams(sourceId, movies);
-    summary.movies = result.upserted;
-    logger.info(`[vodIngest] Source ${sourceId}: ${summary.movies} movies upserted (${Date.now() - started}ms)`);
-  } catch (err) {
-    summary.errors.push({ step: 'movies', message: err.message });
-    logger.warn(`[vodIngest] Source ${sourceId}: movies failed: ${err.message}`);
-  }
+  const seriesJob = (async () => {
+    if (!wantSeries) return;
+    try {
+      const cats = await xtreamVod.getSeriesCategories(account);
+      summary.seriesCategories = await upsertCategories(sourceId, 'series', cats);
+      logger.info(`[vodIngest] Source ${sourceId}: ${summary.seriesCategories} series categories`);
+    } catch (err) {
+      summary.errors.push({ step: 'series_categories', message: err.message });
+      logger.warn(`[vodIngest] Source ${sourceId}: series categories failed: ${err.message}`);
+    }
+    try {
+      const series = await xtreamVod.getSeries(account);
+      const result = await upsertSeriesSources(sourceId, series);
+      summary.series = result.upserted;
+      logger.info(`[vodIngest] Source ${sourceId}: ${summary.series} series upserted`);
+    } catch (err) {
+      summary.errors.push({ step: 'series', message: err.message });
+      logger.warn(`[vodIngest] Source ${sourceId}: series failed: ${err.message}`);
+    }
+  })();
 
-  // STEP 3 + 4 — SERIES ─────────────────────────────────────────
-  try {
-    const cats = await xtreamVod.getSeriesCategories(account);
-    summary.seriesCategories = await upsertCategories(sourceId, 'series', cats);
-    logger.info(`[vodIngest] Source ${sourceId}: ${summary.seriesCategories} series categories`);
-  } catch (err) {
-    summary.errors.push({ step: 'series_categories', message: err.message });
-    logger.warn(`[vodIngest] Source ${sourceId}: series categories failed: ${err.message}`);
-  }
-
-  try {
-    const series = await xtreamVod.getSeries(account);
-    const result = await upsertSeriesSources(sourceId, series);
-    summary.series = result.upserted;
-    logger.info(`[vodIngest] Source ${sourceId}: ${summary.series} series upserted`);
-  } catch (err) {
-    summary.errors.push({ step: 'series', message: err.message });
-    logger.warn(`[vodIngest] Source ${sourceId}: series failed: ${err.message}`);
-  }
+  await Promise.all([movieJob, seriesJob]);
 
   logger.info(
     `[vodIngest] Source ${sourceId}: done in ${Date.now() - started}ms — ` +

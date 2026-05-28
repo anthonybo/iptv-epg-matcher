@@ -40,6 +40,13 @@ async function parseSinglePass(filePath, sourceId, onProgress = null, dbService 
     const MAX_CONCURRENT_INSERTS = 3;
     const insertionPromises = [];
 
+    // Circuit breaker for SAX errors (see parseSinglePassStreaming
+    // for rationale — same protection against malformed input that
+    // would otherwise spin the parser forever).
+    let saxErrorCount = 0;
+    const MAX_SAX_ERRORS = 1000;
+    let aborted = false;
+
     // Create SAX parser (strict mode)
     const parser = sax.createStream(true, {
       trim: true,
@@ -150,9 +157,30 @@ async function parseSinglePass(filePath, sourceId, onProgress = null, dbService 
 
     // Handle parser errors
     parser.on('error', (error) => {
-      logger.error(`[XMLTV Parser] Error parsing: ${error.message}`);
-      parser.error = null;
-      parser.resume();
+      saxErrorCount += 1;
+      if (saxErrorCount > MAX_SAX_ERRORS) {
+        if (!aborted) {
+          aborted = true;
+          reject(new Error(
+            `[XMLTV Parser] Aborting after ${saxErrorCount} SAX errors — input is too malformed to recover`
+          ));
+        }
+        return;
+      }
+      logger.warn(`[XMLTV Parser] SAX error #${saxErrorCount} (continuing): ${error.message}`);
+      // SAX error recovery: `.error` and `.resume()` live on the
+      // inner SAXParser, NOT on the SAXStream wrapper we get from
+      // sax.createStream(). Calling them on the stream throws
+      // "resume is not a function" and crashes the whole backend —
+      // which is exactly what was happening on malformed XMLTV like
+      // "Unclosed root tag". Guard the access in case _parser was
+      // detached (e.g. after stream end).
+      if (parser._parser) {
+        parser._parser.error = null;
+        if (typeof parser._parser.resume === 'function') {
+          parser._parser.resume();
+        }
+      }
     });
 
     // Handle end of parsing - channels parsed, now start inserting
@@ -274,6 +302,13 @@ async function parsePrograms(filePath, sourceId, validChannelIds, onProgress = n
     let lastProgressTime = Date.now();
     let skippedCount = 0;
 
+    // Circuit breaker for SAX errors. See parseSinglePassStreaming
+    // comment for the full story — once we cross this threshold the
+    // input is too corrupt to keep resume()'ing past.
+    let saxErrorCount = 0;
+    const MAX_SAX_ERRORS = 1000;
+    let aborted = false;
+
     // Create SAX parser (strict mode)
     const parser = sax.createStream(true, {
       trim: true,
@@ -358,14 +393,35 @@ async function parsePrograms(filePath, sourceId, validChannelIds, onProgress = n
 
     // Handle parser errors
     parser.on('error', (error) => {
-      logger.error(`[XMLTV Parser] Error parsing programs: ${error.message}`);
-      // Clear error and try to continue
-      parser.error = null;
-      parser.resume();
+      saxErrorCount += 1;
+      if (saxErrorCount > MAX_SAX_ERRORS) {
+        if (!aborted) {
+          aborted = true;
+          reject(new Error(
+            `[XMLTV Parser] Aborting after ${saxErrorCount} SAX errors — input is too malformed to recover`
+          ));
+        }
+        return;
+      }
+      logger.warn(`[XMLTV Parser] SAX error #${saxErrorCount} (continuing): ${error.message}`);
+      // SAX error recovery: `.error` and `.resume()` live on the
+      // inner SAXParser, NOT on the SAXStream wrapper we get from
+      // sax.createStream(). Calling them on the stream throws
+      // "resume is not a function" and crashes the whole backend —
+      // which is exactly what was happening on malformed XMLTV like
+      // "Unclosed root tag". Guard the access in case _parser was
+      // detached (e.g. after stream end).
+      if (parser._parser) {
+        parser._parser.error = null;
+        if (typeof parser._parser.resume === 'function') {
+          parser._parser.resume();
+        }
+      }
     });
 
     // Handle end of parsing
     parser.on('end', () => {
+      if (aborted) return; // already rejected via circuit breaker
       logger.info(`[XMLTV Parser] Program parsing complete: ${programs.length} programs extracted, ${skippedCount} skipped`);
       resolve(programs);
     });
@@ -516,6 +572,18 @@ async function parseSinglePassStreaming(filePath, sourceId, onProgress = null, d
     let orphanPrograms = 0;
     let lastProgressTime = Date.now();
     let settled = false;
+    let saxErrorCount = 0;
+    // Circuit breaker — once SAX has emitted this many errors, the
+    // input is clearly past the point where pause/resume can recover.
+    // Without this, malformed mid-stream garbage caused parseSinglePass
+    // -Streaming to spin forever logging SAX warnings (separate from
+    // the parser.resume crash). Verified by
+    // scripts/verify_xmltv_sax_recovery.js test 3.
+    const MAX_SAX_ERRORS = 1000;
+    // Backstop window: after readStream emits 'end', SAX usually
+    // emits 'end' within milliseconds. If it hasn't after this
+    // delay it's stuck in an error-recovery loop; force-finalize.
+    const END_BACKSTOP_MS = 2000;
 
     const finish = (err) => {
       if (settled) return;
@@ -694,9 +762,33 @@ async function parseSinglePassStreaming(filePath, sourceId, onProgress = null, d
     });
 
     parser.on('error', (error) => {
-      logger.warn(`[XMLTV Parser] SAX error (continuing): ${error.message}`);
-      parser.error = null;
-      parser.resume();
+      saxErrorCount += 1;
+      if (saxErrorCount > MAX_SAX_ERRORS) {
+        // Stop trying to recover. Earlier errors have been logged at
+        // warn level; this one stops the parse entirely so the
+        // bundled-EPG row gets a proper 'failed' status instead of
+        // hanging the worker indefinitely.
+        if (!settled) {
+          finish(new Error(
+            `[XMLTV Parser] Aborting after ${saxErrorCount} SAX errors — input is too malformed to recover`
+          ));
+        }
+        return;
+      }
+      logger.warn(`[XMLTV Parser] SAX error #${saxErrorCount} (continuing): ${error.message}`);
+      // SAX error recovery: `.error` and `.resume()` live on the
+      // inner SAXParser, NOT on the SAXStream wrapper we get from
+      // sax.createStream(). Calling them on the stream throws
+      // "resume is not a function" and crashes the whole backend —
+      // which is exactly what was happening on malformed XMLTV like
+      // "Unclosed root tag". Guard the access in case _parser was
+      // detached (e.g. after stream end).
+      if (parser._parser) {
+        parser._parser.error = null;
+        if (typeof parser._parser.resume === 'function') {
+          parser._parser.resume();
+        }
+      }
     });
 
     parser.on('end', () => {
@@ -705,6 +797,57 @@ async function parseSinglePassStreaming(filePath, sourceId, onProgress = null, d
     });
 
     readStream.on('error', (err) => finish(err));
+
+    // Idle watchdog. The readStream-end backstop we tried first
+    // doesn't fire when SAX is stuck — pipe() gates readStream's
+    // 'end' on the parser draining, and a parser thrashing in error
+    // recovery never drains. So instead we watch for parser-event
+    // silence: if the parser hasn't fired any tag/text/error event
+    // for IDLE_THRESHOLD_MS AND we're not waiting on a DB flush,
+    // assume it's stuck and force-finalize.
+    //
+    // Cleared automatically when the parse settles (the poll sees
+    // settled=true and calls clearInterval).
+    const IDLE_THRESHOLD_MS = 3000;
+    const POLL_MS = 1000;
+    let lastParserActivity = Date.now();
+    const recordActivity = () => { lastParserActivity = Date.now(); };
+    parser.on('opentag', recordActivity);
+    parser.on('text', recordActivity);
+    parser.on('closetag', recordActivity);
+    parser.on('error', recordActivity);
+
+    const idleWatchdog = setInterval(() => {
+      if (settled) {
+        clearInterval(idleWatchdog);
+        return;
+      }
+      // Active I/O = legitimately quiet (waiting on a flush). Skip.
+      if (activeWrites > 0 || flushingChannels) return;
+      // Backpressure = upstream paused on purpose. Skip.
+      if (pausedForBackpressure) return;
+      const idleFor = Date.now() - lastParserActivity;
+      if (idleFor < IDLE_THRESHOLD_MS) return;
+
+      // Truly idle. If we have NO data at all yet, the parse might
+      // just be slow to start (cold disk read on a big file). Be
+      // patient for the first 10s.
+      if (totalChannels === 0 && totalPrograms === 0 && saxErrorCount === 0 && idleFor < 10_000) return;
+
+      clearInterval(idleWatchdog);
+      logger.warn(
+        `[XMLTV Parser] Idle watchdog fired after ${idleFor}ms ` +
+        `(${saxErrorCount} SAX errors, ${totalChannels} channels, ${totalPrograms} programs); force-finalizing`
+      );
+      if (!endedSignal) {
+        endedSignal = true;
+        maybeFinalize();
+      }
+    }, POLL_MS);
+    // END_BACKSTOP_MS is no longer used directly but kept as a
+    // semantic constant in case future code wants to set a shorter
+    // forced-finalize delay.
+    void END_BACKSTOP_MS;
 
     readStream.pipe(parser);
   });

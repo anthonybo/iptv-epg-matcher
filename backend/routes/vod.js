@@ -59,6 +59,50 @@ const userSourcesScope = `
 `;
 
 /**
+ * GET /api/vod/genres?kind=movie|series
+ *
+ * Returns canonical genres (from TMDB enrichment) with per-genre row
+ * counts. Cross-source — unlike `/categories` which lists each
+ * provider's own bucket strings, this is the union of `movies.genres`
+ * / `series.genres` text[] columns scoped to the user's sources.
+ *
+ * Backed by the GIN index on the genres column so the per-genre
+ * COUNT is fast even at scale.
+ */
+router.get('/genres', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const kind = req.query.kind === 'series' ? 'series' : 'movie';
+    const sql = kind === 'series'
+      ? `SELECT g.genre, COUNT(DISTINCT sr.id)::int AS count
+         FROM series sr
+         JOIN series_sources ss ON ss.series_id = sr.id
+         JOIN iptv_sources s ON s.id = ss.source_id
+         CROSS JOIN LATERAL unnest(sr.genres) AS g(genre)
+         WHERE s.user_id = $1
+           AND sr.genres IS NOT NULL
+           AND array_length(sr.genres, 1) > 0
+         GROUP BY g.genre
+         ORDER BY count DESC, g.genre ASC`
+      : `SELECT g.genre, COUNT(DISTINCT m.id)::int AS count
+         FROM movies m
+         JOIN movie_streams ms ON ms.movie_id = m.id
+         JOIN iptv_sources s ON s.id = ms.source_id
+         CROSS JOIN LATERAL unnest(m.genres) AS g(genre)
+         WHERE s.user_id = $1
+           AND m.genres IS NOT NULL
+           AND array_length(m.genres, 1) > 0
+         GROUP BY g.genre
+         ORDER BY count DESC, g.genre ASC`;
+    const r = await postgresService.query(sql, [userId]);
+    res.json({ success: true, genres: r.rows });
+  } catch (error) {
+    logger.error(`[VOD genres] failed: ${error.message}`);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
  * GET /api/vod/categories?kind=movie
  * Returns the per-source category list, grouped by source name
  * so the UI can render category groups under each provider.
@@ -120,6 +164,13 @@ router.get('/movies', requireAuth, async (req, res) => {
     const search = (req.query.search || '').trim();
     const sourceId = req.query.sourceId ? parseInt(req.query.sourceId, 10) : null;
     const categoryId = req.query.categoryId || null;
+    // Canonical TMDB genre filter — `m.genres @> ARRAY[$N]`. Requires
+    // the movie to be enriched (movie_id IS NOT NULL with metadata),
+    // so unenriched rows are excluded when a genre is set. The fast
+    // LATERAL path doesn't apply here because it groups by provider
+    // name; genre filtering routes through the slow path which can
+    // JOIN movies and check the genres column.
+    const genre = (req.query.genre || '').trim() || null;
     const pageSize = Math.min(PAGE_MAX, Math.max(5, parseInt(req.query.pageSize, 10) || PAGE_DEFAULT));
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
     const cursor = decodeCursor(req.query.cursor);
@@ -137,7 +188,7 @@ router.get('/movies', requireAuth, async (req, res) => {
     // 1.4M. Only fires for the default (recent + no filters) path —
     // search/category/single-source/non-recent sorts keep the original
     // GROUP BY path for correctness.
-    if (sortKey === 'recent' && !search && !sourceId && !categoryId) {
+    if (sortKey === 'recent' && !search && !sourceId && !categoryId && !genre) {
       const fastParams = [userId];
       let havingClause = '';
       if (cursor) {
@@ -229,6 +280,7 @@ router.get('/movies', requireAuth, async (req, res) => {
     const params = [userId];
     let sourceClause = '';
     let catClause = '';
+    let genreClause = '';
     if (sourceId) {
       params.push(sourceId);
       sourceClause = `AND ms.source_id = $${params.length}`;
@@ -236,6 +288,14 @@ router.get('/movies', requireAuth, async (req, res) => {
     if (categoryId) {
       params.push(categoryId);
       catClause = `AND ms.provider_category_id = $${params.length}`;
+    }
+    // Genre filter — applies via the JOIN to the canonical `movies`
+    // table, so unenriched rows (no movie_id) are naturally excluded.
+    // `genres @> ARRAY[$N]` hits the GIN index from migration on the
+    // movies table; very fast even on 2k+ rows.
+    if (genre) {
+      params.push(genre);
+      genreClause = `AND m.genres @> ARRAY[$${params.length}]::text[]`;
     }
 
     let candidatesCte = '';
@@ -327,8 +387,9 @@ router.get('/movies', requireAuth, async (req, res) => {
         MAX(ms.added_at) AS sort_added,
         MIN(COALESCE(m.title, ms.provider_name)) AS sort_title
       FROM ${fromTable}
-      LEFT JOIN movies m ON m.id = ms.movie_id
+      ${genre ? 'JOIN' : 'LEFT JOIN'} movies m ON m.id = ms.movie_id
       ${whereClause}
+      ${whereClause && genreClause ? genreClause : (genreClause ? `WHERE ${genreClause.replace(/^AND /, '')}` : '')}
       GROUP BY ${groupKey}
       ${havingCursor ? `HAVING ${havingCursor}` : ''}
       ORDER BY ${orderBy}
@@ -376,6 +437,7 @@ router.get('/series', requireAuth, async (req, res) => {
     const search = (req.query.search || '').trim();
     const sourceId = req.query.sourceId ? parseInt(req.query.sourceId, 10) : null;
     const categoryId = req.query.categoryId || null;
+    const genre = (req.query.genre || '').trim() || null;
     const pageSize = Math.min(PAGE_MAX, Math.max(5, parseInt(req.query.pageSize, 10) || PAGE_DEFAULT));
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
     const cursor = decodeCursor(req.query.cursor);
@@ -393,7 +455,7 @@ router.get('/series', requireAuth, async (req, res) => {
     // Only triggers when no filter narrows the dataset — for search /
     // category / single-source / non-recent sort the existing GROUP BY
     // path is already adequate (trgm index + small candidate set).
-    if (sortKey === 'recent' && !search && !sourceId && !categoryId) {
+    if (sortKey === 'recent' && !search && !sourceId && !categoryId && !genre) {
       const fastParams = [userId];
       let havingClause = '';
       if (cursor) {
@@ -496,6 +558,7 @@ router.get('/series', requireAuth, async (req, res) => {
     const params = [userId];
     let sourceClause = '';
     let catClause = '';
+    let genreClause = '';
     if (sourceId) {
       params.push(sourceId);
       sourceClause = `AND ss.source_id = $${params.length}`;
@@ -503,6 +566,13 @@ router.get('/series', requireAuth, async (req, res) => {
     if (categoryId) {
       params.push(categoryId);
       catClause = `AND ss.provider_category_id = $${params.length}`;
+    }
+    // Genre filter via canonical TMDB-enriched `series.genres` column.
+    // Implicitly requires the row to be enriched (joined to series),
+    // so unenriched provider rows fall out of the result.
+    if (genre) {
+      params.push(genre);
+      genreClause = `AND sr.genres @> ARRAY[$${params.length}]::text[]`;
     }
 
     // Build the FROM table reference + an optional WHERE that runs
@@ -595,8 +665,9 @@ router.get('/series', requireAuth, async (req, res) => {
         MAX(ss.updated_at) AS sort_updated,
         MIN(COALESCE(sr.title, ss.provider_name)) AS sort_title
       FROM ${fromTable}
-      LEFT JOIN series sr ON sr.id = ss.series_id
+      ${genre ? 'JOIN' : 'LEFT JOIN'} series sr ON sr.id = ss.series_id
       ${whereClause}
+      ${whereClause && genreClause ? genreClause : (genreClause ? `WHERE ${genreClause.replace(/^AND /, '')}` : '')}
       GROUP BY ${groupKey}
       ${havingCursor ? `HAVING ${havingCursor}` : ''}
       ORDER BY ${orderBy}

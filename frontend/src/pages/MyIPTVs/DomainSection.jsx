@@ -85,6 +85,20 @@ const DomainSection = ({
   const [confirming, setConfirming] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  // Wall-clock the in-flight delete so the modal can show elapsed
+  // seconds and surface a "this is slow because…" hint once we cross
+  // the threshold where it stops looking like a quick operation.
+  // Without this the UI says "0/6" for 60+ seconds and looks frozen.
+  const [deleteStartedAt, setDeleteStartedAt] = useState(null);
+  const [deleteElapsedMs, setDeleteElapsedMs] = useState(0);
+  React.useEffect(() => {
+    if (!deleting || !deleteStartedAt) return undefined;
+    const id = setInterval(
+      () => setDeleteElapsedMs(Date.now() - deleteStartedAt),
+      500
+    );
+    return () => clearInterval(id);
+  }, [deleting, deleteStartedAt]);
   // In-flight UI state stays local to this section — results themselves come from
   // the lifted, persisted map.
   const [testingAll, setTestingAll] = useState(false);
@@ -191,6 +205,8 @@ const DomainSection = ({
     if (!onDelete || deleting || !confirming?.ids?.length) return;
     const ids = confirming.ids;
     setDeleting(true);
+    setDeleteStartedAt(Date.now());
+    setDeleteElapsedMs(0);
     setProgress({ done: 0, total: ids.length });
     await Promise.allSettled(
       ids.map((id) =>
@@ -204,6 +220,8 @@ const DomainSection = ({
     // resolves async after our state has moved on.
     onRemoveTestResults?.(ids);
     setDeleting(false);
+    setDeleteStartedAt(null);
+    setDeleteElapsedMs(0);
     setConfirming(null);
   };
 
@@ -221,11 +239,38 @@ const DomainSection = ({
             </svg>
             <h3 className="text-sm font-semibold text-red-100 truncate">
               {deleting
-                ? `Deleting ${progress.done}/${progress.total} accounts from ${group.domain}…`
+                ? `Deleting ${progress.done}/${progress.total} accounts from ${group.domain}… (${Math.floor(deleteElapsedMs / 1000)}s)`
                 : confirming.mode === 'failed'
                   ? `Delete ${confirming.ids.length} failed account${confirming.ids.length === 1 ? '' : 's'} from ${group.domain}?`
                   : `Delete all ${confirming.ids.length} account${confirming.ids.length === 1 ? '' : 's'} from ${group.domain}?`}
             </h3>
+            {deleting && (() => {
+              // Show an explanatory hint after the operation starts
+              // looking slow. The DELETE cascade has to wait for any
+              // in-flight TMDB-enrichment UPDATE on movie_streams to
+              // release its row locks — typically a few seconds, but
+              // historically up to ~30s when the enrichment ran the
+              // unindexed seqscan UPDATE. Both the index (migration
+              // 041) and the pause hold (added to the DELETE route)
+              // should keep this brief; the hint kicks in only if it
+              // genuinely lingers so the user knows the UI isn't
+              // frozen and the work is real.
+              const elapsedSec = Math.floor(deleteElapsedMs / 1000);
+              if (progress.done >= progress.total && progress.total > 0) return null;
+              if (elapsedSec < 5) return null;
+              if (elapsedSec < 15) {
+                return (
+                  <span className="hidden md:inline text-xs text-red-300/70">
+                    Cascading delete in progress — waiting on the media library to release locks.
+                  </span>
+                );
+              }
+              return (
+                <span className="hidden md:inline text-xs text-amber-300">
+                  Still working — large catalogs can take a minute. Don't refresh.
+                </span>
+              );
+            })()}
             {!deleting && (
               <span className="hidden md:inline text-xs text-red-300/70">
                 {confirming.mode === 'failed'

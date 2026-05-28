@@ -151,13 +151,41 @@ class IPTVSourcesService {
    * @param {number} sourceId - Source ID
    * @returns {Promise<Object>} Updated account info
    */
-  async refreshAccountInfo(sourceId, { signal } = {}) {
+  /**
+   * Refresh VOD catalog only (no channels) for one source.
+   * @param {number} sourceId
+   * @param {{ kind?: 'movies'|'series'|'all', signal?: AbortSignal }} opts
+   */
+  async refreshVod(sourceId, { kind = 'all', signal } = {}) {
+    try {
+      const response = await apiClient.post(
+        `/iptv/sources/${sourceId}/refresh-vod?kind=${encodeURIComponent(kind)}`,
+        {},
+        { timeout: 20 * 60 * 1000, signal }
+      );
+      return response.data;
+    } catch (error) {
+      if (axios.isCancel?.(error) || error.name === 'CanceledError' || error.name === 'AbortError') {
+        const cancelErr = new Error('Cancelled');
+        cancelErr.cancelled = true;
+        throw cancelErr;
+      }
+      throw error;
+    }
+  }
+
+  async refreshAccountInfo(sourceId, { signal, skipVod = false } = {}) {
     try {
       // Generous timeout — large Xtream providers with 50k+ channels
       // and a pg_trgm GIN index take 10-15 min on the INSERT step.
       // 20 min matches the backend's req.setTimeout, so we won't
       // give up before the server does.
-      const response = await apiClient.post(`/iptv/sources/${sourceId}/refresh-account-info`, {}, {
+      //
+      // skipVod=true is what bulk "Refresh all" uses to skip the
+      // 5-min-per-source VOD ingest — channel listings come back
+      // fast and the user can trigger VOD separately if they care.
+      const url = `/iptv/sources/${sourceId}/refresh-account-info${skipVod ? '?skipVod=1' : ''}`;
+      const response = await apiClient.post(url, {}, {
         timeout: 20 * 60 * 1000,
         // AbortController signal — when the user hits Cancel on the
         // Refresh-all pill we cancel the in-flight axios call. The

@@ -28,6 +28,10 @@ const MyIPTVs = ({
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
   const [refreshProgress, setRefreshProgress] = useState({ current: 0, total: 0 });
   const [sourceRefreshStatus, setSourceRefreshStatus] = useState({}); // Track status per source: { sourceId: 'loading' | 'success' | 'error' }
+  // Which scope is being refreshed right now — null when idle, otherwise
+  // one of 'all' | 'channels' | 'movies' | 'series'. Drives the active
+  // cell's visual state in the segmented refresh group.
+  const [refreshingMode, setRefreshingMode] = useState(null);
   const [refreshSummary, setRefreshSummary] = useState(null); // { successCount, failCount, duration }
   const [diagnosticsModal, setDiagnosticsModal] = useState({ isOpen: false, diagnostics: null, sourceName: '' });
 
@@ -506,7 +510,14 @@ const MyIPTVs = ({
   // "Refresh all" button passes the card's sources), refreshes just
   // those rows but reuses the same host-bucketed concurrency, status
   // tracking, and summary banner so the UX is identical.
-  const handleRefreshAll = async (sourcesToRefresh, scopeKey = null) => {
+  // Refresh-all entry point — accepts an optional `mode` so the four
+  // header buttons (ALL / Channels / Movies / Series) all funnel into
+  // one host-bucketed concurrency loop and share progress + cancel.
+  //   mode='all'      → refreshAccountInfo + VOD ingest        (slowest)
+  //   mode='channels' → refreshAccountInfo with skipVod=1      (fastest)
+  //   mode='movies'   → refreshVod(kind:'movies')              (VOD only)
+  //   mode='series'   → refreshVod(kind:'series')              (VOD only)
+  const handleRefreshAll = async (sourcesToRefresh, scopeKey = null, mode = 'all') => {
     const targets = (Array.isArray(sourcesToRefresh) && sourcesToRefresh.length > 0)
       ? sourcesToRefresh
       : sources;
@@ -514,6 +525,7 @@ const MyIPTVs = ({
 
     setIsRefreshingAll(true);
     setRefreshingScope(scopeKey || 'all');
+    setRefreshingMode(mode);
     setRefreshProgress({ current: 0, total: targets.length });
 
     // Fresh AbortController per batch — clearing any leftover from
@@ -535,9 +547,22 @@ const MyIPTVs = ({
     // Helper function to refresh a single source
     const refreshSource = async (source) => {
       try {
-        const result = await iptvSourcesService.refreshAccountInfo(source.id, {
-          signal: refreshAbortRef.current?.signal,
-        });
+        let result;
+        if (mode === 'movies' || mode === 'series') {
+          // VOD-only path: skips channels entirely (the channel listing
+          // hasn't changed). The endpoint stamps just the matching
+          // catalog rows. Same cancel semantics as refreshAccountInfo.
+          result = await iptvSourcesService.refreshVod(source.id, {
+            kind: mode,
+            signal: refreshAbortRef.current?.signal,
+          });
+        } else {
+          // 'all' (full pipeline incl. VOD) or 'channels' (skip VOD).
+          result = await iptvSourcesService.refreshAccountInfo(source.id, {
+            signal: refreshAbortRef.current?.signal,
+            skipVod: mode === 'channels',
+          });
+        }
 
         // Backend reports rate_limited via HTTP 200 + rateLimited:true.
         // The DB row is now `last_refresh_status='rate_limited'`, which
@@ -683,6 +708,7 @@ const MyIPTVs = ({
 
     setIsRefreshingAll(false);
     setRefreshingScope(null);
+    setRefreshingMode(null);
     setRefreshProgress({ current: 0, total: 0 });
     refreshAbortRef.current = null;
     refreshCancelledRef.current = false;
@@ -851,43 +877,176 @@ const MyIPTVs = ({
               Object.keys(domainSortKeys).length > 0 ? resetAllDomainSortOverrides : null
             }
           />
-          {isRefreshingAll ? (
-            // Mid-refresh: split the button into a spinning progress
-            // pill + a Cancel chip the user can click to bail out.
-            <div className="inline-flex items-stretch rounded-xl overflow-hidden border border-emerald-500/40 shadow-lg shadow-emerald-900/20">
-              <span
-                className="inline-flex items-center gap-2 bg-emerald-500/20 text-emerald-100 px-4 py-2.5 text-sm font-semibold"
-                title={`Refreshing ${refreshProgress.current}/${refreshProgress.total} sources…`}
-              >
-                <svg className="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                <span className="tabular-nums">{refreshProgress.current}/{refreshProgress.total}</span>
-              </span>
-              <button
-                onClick={cancelRefresh}
-                title="Stop the in-flight refresh"
-                aria-label="Cancel refresh"
-                className="inline-flex items-center gap-1.5 bg-red-500/20 text-red-100 hover:bg-red-500/30 px-3 py-2.5 text-sm font-semibold transition-colors border-l border-emerald-500/40"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => handleRefreshAll()}
-              disabled={sources.length === 0}
-              className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/20 px-4 py-2.5 text-sm font-semibold text-emerald-100 hover:bg-emerald-500/30 hover:border-emerald-500/60 transition-all shadow-lg shadow-emerald-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Refresh All
-            </button>
-          )}
+          {/* ── Refresh control bank ────────────────────────────────
+              Four scopes stitched into one emerald shell — ALL is the
+              primary action (heavier weight + slightly brighter fill),
+              the three sub-scopes (Channels / Movies / Series) sit
+              shoulder-to-shoulder so the user reads what each one
+              actually does without opening a menu. The active cell
+              swaps its label for the live "32/75" progress count;
+              the other three lock to communicate "only one scope at
+              a time." Cancel appears as a sibling chip so the bank's
+              internal structure stays consistent in both states.
+
+              No layout shift on activation — each cell carries a
+              min-width sized for its longest legible state. */}
+          {(() => {
+            const allDisabled = sources.length === 0;
+            const REFRESH_MODES = [
+              {
+                key: 'all',
+                label: 'ALL',
+                title: 'Channels + Movies + TV Series. Slowest (~5 min/source).',
+                primary: true,
+                minW: 'min-w-[72px]',
+                renderIcon: (cls) => (
+                  <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                )
+              },
+              {
+                key: 'channels',
+                label: 'Channels',
+                title: 'Live channel listings only. Fast (~20s/source).',
+                minW: 'min-w-[112px]',
+                renderIcon: (cls) => (
+                  <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+                    <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+                    <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+                    <circle cx="12" cy="20" r="1" fill="currentColor" stroke="none" />
+                  </svg>
+                )
+              },
+              {
+                key: 'movies',
+                label: 'Movies',
+                title: 'VOD movies catalog only. ~2 min/source.',
+                minW: 'min-w-[98px]',
+                renderIcon: (cls) => (
+                  <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="5" width="18" height="14" rx="2" />
+                    <path d="M10 9.5l5 2.5-5 2.5z" fill="currentColor" stroke="none" />
+                  </svg>
+                )
+              },
+              {
+                key: 'series',
+                label: 'TV Series',
+                title: 'VOD series catalog only. ~2 min/source.',
+                minW: 'min-w-[102px]',
+                renderIcon: (cls) => (
+                  <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="8" width="13" height="11" rx="1.5" />
+                    <path d="M7 8V5h14v11h-3" />
+                  </svg>
+                )
+              }
+            ];
+
+            return (
+              <>
+                <div
+                  role="group"
+                  aria-label="Refresh scope"
+                  className={[
+                    'inline-flex items-stretch rounded-xl overflow-hidden',
+                    'border border-emerald-500/40 bg-slate-950/30',
+                    'shadow-lg shadow-emerald-900/20',
+                    allDisabled ? 'opacity-40 pointer-events-none' : ''
+                  ].filter(Boolean).join(' ')}
+                >
+                  {REFRESH_MODES.map((mode, idx) => {
+                    const isActive = refreshingMode === mode.key;
+                    const isLocked = isRefreshingAll && !isActive;
+                    return (
+                      <button
+                        key={mode.key}
+                        type="button"
+                        onClick={() =>
+                          handleRefreshAll(null, null, mode.key)
+                        }
+                        disabled={isLocked}
+                        title={isActive
+                          ? `Refreshing ${refreshProgress.current}/${refreshProgress.total} sources — ${mode.label}…`
+                          : mode.title}
+                        aria-label={mode.title}
+                        aria-pressed={isActive}
+                        className={[
+                          'group/cell relative inline-flex items-center gap-1.5 px-3 py-2.5',
+                          'transition-[background-color,color,opacity] duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]',
+                          idx > 0 ? 'border-l border-emerald-500/25' : '',
+                          mode.minW,
+                          // STATE PRIORITY: active > locked > primary > default
+                          isActive
+                            ? 'bg-emerald-500/25 text-emerald-50'
+                            : isLocked
+                            ? 'bg-transparent text-emerald-200/25 cursor-not-allowed'
+                            : mode.primary
+                            ? 'bg-emerald-500/[0.14] text-emerald-50 hover:bg-emerald-500/[0.22]'
+                            : 'bg-transparent text-emerald-200/85 hover:bg-emerald-500/[0.10] hover:text-emerald-50'
+                        ].filter(Boolean).join(' ')}
+                      >
+                        {mode.renderIcon(`w-4 h-4 flex-shrink-0 ${isActive ? 'animate-spin' : ''}`)}
+                        {isActive ? (
+                          <span className="inline-flex items-baseline gap-1.5 leading-none">
+                            <span
+                              className="font-mono tabular-nums text-[11px] font-semibold text-emerald-100"
+                              aria-live="polite"
+                            >
+                              {refreshProgress.current}/{refreshProgress.total}
+                            </span>
+                            <span
+                              className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.16em] text-emerald-200/85"
+                            >
+                              {mode.label}
+                            </span>
+                          </span>
+                        ) : (
+                          <span
+                            className={[
+                              'font-mono font-semibold uppercase leading-none',
+                              mode.primary
+                                ? 'text-[10.5px] tracking-[0.22em]'
+                                : 'text-[10px] tracking-[0.16em]'
+                            ].join(' ')}
+                          >
+                            {mode.label}
+                          </span>
+                        )}
+                        {/* Hairline underline on hover for non-primary,
+                            non-active cells — gives a "selected/about-to-fire"
+                            tell without changing layout. */}
+                        {!isActive && !isLocked && !mode.primary && (
+                          <span
+                            aria-hidden
+                            className="pointer-events-none absolute inset-x-2 bottom-[3px] h-px bg-emerald-300/0 group-hover/cell:bg-emerald-300/50 transition-colors duration-150"
+                          />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* Cancel — sibling chip in rose. Only renders mid-flight.
+                    Slim gap (gap-1.5 in the parent flex) sets it apart
+                    from the emerald bank without orphaning it. */}
+                {isRefreshingAll && (
+                  <button
+                    onClick={cancelRefresh}
+                    title="Stop the in-flight refresh"
+                    aria-label="Cancel refresh"
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-rose-500/45 bg-rose-500/15 hover:bg-rose-500/25 hover:border-rose-500/65 text-rose-100 px-3 py-2.5 transition-colors duration-150 shadow-lg shadow-rose-900/20"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em]">Cancel</span>
+                  </button>
+                )}
+              </>
+            );
+          })()}
           <button
             onClick={() => setShowAddModal(true)}
             className="inline-flex items-center gap-2 rounded-xl border border-blue-500/40 bg-blue-500/20 px-4 py-2.5 text-sm font-semibold text-blue-100 hover:bg-blue-500/30 hover:border-blue-500/60 transition-all shadow-lg shadow-blue-900/20"

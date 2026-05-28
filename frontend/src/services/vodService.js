@@ -17,6 +17,16 @@ async function getCategories(kind) {
 }
 
 /**
+ * GET /api/vod/genres?kind=movie|series
+ * Returns canonical TMDB genres with row counts, cross-source.
+ * Use to populate the genre filter dropdown.
+ */
+async function getGenres(kind) {
+  const r = await apiClient.get('/vod/genres', { params: { kind } });
+  return r.data;
+}
+
+/**
  * Cursor-paginated movie browse. opts: { search, sourceId, categoryId, cursor, pageSize, sort }
  * Returns: { movies, hasMore, nextCursor, pageSize }
  */
@@ -26,6 +36,7 @@ async function getMovies(opts = {}) {
       search: opts.search || undefined,
       sourceId: opts.sourceId || undefined,
       categoryId: opts.categoryId || undefined,
+      genre: opts.genre || undefined,
       cursor: opts.cursor || undefined,
       pageSize: opts.pageSize || 30,
       sort: opts.sort || 'recent'
@@ -58,6 +69,7 @@ async function getSeriesList(opts = {}) {
       search: opts.search || undefined,
       sourceId: opts.sourceId || undefined,
       categoryId: opts.categoryId || undefined,
+      genre: opts.genre || undefined,
       cursor: opts.cursor || undefined,
       pageSize: opts.pageSize || 30,
       sort: opts.sort || 'recent'
@@ -190,6 +202,7 @@ async function buildPlaybackUrl(kind, streamId, container, pickPlaybackTier, opt
 
 export default {
   getCategories,
+  getGenres,
   getMovies,
   getMovie,
   enrichMovie,

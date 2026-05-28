@@ -185,6 +185,12 @@ const VodBrowse = ({ kind, onOpen }) => {
   const [sort, setSort] = useState('recent');
   const [sourceId, setSourceId] = useState('');
   const [categoryId, setCategoryId] = useState('');
+  // Canonical TMDB genre — cross-source, unlike `categoryId` which is
+  // scoped to one provider. Setting this filter implicitly drops
+  // unenriched rows (no genres array) since the backend INNER JOINs
+  // the canonical `movies`/`series` table.
+  const [genre, setGenre] = useState('');
+  const [genres, setGenres] = useState([]);
 
   const [items, setItems] = useState([]);
   // `cursor` is the opaque base64 token the server returns. null means
@@ -215,7 +221,7 @@ const VodBrowse = ({ kind, onOpen }) => {
     setNextCursor(null);
     setItems([]);
     setHasMore(false);
-  }, [kind, debouncedSearch, sort, sourceId, categoryId]);
+  }, [kind, debouncedSearch, sort, sourceId, categoryId, genre]);
 
   // Fetch categories ONCE per kind.
   useEffect(() => {
@@ -223,6 +229,21 @@ const VodBrowse = ({ kind, onOpen }) => {
     vodService.getCategories(kind).then((data) => {
       if (cancelled) return;
       setCategories(data.categories || []);
+    }).catch(() => {/* non-fatal */});
+    return () => { cancelled = true; };
+  }, [kind]);
+
+  // Fetch the cross-source genre list once per kind. Movie genres
+  // ≠ series genres (TMDB tracks them separately — Reality TV only
+  // applies to series, Animation overlaps, etc.) so we reset the
+  // active genre when kind flips. We don't reset on sourceId change
+  // because genres are cross-source.
+  useEffect(() => {
+    let cancelled = false;
+    setGenre('');
+    vodService.getGenres(kind).then((data) => {
+      if (cancelled) return;
+      setGenres(data.genres || []);
     }).catch(() => {/* non-fatal */});
     return () => { cancelled = true; };
   }, [kind]);
@@ -248,6 +269,7 @@ const VodBrowse = ({ kind, onOpen }) => {
       search: debouncedSearch,
       sourceId: sourceId || undefined,
       categoryId: categoryId || undefined,
+      genre: genre || undefined,
       cursor,
       pageSize: PAGE_SIZE,
       sort,
@@ -285,7 +307,7 @@ const VodBrowse = ({ kind, onOpen }) => {
       });
 
     return () => controller.abort();
-  }, [kind, debouncedSearch, sort, sourceId, categoryId, cursor]);
+  }, [kind, debouncedSearch, sort, sourceId, categoryId, genre, cursor]);
 
   // Infinite scroll — when the sentinel scrolls into view (with a
   // 400px pre-load margin so the next batch is requested before the
@@ -381,6 +403,35 @@ const VodBrowse = ({ kind, onOpen }) => {
             <option key={o.id} value={o.id}>{o.label}</option>
           ))}
         </select>
+
+        {/* Genre — cross-source, always visible. The closed state
+            shows only the genre name for cleanliness; option labels
+            include a per-genre row count so the user can see at a
+            glance where the catalog actually has content. Active
+            state: border flips to cyan-500/40 + text flips to
+            amber-200 so an enabled filter reads at a distance. */}
+        {genres.length > 0 && (
+          <select
+            value={genre}
+            onChange={(e) => setGenre(e.target.value)}
+            title={genre ? `Filter: ${genre} only` : 'Filter by genre'}
+            aria-label="Genre filter"
+            className={[
+              'h-9 px-2 rounded-md border bg-slate-900/60 font-mono text-[11px]',
+              'focus:outline-none focus:border-cyan-500/40 transition-colors duration-150',
+              genre
+                ? 'border-cyan-500/40 text-amber-200'
+                : 'border-slate-800 text-slate-200 hover:border-slate-700'
+            ].join(' ')}
+          >
+            <option value="">All genres</option>
+            {genres.map((g) => (
+              <option key={g.genre} value={g.genre}>
+                {g.genre} · {g.count.toLocaleString()}
+              </option>
+            ))}
+          </select>
+        )}
 
         {sources.length > 1 && (
           <select

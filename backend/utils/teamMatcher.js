@@ -526,6 +526,69 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
         );
         if (hijackedByChild) continue;
       }
+
+      // Team-branded broadcaster guard. ESPN sometimes ships team-RSN
+      // broadcaster names like "Angels.TV", "Tigers.TV", "Yankees.TV"
+      // — these are the team's own regional sports network. The
+      // tokens overlap with English words ("Angels", "Tigers") and
+      // would falsely match channels that just happen to share the
+      // team name (a Christian network called "Three Angels TV" got
+      // a +250 bonus over the actual game stream, real bug from
+      // 2026-05-26). When the broadcaster term overlaps with one of
+      // the team aliases the scorer already knows about, demand
+      // additional disambiguating signal in the channel name before
+      // applying the bonus: a sport/league tag, a known RSN brand,
+      // or the opposing team's name.
+      const broadcasterTokens = upperTerm.split(/[^A-Z0-9]+/).filter(Boolean);
+      const teamAliasTokensUpper = new Set();
+      // homeAliases / awayAliases come in TWO shapes from the caller:
+      //   1. a flat array of strings (free-form text search path)
+      //   2. an object { full, mascot, abbr, short, manual, city } when
+      //      it was built from team_aliases rows (ticker / all-games)
+      // Normalize both into a single string array before tokenizing.
+      const flattenAliases = (bag) => {
+        if (!bag) return [];
+        if (Array.isArray(bag)) return bag;
+        if (typeof bag === 'object') {
+          return Object.values(bag).flat().filter(Boolean);
+        }
+        return [];
+      };
+      for (const a of flattenAliases(homeAliases)) {
+        String(a).toUpperCase().split(/[^A-Z0-9]+/).forEach((t) => t && teamAliasTokensUpper.add(t));
+      }
+      for (const a of flattenAliases(awayAliases)) {
+        String(a).toUpperCase().split(/[^A-Z0-9]+/).forEach((t) => t && teamAliasTokensUpper.add(t));
+      }
+      const isTeamBranded = broadcasterTokens.some((t) =>
+        t.length >= 3 && teamAliasTokensUpper.has(t)
+      );
+      if (isTeamBranded) {
+        const SPORT_LEAGUE_RE = /(?:^|[^A-Z0-9])(MLB|NBA|NFL|NHL|NCAA|MLS|UFC|WNBA|NWSL|MMA|F1|PGA|ATP|WTA)(?:[^A-Z0-9]|$)/;
+        const RSN_RE = /(?:^|[^A-Z0-9])(BALLY|FANDUEL|SPECTRUM SPORTS|ROOT SPORTS|NESN|MASN|MARQUEE|YES NETWORK|SNY|MSG|ALTITUDE|SCRIPPS)(?:[^A-Z0-9]|$)/;
+        const opposingAliases = (() => {
+          const which = teamAliasTokensUpper;
+          // We don't know home-vs-away here per-token; instead pick
+          // any team alias NOT in the broadcaster term as "opposing".
+          const matchedTeam = new Set(broadcasterTokens);
+          const out = [];
+          for (const t of which) {
+            if (!matchedTeam.has(t) && t.length >= 4) out.push(t);
+          }
+          return out;
+        })();
+        const hasLeague = SPORT_LEAGUE_RE.test(upperName);
+        const hasRsn = RSN_RE.test(upperName);
+        const hasOpposing = opposingAliases.some((t) =>
+          new RegExp(`(?:^|[^A-Z0-9])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^A-Z0-9]|$)`).test(upperName)
+        );
+        if (!hasLeague && !hasRsn && !hasOpposing) {
+          // No disambiguating signal — the channel name just shares
+          // the team's word. Skip the bonus.
+          continue;
+        }
+      }
+
       broadcasterBonus = context.eventConfirmed ? 250 : 120;
       broadcasterMatched = upperTerm;
       break;

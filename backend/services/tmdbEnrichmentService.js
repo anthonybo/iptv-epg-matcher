@@ -65,6 +65,37 @@ const inMemorySeriesCache = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ─── User-operation pause mechanism ───────────────────────────────
+//
+// The enrichment worker's "OR (movie_id IS NULL AND lower(regexp_
+// replace(...)) LIKE $3)" UPDATE on movie_streams forces a seqscan
+// and acquires row-level locks for the duration. A single tick can
+// hold those locks for ~30 seconds. While that's running, user-
+// initiated deletes (which cascade through movie_streams) stall
+// waiting for the locks to release. The user sees a delete UI that
+// "does nothing" for a minute.
+//
+// pause()/isPaused() let user-initiated work tell the worker to
+// stand down. The worker checks isPaused() between rows in a tick
+// and exits early; new ticks defer entirely. This prevents NEW
+// UPDATEs from starting while a delete or refresh is in flight.
+// We can't preempt the currently-running UPDATE — if one is in
+// flight when the user clicks delete, that operation still has to
+// finish — but blocking new ones means deletes don't queue up
+// behind a steady stream of enrichment work.
+let pauseHoldCount = 0;
+
+function pause() {
+  pauseHoldCount += 1;
+  return function release() {
+    pauseHoldCount = Math.max(0, pauseHoldCount - 1);
+  };
+}
+
+function isPaused() {
+  return pauseHoldCount > 0;
+}
+
 let lastApiCallAt = 0;
 async function throttleGate() {
   const elapsed = Date.now() - lastApiCallAt;
@@ -409,15 +440,27 @@ async function enrichMovieRow(row) {
   }
   const movieId = await upsertCanonicalMovie(movieRow);
 
-  // Cross-source dedup link.
+  // Cross-source dedup, split into two statements so the planner
+  // can use the right index for each branch:
+  //
+  //   1. PK lookup on the freshly-enriched row's id — fast, indexed.
+  //   2. Prefix-LIKE on the partial functional index
+  //      idx_movie_streams_provider_name_norm (migration 041) — was
+  //      a 30s seqscan over 1.4M rows when combined with the OR
+  //      above; now sub-ms via the indexed expression.
+  //
+  // The pre-041 single-statement form was holding row-level locks on
+  // every scanned row for ~30s, stalling deletes/refreshes/imports.
+  await postgresService.query(
+    `UPDATE movie_streams SET movie_id = $1, updated_at = NOW() WHERE id = $2`,
+    [movieId, row.id]
+  );
   await postgresService.query(
     `UPDATE movie_streams SET movie_id = $1, updated_at = NOW()
-     WHERE id = $2 OR (
-       movie_id IS NULL
-       AND lower(regexp_replace(provider_name, '[^a-zA-Z0-9]+', '', 'g'))
-         LIKE $3
-     )`,
-    [movieId, row.id, normTitle(movieRow.title) + '%']
+       WHERE movie_id IS NULL
+         AND lower(regexp_replace(provider_name, '[^a-zA-Z0-9]+', '', 'g'))
+             LIKE $2`,
+    [movieId, normTitle(movieRow.title) + '%']
   );
 
   inMemoryMovieCache.set(cacheKey, movieId);
@@ -530,14 +573,17 @@ async function enrichSeriesRow(row) {
   }
   const seriesId = await upsertCanonicalSeries(seriesRow);
 
+  // See enrichMovieRow for the rationale on splitting these.
+  await postgresService.query(
+    `UPDATE series_sources SET series_id = $1, updated_at = NOW() WHERE id = $2`,
+    [seriesId, row.id]
+  );
   await postgresService.query(
     `UPDATE series_sources SET series_id = $1, updated_at = NOW()
-     WHERE id = $2 OR (
-       series_id IS NULL
-       AND lower(regexp_replace(provider_name, '[^a-zA-Z0-9]+', '', 'g'))
-         LIKE $3
-     )`,
-    [seriesId, row.id, normTitle(seriesRow.title) + '%']
+       WHERE series_id IS NULL
+         AND lower(regexp_replace(provider_name, '[^a-zA-Z0-9]+', '', 'g'))
+             LIKE $2`,
+    [seriesId, normTitle(seriesRow.title) + '%']
   );
 
   inMemorySeriesCache.set(cacheKey, seriesId);
@@ -548,6 +594,9 @@ async function enrichSeriesRow(row) {
 
 async function runTick() {
   if (DISABLED) return { skipped: true, reason: 'VOD_ENRICHMENT_DISABLED=1' };
+  // Don't start a new tick while user-initiated work holds the
+  // pause. The worker scheduler will retry on the next interval.
+  if (isPaused()) return { skipped: true, reason: 'paused', attempted: 0, enriched: 0 };
   lastTickAt = Date.now();
   let enriched = 0;
   let attempted = 0;
@@ -560,6 +609,14 @@ async function runTick() {
     [BATCH_PER_TICK]
   );
   for (const row of movieRows.rows) {
+    // Re-check between rows so a long batch can be interrupted by
+    // a user-initiated delete/refresh — without this, a 50-row tick
+    // could take 5+ minutes during which the pause is honored only
+    // on the next tick.
+    if (isPaused()) {
+      logger.info(`[enrich] tick paused mid-batch (movies); ${attempted} attempted, exiting early`);
+      return { attempted, enriched, paused: true };
+    }
     attempted++;
     try {
       const ok = await enrichMovieRow(row);
@@ -577,6 +634,10 @@ async function runTick() {
     [Math.floor(BATCH_PER_TICK / 2)]
   );
   for (const row of seriesRows.rows) {
+    if (isPaused()) {
+      logger.info(`[enrich] tick paused mid-batch (series); ${attempted} attempted, exiting early`);
+      return { attempted, enriched, paused: true };
+    }
     attempted++;
     try {
       const ok = await enrichSeriesRow(row);
@@ -687,5 +748,10 @@ module.exports = {
   pickBestImdbHit,
   enrichMovieStreamId,
   enrichSeriesSourceId,
-  fetchCinemetaSeriesEpisodes
+  fetchCinemetaSeriesEpisodes,
+  // Pause/resume so user-initiated work can keep the enrichment
+  // worker from acquiring new row locks on movie_streams while a
+  // delete/refresh is in flight. Returns a release function.
+  pause,
+  isPaused
 };

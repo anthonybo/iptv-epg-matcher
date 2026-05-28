@@ -246,22 +246,46 @@ async function ingestBundledEpgForSource(iptvSourceId, options = {}) {
       throw new Error(result?.error || 'parseEpgSource returned no result');
     }
 
+    // Quality gate: parseEpgSource happily returns success when the
+    // upstream XMLTV is structurally valid but content-empty (e.g. a
+    // single <channel> tag with no <programme> entries, common for
+    // bundled EPGs that point at a stub feed). Flagging those as
+    // "ok" leaves the user with a green dot and zero scheduling info.
+    // Treat zero programs as a hard failure regardless of channel
+    // count — programs are the entire reason we ingest EPG.
+    const channelCount = result.channelCount || 0;
+    const programCount = result.programCount || 0;
+    if (programCount === 0) {
+      const reason = channelCount === 0
+        ? 'empty EPG (0 channels, 0 programs)'
+        : `empty EPG (${channelCount} channel${channelCount === 1 ? '' : 's'}, 0 programs)`;
+      await updateStatus(iptvSourceId, {
+        bundled_epg_status: 'failed',
+        bundled_epg_error: reason,
+        bundled_epg_last_refreshed: new Date(),
+        bundled_epg_channel_count: channelCount,
+        bundled_epg_program_count: 0
+      });
+      logger.warn(`[bundled-epg] ${source.name}: ${reason} — marking failed`);
+      return { success: false, reason: 'empty_epg', channelCount, programCount: 0 };
+    }
+
     await updateStatus(iptvSourceId, {
       bundled_epg_status: 'ok',
       bundled_epg_error: null,
       bundled_epg_last_refreshed: new Date(),
-      bundled_epg_channel_count: result.channelCount || 0,
-      bundled_epg_program_count: result.programCount || 0
+      bundled_epg_channel_count: channelCount,
+      bundled_epg_program_count: programCount
     });
 
     logger.info(
-      `[bundled-epg] ${source.name}: ${result.channelCount || 0} channels, ` +
-      `${result.programCount || 0} programs in ${((Date.now() - t0) / 1000).toFixed(1)}s`
+      `[bundled-epg] ${source.name}: ${channelCount} channels, ` +
+      `${programCount} programs in ${((Date.now() - t0) / 1000).toFixed(1)}s`
     );
     return {
       success: true,
-      channelCount: result.channelCount,
-      programCount: result.programCount,
+      channelCount,
+      programCount,
       duration: Date.now() - t0
     };
   } catch (err) {

@@ -824,6 +824,30 @@ if (global.gc) {
   }, 10 * 60 * 1000); // Every 10 minutes
 }
 
+// Reconcile bundled-EPG ingest state that a previous crash may have
+// left dangling. The ingest pipeline writes status='pending' at the
+// start and 'ok'/'failed' at the end; if the process died between
+// those two writes (e.g. the SAX parser.resume crash we fixed), the
+// row sits in 'pending' forever and the UI shows a permanently
+// pulsing cyan dot. We never have an in-process ingest at boot, so
+// any 'pending' row found here is by definition orphaned.
+(async () => {
+  try {
+    const { pool } = require('./services/postgresService');
+    const { rowCount } = await pool.query(`
+      UPDATE iptv_sources
+         SET bundled_epg_status = 'failed',
+             bundled_epg_error  = 'interrupted: backend restarted mid-refresh'
+       WHERE bundled_epg_status = 'pending'
+    `);
+    if (rowCount > 0) {
+      logger.warn(`[startup] reconciled ${rowCount} bundled-EPG rows stuck in 'pending' from a prior crash`);
+    }
+  } catch (e) {
+    logger.warn(`[startup] bundled-EPG pending reconcile skipped: ${e.message}`);
+  }
+})();
+
 // Start server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => logger.info(`Backend running on http://localhost:${PORT}`));

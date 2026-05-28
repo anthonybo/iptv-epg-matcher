@@ -9,6 +9,7 @@ const { Pool } = require('pg');
 // expose. Used by saveChannels for bulk-loading channel rows into a
 // source's partition — the fastest Postgres ingest path.
 const { from: copyFrom } = require('pg-copy-streams');
+const { tabEscape, streamRowsToCopy } = require('../utils/pgCopyHelpers');
 const logger = require('../utils/logger');
 
 // Connection pool configuration
@@ -405,6 +406,39 @@ async function dropChannelsPartition(sourceId) {
 // Channel Operations
 // ============================================================================
 
+// Global saveChannels semaphore. Each refresh borrows a client and
+// holds it for tens of seconds during the COPY + index build. Without
+// a cap, a bulk-refresh of 75 sources across many hosts saturates the
+// pool — user-facing queries time out with "timeout exceeded when
+// trying to connect" because the pool can't hand out a free client.
+//
+// MAX_CONCURRENT_SAVES=1 — fully serialised. Empirically, two
+// concurrent saves (each TRUNCATE-then-COPY into a per-source
+// partition) didn't conflict on locks directly but DID saturate
+// Postgres' WAL fsync queue. A clean save is ~3-5 s; with two
+// running plus VOD UPSERTs in the background, saves stretched to
+// 50-135 s. Going sequential keeps each save snappy and the UI
+// reads (series listings, source health) responsive. Total bulk
+// time is barely worse — 75 sources × 5 s ≈ 6 min instead of 4 min
+// at parallel-2, and the user perceives each completion instantly
+// instead of waiting two-at-a-time.
+const MAX_CONCURRENT_SAVES = 1;
+let _activeSaves = 0;
+const _saveWaiters = [];
+async function _acquireSaveSlot() {
+    if (_activeSaves < MAX_CONCURRENT_SAVES) {
+        _activeSaves += 1;
+        return;
+    }
+    await new Promise((resolve) => _saveWaiters.push(resolve));
+    _activeSaves += 1;
+}
+function _releaseSaveSlot() {
+    _activeSaves = Math.max(0, _activeSaves - 1);
+    const next = _saveWaiters.shift();
+    if (next) next();
+}
+
 /**
  * Save channels for a source.
  *
@@ -429,6 +463,28 @@ async function saveChannels(channels, sourceId, options = {}) {
         ? options.onProgress
         : () => {};
 
+    if (!channels || channels.length === 0) {
+        return { saved: 0 };
+    }
+
+    // Wait for an open save slot before grabbing a pool client. This
+    // is what keeps the pool from being exhausted during bulk refresh
+    // — see MAX_CONCURRENT_SAVES at the top of this section. The
+    // semaphore wraps the entire save (so the client lifetime is
+    // serialised, not just queue-on-pool which can deadlock).
+    const _saveWaitStart = Date.now();
+    await _acquireSaveSlot();
+    if (Date.now() - _saveWaitStart > 100) {
+        logger.info(`[saveChannels] Source ${sourceId}: waited ${Date.now() - _saveWaitStart}ms for save slot (active=${_activeSaves}, max=${MAX_CONCURRENT_SAVES})`);
+    }
+    try {
+        return await _saveChannelsInner(channels, sourceId, options, isCancelled, onProgress);
+    } finally {
+        _releaseSaveSlot();
+    }
+}
+
+async function _saveChannelsInner(channels, sourceId, options, isCancelled, onProgress) {
     if (!channels || channels.length === 0) {
         return { saved: 0 };
     }
@@ -477,60 +533,69 @@ async function saveChannels(channels, sourceId, options = {}) {
         await client.query('BEGIN');
         await client.query(`TRUNCATE TABLE ${partitionName}`);
 
+        // Pump GIN bulk-load knobs for this transaction. We can't
+        // drop the partition's GIN indexes (their parent partitioned
+        // index — idx_iptv_channels_name_trgm / idx_iptv_channels_name
+        // — owns them and rejects the DROP) so instead we lean on
+        // GIN's pending-list mechanism: with fastupdate=on (default),
+        // every insert lands in a small TID-list buffer and only
+        // gets folded into the main GIN structure when the buffer
+        // fills. The default 4MB limit triggers a flush every
+        // ~25k rows of trgm tokens — way too often for a 50k-row
+        // COPY. Cranking the limit lets the entire COPY accumulate
+        // into the pending list, and we explicitly flush once at
+        // the end via gin_clean_pending_list().
+        //
+        // maintenance_work_mem also bumps because the flush itself
+        // benefits from more sort space, and any incidental index
+        // operations in this txn get the same headroom.
+        await client.query(`SET LOCAL maintenance_work_mem = '512MB'`);
+        await client.query(`SET LOCAL gin_pending_list_limit = '256MB'`);
+
+        const trgmIdxName    = `${partitionName}_name_idx1`;
+        const tsvectorIdxName = `${partitionName}_to_tsvector_idx`;
+
         // COPY uses text format with tab delimiter and \N as the NULL
-        // marker. Postgres' text COPY is well-defined, requires no
-        // extra escaping rules beyond the four characters below, and
-        // doesn't need the binary protocol's type-tag work for each
-        // value. Plenty fast for our scale.
+        // marker. FREEZE eligibility: TRUNCATE-then-COPY in the same
+        // transaction satisfies the "table created or truncated in
+        // current subtransaction" rule, so the rows are written
+        // pre-frozen — no WAL for the data itself (only catalog +
+        // visibility map), and no first-VACUUM cost later to mark
+        // all-visible.
         const copyStream = client.query(copyFrom(
             `COPY ${partitionName} (
                 channel_id, source_id, name, stream_url, logo_url, category,
                 tvg_id, tvg_name, group_title, source_type, source_username,
                 source_password, source_url, source_mac
-            ) FROM STDIN WITH (FORMAT text)`
+            ) FROM STDIN WITH (FORMAT text, FREEZE)`
         ));
-        // Always attach an error listener so an async stream error
-        // (e.g. from copyStream.destroy() during cancellation) is
-        // consumed instead of bubbling up as an uncaughtException.
-        // We don't need to act on it — the surrounding try/catch
-        // handles cancellation + ROLLBACK explicitly.
-        copyStream.on('error', () => {});
 
-        // Text COPY escapes: backslash → \\; tab → \t; newline → \n;
-        // carriage return → \r. NULL is the literal two-character
-        // sequence \N. Anything else is passed through verbatim.
-        const escape = (v) => {
-            if (v == null) return '\\N';
-            return String(v)
-                .replace(/\\/g, '\\\\')
-                .replace(/\t/g, '\\t')
-                .replace(/\n/g, '\\n')
-                .replace(/\r/g, '\\r');
-        };
-
-        // Stream rows in via async iteration. We pace with the
-        // writable's backpressure (`drain`) so we don't pile up the
-        // entire 50k-row buffer in node memory.
-        const writeRow = (row) => new Promise((resolve, reject) => {
-            if (copyStream.write(row)) {
-                resolve();
-            } else {
-                copyStream.once('drain', resolve);
-                copyStream.once('error', reject);
-            }
-        });
-
+        // Stream rows via the shared crash-safe helper. It handles
+        // pg-copy-streams' mid-COPY-error race (the
+        // "Cannot read properties of null (reading 'stream')"
+        // crash that hit us in vodIngest) and bounds the per-write
+        // listener count so giant saves don't trip
+        // MaxListenersExceededWarning.
         const sourceIdStr = String(parseInt(sourceId, 10));
-        for (let i = 0; i < total; i++) {
+        let progressIdx = 0;
+        const toCopyRow = (c) => {
+            // Bump progress + cancellation check on every row pulled
+            // from the iterator. This stays inside the helper's
+            // backpressure-aware loop so the COPY can pause cleanly.
             if (isCancelled()) {
-                // Abort the COPY by destroying the stream; the
-                // ROLLBACK below cleans up the transaction.
-                copyStream.destroy(new Error('__SAVE_CHANNELS_CANCELLED__'));
                 throw new Error('__SAVE_CHANNELS_CANCELLED__');
             }
-            const c = uniqueChannels[i];
+            progressIdx += 1;
+            if (progressIdx % 5000 === 0) {
+                const pct = Math.floor((progressIdx / total) * 100);
+                const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
+                logger.info(
+                    `[saveChannels] Source ${sourceId}: ${progressIdx}/${total} (${pct}%, ${elapsedSec}s)`
+                );
+                onProgress({ saved: progressIdx, total });
+            }
             const groupTitle = c.groupTitle || c.group_title || '';
-            const row = [
+            return [
                 c.id,
                 sourceIdStr,
                 c.name,
@@ -545,28 +610,10 @@ async function saveChannels(channels, sourceId, options = {}) {
                 c.source_password,
                 c.source_url,
                 c.source_mac
-            ].map(escape).join('\t') + '\n';
-            await writeRow(row);
+            ].map(tabEscape).join('\t') + '\n';
+        };
 
-            // Progress every 5k rows so the log isn't drowned but
-            // the user gets visible heartbeat for big saves.
-            if ((i + 1) % 5000 === 0) {
-                const pct = Math.floor(((i + 1) / total) * 100);
-                const elapsedSec = ((Date.now() - saveStartedAt) / 1000).toFixed(1);
-                logger.info(
-                    `[saveChannels] Source ${sourceId}: ${i + 1}/${total} (${pct}%, ${elapsedSec}s)`
-                );
-                onProgress({ saved: i + 1, total });
-            }
-        }
-
-        // Close the COPY stream and wait for Postgres' ack. End +
-        // 'finish' is the documented pattern in pg-copy-streams.
-        await new Promise((resolve, reject) => {
-            copyStream.once('finish', resolve);
-            copyStream.once('error', reject);
-            copyStream.end();
-        });
+        await streamRowsToCopy(copyStream, uniqueChannels, toCopyRow);
         savedCount = total;
 
         // Sync the search shadow (migration 033) inside the same
@@ -589,6 +636,26 @@ async function saveChannels(channels, sourceId, options = {}) {
                     c.tvg_id, c.group_title
                FROM ${partitionName} c
                JOIN iptv_sources s ON s.id = c.source_id`
+        );
+
+        // Flush the GIN pending list once for each partition GIN
+        // index. All the COPY inserts have been queued into the
+        // per-index pending list (because gin_pending_list_limit was
+        // bumped to 256MB above) — gin_clean_pending_list folds them
+        // into the main GIN structure in a single batched pass, which
+        // is materially faster than the dribble of small flushes
+        // that would have happened with the 4MB default limit.
+        //
+        // If the indexes don't exist on this partition for some
+        // reason (older schema, custom drop), the to_regclass guard
+        // means we just skip the flush rather than erroring the
+        // transaction.
+        await client.query(
+            `SELECT gin_clean_pending_list(c.oid)
+               FROM pg_class c
+              WHERE c.relkind = 'i'
+                AND c.relname IN ($1, $2)`,
+            [trgmIdxName, tsvectorIdxName]
         );
 
         // Update the source row's refresh stats inside the same

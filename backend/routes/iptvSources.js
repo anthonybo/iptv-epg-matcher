@@ -6,6 +6,7 @@ const epgService = require('../services/epgService');
 const logger = require('../config/logger');
 const postgresService = require('../services/postgresService');
 const bundledEpgService = require('../services/bundledEpgService');
+const tmdbEnrichmentService = require('../services/tmdbEnrichmentService');
 const dns = require('dns').promises;
 const { execFile } = require('child_process');
 const { promisify } = require('util');
@@ -268,6 +269,16 @@ router.put('/sources/reorder', requireAuth, async (req, res) => {
  * Remove source from user's account
  */
 router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
+    // Pause the TMDB enrichment worker for the duration of this
+    // delete. The cascade from iptv_sources → movie_streams contends
+    // for row-level locks that the enrichment worker's regex-based
+    // UPDATE can hold for ~30 seconds. Pausing prevents NEW
+    // enrichment work from starting; any in-flight UPDATE must still
+    // run to completion, but at least the delete doesn't queue
+    // behind a stream of additional 30-second UPDATEs. Restored in
+    // the finally block so a thrown error doesn't leak a permanent
+    // pause hold.
+    const releaseEnrichmentPause = tmdbEnrichmentService.pause();
     try {
         const userId = req.user.id;
         const sourceId = parseInt(req.params.sourceId);
@@ -336,6 +347,8 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
             success: false,
             error: 'Failed to remove source'
         });
+    } finally {
+        releaseEnrichmentPause();
     }
 });
 
@@ -393,10 +406,25 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
     // uses) doesn't always propagate the client's TCP close as a
     // synthetic 'close' event on the proxied request, but the
     // underlying socket DOES get destroyed.
+    //
+    // 2026-05-27: removed `req.destroyed` from this check. It was
+    // firing as TRUE within the first poll interval on otherwise-
+    // healthy connections — observed flagging "client disconnect"
+    // within the same second a refresh STARTED, even when the user
+    // hadn't touched the page. Root cause looks like a Node/Express
+    // detail where req.destroyed flips early for piped requests
+    // that haven't yet emitted 'aborted'. The result was a refresh
+    // that completed the fetch but then short-circuited the save
+    // and silently never sent a response — frontend waited 5
+    // minutes for its own timeout. The explicit req.close /
+    // req.aborted / res.close listeners are reliable enough on
+    // their own; we only poll on the response side now where the
+    // signal is "Express has already finished writing" — which is
+    // never true while a refresh is in flight.
     const closeWatcher = setInterval(() => {
         if (clientGone) return;
-        if (req.destroyed || res.destroyed || res.writableEnded) {
-            markClientGone(req.destroyed ? 'req.destroyed' : res.destroyed ? 'res.destroyed' : 'res.writableEnded');
+        if (res.destroyed || res.writableEnded) {
+            markClientGone(res.destroyed ? 'res.destroyed' : 'res.writableEnded');
         }
     }, 500);
     const stopCloseWatcher = () => clearInterval(closeWatcher);
@@ -691,24 +719,50 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         // resilient to a dropped socket.
         if (clientGone) {
             logger.warn(
-                `[REFRESH] Source ${sourceId}: client disconnected during refresh — continuing anyway so the result lands in the DB`
+                `[REFRESH] Source ${sourceId}: client disconnected during refresh — saveChannels will short-circuit between batches`
             );
         }
         logger.info(`[REFRESH] Source ${sourceId}: step 3/3 — saving ${dbChannels.length} channels to DB`);
         const saveStartedAt = Date.now();
-        // Pass a never-cancelled probe so saveChannels runs to
-        // completion. We still log if the client is gone (above) so
-        // it's visible in diagnostics, but we don't act on it.
+        // Respect cancellation: when the user clicks Cancel on the
+        // refresh-all pill, the frontend AbortControllers fire, the
+        // req 'close' event fires on the server, clientGone flips
+        // true, and saveChannels stops between batches. Without this,
+        // pressing Cancel left the channel-save phase running to
+        // completion (often 30+ s per source) while holding DB
+        // connections — saturating the pool and causing TV Series /
+        // Movies page loads to time out with "timeout exceeded when
+        // trying to connect".
+        //
+        // Previously this was hard-coded to `() => false` because an
+        // older bug let mid-fetch disconnects orphan the refresh state.
+        // That bug is fixed elsewhere (the refresh route already
+        // continues PAST disconnects during the fetch phase via the
+        // logic above) — only the SAVE phase is cancellable, and only
+        // between batches so we never leave a half-written batch.
         const saveResult = await iptvDatabaseService.saveChannels(
             sourceId,
             dbChannels,
-            { isCancelled: () => false },
+            { isCancelled: () => clientGone },
         );
         if (saveResult && saveResult.cancelled) {
-            // Should be unreachable now, but keep the branch so a
-            // future caller passing a real isCancelled probe still
-            // behaves correctly.
             logger.info(`[REFRESH] Source ${sourceId}: cancelled mid-saveChannels after ${saveResult.saved}/${dbChannels.length}`);
+            // Try to send a clear cancellation response so the
+            // frontend doesn't sit for its own axios timeout
+            // (was making the user wait ~5 minutes per cancelled
+            // refresh). If the socket really is gone, this write
+            // no-ops harmlessly.
+            if (!res.writableEnded && !res.headersSent) {
+                try {
+                    res.status(499).json({
+                        success: false,
+                        cancelled: true,
+                        savedCount: saveResult.saved,
+                        totalCount: dbChannels.length,
+                        message: 'Refresh cancelled — partial save discarded by transaction rollback.'
+                    });
+                } catch (_) { /* socket really is gone */ }
+            }
             return;
         }
         logger.info(
@@ -746,26 +800,43 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         const refreshedSource = updatedSource.find(s => s.id === parseInt(sourceId));
 
         // ── VOD catalog ingest (Xtream + Stalker) ──────────────────
-        // Pull movies + series in the background. Wrapped in try/catch
-        // because providers vary wildly in whether they expose VOD —
-        // a sports-only IPTV with no VOD endpoints shouldn't make the
-        // whole refresh look like it failed. Logs but doesn't bubble.
-        let vodSummary = null;
+        // VOD is ALWAYS fire-and-forget now. Per-source ingest takes
+        // 30s–3min and movies+series run in parallel internally (see
+        // vodIngestService); inlining the await on the response path
+        // made the refresh feel "frozen" for the whole VOD duration
+        // even though channels were already saved seconds earlier.
+        //
+        // The response goes out as soon as channels land. VOD spawns
+        // detached and writes results to the same DB the catalog
+        // pages already poll — when the user opens Movies / TV Series
+        // the new entries are there. The `?skipVod=1` query param is
+        // retained for backward compat but now functionally identical
+        // to no-skipVod (both background the VOD ingest); the only
+        // difference is the response's `vodInProgress` flag below.
+        const skipVod = req.query.skipVod === '1' || req.query.skipVod === 'true';
+        let vodInProgress = false;
         if (!channelsResult?.staleFallback && (source.type === 'xtream' || source.type === 'stalker')) {
-            try {
+            if (skipVod) {
+                logger.info(`[REFRESH] Source ${sourceId}: VOD ingest skipped (skipVod=1)`);
+            } else {
+                // Detached background promise — no await. Errors are
+                // logged inside ingestVodForSource itself.
                 const vodIngestService = require('../services/vodIngestService');
-                vodSummary = await vodIngestService.ingestVodForSource({
+                vodInProgress = true;
+                Promise.resolve().then(() => vodIngestService.ingestVodForSource({
                     id: parseInt(sourceId),
                     type: source.type,
                     url: source.url,
                     username: source.username,
                     password: source.password,
                     mac_address: source.mac_address || source.mac
+                })).catch((vodErr) => {
+                    logger.warn(`[REFRESH] Source ${sourceId}: background VOD ingest failed: ${vodErr.message}`);
                 });
-            } catch (vodErr) {
-                logger.warn(`[REFRESH] Source ${sourceId}: VOD ingest failed (non-fatal): ${vodErr.message}`);
+                logger.info(`[REFRESH] Source ${sourceId}: VOD ingest spawned in background`);
             }
         }
+        const vodSummary = null; // No longer awaited; surface progress via vodInProgress.
 
         // If the socket already died (Vite/StrictMode disconnect), the
         // DB write is the user's only signal that the refresh completed
@@ -773,20 +844,23 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         // then try to respond. Express will silently no-op the write
         // when the response is detached.
         logger.info(
-            `[REFRESH] Source ${sourceId}: complete — ${dbChannels.length} channels, ${categories.length} categories` +
-            (vodSummary && !vodSummary.skipped ? `, ${vodSummary.movies} movies, ${vodSummary.series} series` : '') +
+            `[REFRESH] Source ${sourceId}: channels saved — ${dbChannels.length} channels, ${categories.length} categories` +
+            (vodInProgress ? ' · VOD ingest running in background' : '') +
             (clientGone ? ' (client had disconnected; DB updated regardless)' : '')
         );
         if (!res.writableEnded) {
             try {
                 res.json({
                     success: true,
-                    message: 'Channels and account information refreshed successfully',
+                    message: vodInProgress
+                        ? 'Channels refreshed · VOD updating in the background'
+                        : 'Channels and account information refreshed successfully',
                     channelCount: dbChannels.length,
                     categoryCount: categories.length,
                     accountInfo,
                     source: refreshedSource,
-                    vod: vodSummary || null
+                    vod: null,
+                    vodInProgress
                 });
             } catch (e) {
                 // Socket gone — frontend is polling getUserSources()
@@ -1030,6 +1104,56 @@ router.post('/sources/refresh-all-bundled-epg', requireAuth, async (req, res) =>
  * depending on EPG size. force=true re-runs discovery (bypasses the
  * cached `bundled_epg_url`).
  */
+/**
+ * POST /api/iptv/sources/:sourceId/refresh-vod
+ *   ?kind=movies | series | all  (default: all)
+ *
+ * Refreshes ONLY the VOD catalog for one source — no channels, no
+ * EPG. Used by the per-kind bulk buttons on the My-IPTVs page.
+ *
+ *   "Refresh ALL Movies"   → iterates every source with kind=movies
+ *   "Refresh ALL TV Series"→ iterates every source with kind=series
+ *
+ * `/refresh-account-info` already handles channels-only via skipVod=1.
+ * Combine the three for "Refresh ALL".
+ */
+router.post('/sources/:sourceId/refresh-vod', requireAuth, async (req, res) => {
+  const sourceId = parseInt(req.params.sourceId, 10);
+  if (!Number.isFinite(sourceId)) {
+    return res.status(400).json({ success: false, error: 'Invalid sourceId' });
+  }
+  const userId = req.user.id;
+  const kindParam = String(req.query.kind || 'all').toLowerCase();
+  const wantMovies = kindParam === 'all' || kindParam === 'movies';
+  const wantSeries = kindParam === 'all' || kindParam === 'series';
+  if (!wantMovies && !wantSeries) {
+    return res.status(400).json({ success: false, error: 'kind must be movies, series, or all' });
+  }
+
+  try {
+    const sourcesRes = await postgresService.query(
+      `SELECT id, type, url, username, password, mac_address
+       FROM iptv_sources WHERE id = $1 AND user_id = $2`,
+      [sourceId, userId]
+    );
+    const source = sourcesRes.rows[0];
+    if (!source) return res.status(404).json({ success: false, error: 'Source not found' });
+    if (source.type !== 'xtream' && source.type !== 'stalker') {
+      return res.json({ success: true, skipped: true, reason: `VOD not supported for source type ${source.type}` });
+    }
+
+    const vodIngestService = require('../services/vodIngestService');
+    const summary = await vodIngestService.ingestVodForSource(source, {
+      movies: wantMovies,
+      series: wantSeries
+    });
+    return res.json({ success: true, summary, kind: kindParam });
+  } catch (err) {
+    logger.error(`[refresh-vod] source ${sourceId} failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.post('/sources/:sourceId/refresh-bundled-epg', requireAuth, async (req, res) => {
     try {
         const userId = req.user.id;
