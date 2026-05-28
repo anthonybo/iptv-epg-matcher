@@ -69,7 +69,13 @@ const IPTVPlayer = ({
   onStreamError = null, // Callback when stream fails (after skipRecovery or exhausted retries)
   onStreamDead = null, // Callback when stream is dead and needs alternative (for multi-view auto-recovery)
   onVideoElement = null, // Callback(videoEl|null) — fires when the underlying <video> ref changes so external code (e.g. commercial detector) can attach Web Audio + canvas analyzers
-  onCancel = null // Optional: when set, the loading overlay shows a Cancel button that calls this. Used by multi-view to let the user × a hung tile.
+  onCancel = null, // Optional: when set, the loading overlay shows a Cancel button that calls this. Used by multi-view to let the user × a hung tile.
+  // Refs from the parent that need to survive IPTVPlayer remounts —
+  // failure count + recovery cycle count. The parent resets these
+  // when the user picks a different channel. See PlayerView for the
+  // sources.
+  cumulativeFailuresRef = null,
+  recoveryCycleRef = null
 }) => {
   // Determine if we should use the resilient proxy
   // Auto mode: use resilient proxy in theatre mode (multi-view) by default
@@ -406,6 +412,12 @@ const IPTVPlayer = ({
     freshStartCountRef: recovery.freshStartCountRef,
     totalRecoveryAttemptsRef: recovery.totalRecoveryAttemptsRef,
     softRecoveryCountRef: recovery.softRecoveryCountRef,
+    // Prefer the parent-owned ref so the failure count survives
+    // IPTVPlayer remounts (declared-dead → re-key → fresh mount).
+    // Falls back to the hook's internal ref for callers that don't
+    // hand one in (e.g. multi-view tiles).
+    failureCountRef: cumulativeFailuresRef ?? recovery.failureCountRef,
+    recoveryCycleRef,
     recoveryTimestampsRef: recovery.recoveryTimestampsRef,
     setError,
     setLoading,
@@ -557,11 +569,17 @@ const IPTVPlayer = ({
         logs={logs}
       />
       
+      {/* Status display is single-source-of-truth: the chyron at the
+          top takes over whenever there's a recovery state, and the
+          centered loading pill only shows during the unannotated
+          initial-load window (no recovery message yet). This prevents
+          the user from seeing TWO copies of the same status text plus
+          a native <video> spinner all at once. */}
       <PlayerRecoveryBanner recoveryStatus={recoveryStatus} />
 
       <PlayerLoadingOverlay
-        visible={loading}
-        status={recoveryStatus || (loading ? 'Connecting…' : null)}
+        visible={loading && !recoveryStatus}
+        status={loading ? 'Connecting…' : null}
         onCancel={onCancel}
       />
 

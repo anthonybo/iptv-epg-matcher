@@ -74,6 +74,13 @@ export default function useStreamRecovery({
   const recoveryTimestampsRef = useRef([]);
   const streamUnstableRef = useRef(false);
   const softRecoveryCountRef = useRef(0);
+  // Total count of distinct upstream connection failures this session.
+  // Surfaced in the recovery banner so the user sees "3 attempts
+  // failed — retrying" instead of a generic "buffering" indicator
+  // that's been spinning for a minute. Reset on first successful
+  // playback (the existing 'playing' handler clears this along with
+  // the other counters).
+  const failureCountRef = useRef(0);
 
   // Theatre mode drives tighter limits across the board — with 4-6
   // concurrent streams the per-stream budget has to be smaller so the
@@ -708,6 +715,16 @@ export default function useStreamRecovery({
               return;
             }
 
+            // Surface a countdown to the user instead of leaving the
+            // native <video> spinner spinning silently. We still let
+            // the resilient proxy try to reconnect; we just stop
+            // hiding the fact that the stream is paused.
+            const stalledSec = Math.round(timeSinceLastPlaying / 1000);
+            const limitSec = Math.round(MAX_STALE_TIME_MS / 1000);
+            setRecoveryStatus(
+              `Stream paused ${stalledSec}s — backend reconnecting (gives up at ${limitSec}s)`
+            );
+
             log(
               'info',
               `[health] frozen ${timeSinceLastPlaying}ms but resilient proxy may still recover — waiting (limit ${MAX_STALE_TIME_MS}ms)`
@@ -771,6 +788,7 @@ export default function useStreamRecovery({
     totalRecoveryAttemptsRef,
     recoveryTimestampsRef,
     streamUnstableRef,
-    softRecoveryCountRef
+    softRecoveryCountRef,
+    failureCountRef
   };
 }

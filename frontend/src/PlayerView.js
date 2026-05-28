@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import IPTVPlayer from './IPTVPlayer';
 import EPGMatcher from './EPGMatcher';
 import FeedSelector from './components/FeedSelector/FeedSelector';
@@ -20,6 +20,137 @@ import { showToast } from './components/Toast';
  * @param {boolean} props.isTheatreMode Flag indicating if theatre mode is active
  * @returns {JSX.Element} Player view UI
  */
+/**
+ * Surface shown after auto-retry has been exhausted. Matches the
+ * chyron's broadcast-monitor language so the player area transitions
+ * cleanly from "trying to recover" to "we've given up — your move".
+ *
+ * Reason strings come from the recovery hook:
+ *   no_play_timeout — 20s without ever reaching playback
+ *   stale — health-check declared the pipe dead
+ *   timeout_exhausted — total retry budget burned
+ *   buffer_drained — buffer ran dry and no future bytes arrived
+ *
+ * We map those to user-readable hints so the message doesn't read
+ * like a stack trace.
+ */
+const PlayerGiveUpSurface = ({ channelName, cycles, reason, onRetry }) => {
+  const reasonText = {
+    no_play_timeout: 'never reached playback after multiple attempts',
+    stale: 'data stopped flowing from the upstream',
+    timeout_exhausted: 'all reconnect attempts were exhausted',
+    buffer_drained: 'buffer ran dry waiting for new frames'
+  }[reason] || `reason: ${reason}`;
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        aspectRatio: '16 / 9',
+        borderRadius: 12,
+        overflow: 'hidden',
+        border: '1px solid rgba(244, 63, 94, 0.32)',
+        background: [
+          'radial-gradient(80% 120% at 50% 0%, rgba(244, 63, 94, 0.08) 0%, transparent 60%)',
+          'linear-gradient(180deg, rgb(15, 23, 42) 0%, rgb(2, 6, 23) 100%)'
+        ].join(', '),
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        boxShadow: '0 12px 32px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(148, 163, 184, 0.06)'
+      }}
+    >
+      <div
+        style={{
+          maxWidth: 480,
+          padding: 24,
+          textAlign: 'center',
+          color: 'rgb(241, 245, 249)',
+          fontFamily: 'system-ui, -apple-system, sans-serif'
+        }}
+      >
+        {/* Label tag matching the chyron's typography */}
+        <div
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: '0.22em',
+            textTransform: 'uppercase',
+            color: 'rgb(253, 164, 175)',
+            marginBottom: 14,
+            fontFamily: '"SF Mono", ui-monospace, monospace'
+          }}
+        >
+          <span
+            style={{
+              display: 'inline-block',
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: 'rgb(244, 63, 94)',
+              boxShadow: '0 0 8px rgb(244, 63, 94)',
+              marginRight: 10,
+              verticalAlign: 'middle'
+            }}
+          />
+          Stream Unavailable
+        </div>
+        <div
+          style={{
+            fontSize: 15,
+            fontWeight: 500,
+            color: 'rgb(226, 232, 240)',
+            marginBottom: 8,
+            lineHeight: 1.4
+          }}
+        >
+          Couldn't play {channelName}.
+        </div>
+        <div
+          style={{
+            fontSize: 12,
+            color: 'rgba(148, 163, 184, 0.85)',
+            marginBottom: 20,
+            lineHeight: 1.5
+          }}
+        >
+          Gave up after {cycles} attempt{cycles === 1 ? '' : 's'} — {reasonText}.
+        </div>
+        <div style={{ display: 'inline-flex', gap: 8 }}>
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{
+              padding: '8px 16px',
+              fontSize: 12,
+              fontWeight: 600,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              borderRadius: 6,
+              border: '1px solid rgba(34, 211, 238, 0.4)',
+              background: 'rgba(34, 211, 238, 0.12)',
+              color: 'rgb(103, 232, 249)',
+              cursor: 'pointer',
+              fontFamily: '"SF Mono", ui-monospace, monospace',
+              transition: 'background 150ms ease, border-color 150ms ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(34, 211, 238, 0.22)';
+              e.currentTarget.style.borderColor = 'rgba(34, 211, 238, 0.6)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(34, 211, 238, 0.12)';
+              e.currentTarget.style.borderColor = 'rgba(34, 211, 238, 0.4)';
+            }}
+          >
+            Try Again
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PlayerView = ({
   sessionId,
   selectedChannel,
@@ -43,10 +174,64 @@ const PlayerView = ({
   // single-view freezes had no escape and the user was left
   // staring at a frozen frame.
   const [playerRefreshKey, setPlayerRefreshKey] = useState(0);
+  // Cumulative failure counter — survives IPTVPlayer remounts so the
+  // chyron's "N attempts failed" doesn't reset every time we declare
+  // the stream dead and re-key the child. Resets only when the user
+  // picks a *different* channel (effect below). Without this, a
+  // chronic-503 channel shows "Connection failed" indefinitely
+  // because each cycle starts the counter over at 1.
+  const cumulativeFailuresRef = useRef(0);
+  // Track player-remount cycles separately. Each notifyStreamDead
+  // bumps this; we cap remounts at MAX_REMOUNT_CYCLES below to stop
+  // the infinite remount loop that was burning a fresh ffmpeg
+  // process every 20s on dead upstreams.
+  const recoveryCycleRef = useRef(0);
+  // Permanent give-up state once we've exhausted MAX_REMOUNT_CYCLES.
+  // Disables auto-remount and shows a manual retry button instead.
+  // Reset to null on a real channel change.
+  const [permanentFailure, setPermanentFailure] = useState(null);
+
+  const MAX_REMOUNT_CYCLES = 2;
+
   const handleStreamDead = (reason) => {
-    console.warn(`[player] stream declared dead (${reason || 'no reason'}) — auto-refreshing`);
+    // Already given up — don't loop further.
+    if (permanentFailure) return;
+    recoveryCycleRef.current += 1;
+    const n = recoveryCycleRef.current;
+    console.warn(
+      `[player] stream declared dead (${reason || 'no reason'}) — cycle ${n}/${MAX_REMOUNT_CYCLES}`
+    );
+    if (n >= MAX_REMOUNT_CYCLES) {
+      // Stop the remount loop. Each cycle was spawning a fresh
+      // ffmpeg process against the same dead upstream and never
+      // recovering. The user will see a "Stream unavailable" surface
+      // and can manually retry or pick another feed.
+      setPermanentFailure({
+        reason: reason || 'unknown',
+        cycles: n,
+        at: Date.now()
+      });
+      return;
+    }
     setPlayerRefreshKey((k) => k + 1);
   };
+
+  const handleManualRetry = () => {
+    cumulativeFailuresRef.current = 0;
+    recoveryCycleRef.current = 0;
+    setPermanentFailure(null);
+    setPlayerRefreshKey((k) => k + 1);
+  };
+
+  // Reset cumulative counters + give-up state whenever the user
+  // actually changes channels. selectedChannel.id is the stable
+  // identity; .url can change (feed swaps) without it being a
+  // different channel.
+  useEffect(() => {
+    cumulativeFailuresRef.current = 0;
+    recoveryCycleRef.current = 0;
+    setPermanentFailure(null);
+  }, [selectedChannel?.id]);
 
   const playerButtonClasses = (type) => [
     'inline-flex items-center justify-center rounded-xl border p-2.5 transition',
@@ -175,11 +360,20 @@ const PlayerView = ({
         </div>
         <div className="flex items-center gap-3 rounded-full border border-slate-800/70 bg-slate-900/70 px-4 py-2 text-xs flex-wrap">
           <div className="flex items-center gap-2">
-            <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span>
+            {/* Status dot tracks the actual stream state instead of
+                lying about "Now playing" while the give-up surface
+                is showing. Rose when we've given up, emerald otherwise. */}
+            <span
+              className={`inline-flex h-2 w-2 ${permanentFailure ? '' : 'animate-pulse'} rounded-full ${permanentFailure ? 'bg-rose-400' : 'bg-emerald-400'}`}
+            ></span>
             {currentChannel ? (
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-slate-400">Now playing:</span>
-                <span className="font-medium text-slate-100">{currentChannel.name}</span>
+                <span className="text-slate-400">
+                  {permanentFailure ? 'Stream unavailable:' : 'Now playing:'}
+                </span>
+                <span className={`font-medium ${permanentFailure ? 'text-rose-200 line-through decoration-rose-500/40' : 'text-slate-100'}`}>
+                  {currentChannel.name}
+                </span>
                 <span className="text-slate-600">•</span>
                 <span className="inline-flex items-center gap-1.5 rounded-md bg-blue-500/20 px-2.5 py-1 text-blue-200 border-2 border-blue-500/40 font-semibold text-sm">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -305,7 +499,14 @@ const PlayerView = ({
           </div>
 
           <div className="rounded-3xl border border-slate-800/70 bg-slate-900/70 p-4 shadow-2xl shadow-slate-950/40">
-            {selectedChannel && sessionId ? (
+            {permanentFailure ? (
+              <PlayerGiveUpSurface
+                channelName={selectedChannel?.name || 'this channel'}
+                cycles={permanentFailure.cycles}
+                reason={permanentFailure.reason}
+                onRetry={handleManualRetry}
+              />
+            ) : selectedChannel && sessionId ? (
               <IPTVPlayer
                 key={`${selectedChannel.id || selectedChannel.tvgId}-${playerRefreshKey}`}
                 sessionId={sessionId}
@@ -314,6 +515,8 @@ const PlayerView = ({
                 matchedChannels={matchedChannels}
                 onQualityDetected={setVideoQuality}
                 onStreamDead={handleStreamDead}
+                cumulativeFailuresRef={cumulativeFailuresRef}
+                recoveryCycleRef={recoveryCycleRef}
                 // Opt single-view into the resilient backend proxy
                 // — same pipeline multi-view uses. Without this, the
                 // browser connects directly to the upstream URL

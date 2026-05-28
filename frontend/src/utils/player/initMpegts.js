@@ -111,6 +111,7 @@ export function initializeMpegtsPlayerInstance(ctx) {
     freshStartCountRef,
     totalRecoveryAttemptsRef,
     softRecoveryCountRef,
+    failureCountRef,
     recoveryTimestampsRef,
     setError,
     setLoading,
@@ -235,6 +236,69 @@ export function initializeMpegtsPlayerInstance(ctx) {
 
     player.attachMediaElement(videoEl);
 
+    // Two timers cover the "stream never starts" failure mode:
+    //
+    //  1. EARLY-BUFFER (1.2s) — Surfaces a status so the user isn't
+    //     staring at the bare native <video> spinner while mpegts.js
+    //     burns its own retry budget. Function form so it doesn't
+    //     clobber an ERROR-driven message already set.
+    //
+    //  2. NO-PLAY ESCALATION (20s) — startHealthCheck() only runs
+    //     after the first 'playing' event. If the upstream is
+    //     permanently dead and we never play, the health check
+    //     never starts. This timer is the failsafe: if currentTime
+    //     is still 0 at 20s, escalate to stream-dead so the parent
+    //     can remount or show an error.
+    //
+    // Critical: these timers are cleared on 'playing' (real
+    // playback) NOT on 'loadeddata'. MSE source open fires
+    // 'loadeddata' even when no actual playback ever happens, which
+    // was clearing the escalation early and letting a dead stream
+    // sit indefinitely. The existing 'playing' handler below
+    // already clears both via cleanupPlayer's listener teardown
+    // and the explicit clearTimeout we add here.
+    // Sentinel check used by both timers: if cleanupPlayer has nulled
+    // out playerInstanceRef, this IPTVPlayer was unmounted (including
+    // React StrictMode's intentional dev-time double-mount). The
+    // first mount's timers would otherwise fire ~20s later — two
+    // notifyStreamDead calls = instant 2-cycle give-up before the
+    // real attempt has had a chance.
+    const isUnmounted = () => playerInstanceRef.current == null;
+
+    const earlyBufferTimer = setTimeout(() => {
+      if (isUnmounted()) return;
+      if (videoEl.currentTime > 0) return;
+      if (getChannelId() !== currentChannelIdRef.current) return;
+      setRecoveryStatus((prev) => prev ?? 'Connecting — buffering stream');
+    }, 1200);
+
+    const NO_PLAY_TIMEOUT_MS = 20000;
+    const noPlayTimer = setTimeout(() => {
+      if (isUnmounted()) return;
+      if (videoEl.currentTime > 0) return;
+      if (getChannelId() !== currentChannelIdRef.current) return;
+      log('error', `[init] no playback within ${NO_PLAY_TIMEOUT_MS}ms — escalating to stream-dead`);
+      streamUnstableRef.current = true;
+      setError('Stream unavailable. Try Find Alternative or refresh the page.');
+      setRecoveryStatus(null);
+      notifyStreamDead('no_play_timeout');
+    }, NO_PLAY_TIMEOUT_MS);
+
+    // Clear timers only when real playback starts (currentTime > 0
+    // confirms the video element is actually advancing). 'timeupdate'
+    // fires repeatedly during playback, so we check the first one
+    // with a non-zero time and clear both timers. mpegts.js's
+    // SourceOpen / loadeddata events fire BEFORE actual frames flow
+    // and were clearing the no-play escalation prematurely.
+    const clearStartupTimers = () => {
+      if (videoEl.currentTime > 0) {
+        clearTimeout(earlyBufferTimer);
+        clearTimeout(noPlayTimer);
+        videoEl.removeEventListener('timeupdate', clearStartupTimers);
+      }
+    };
+    addTrackedListener(videoEl, 'timeupdate', clearStartupTimers);
+
     player.on(window.mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
       log('error', 'mpegts player error', {
         errorType,
@@ -295,6 +359,16 @@ export function initializeMpegtsPlayerInstance(ctx) {
       // crashes — only the network/media transient cascade is silenced.
       if (shouldUseResilientProxy) {
         log('info', `mpegts ${errorContext} — backend handles reconnect in resilient mode, not soft-recovering`);
+        // Bump the failure counter so the chyron can say "3 attempts
+        // failed" instead of a generic "buffering". Reset on the
+        // first 'playing' event along with the other counters.
+        if (failureCountRef) failureCountRef.current += 1;
+        const n = failureCountRef ? failureCountRef.current : 1;
+        setRecoveryStatus(
+          n === 1
+            ? `Connection failed — retrying (${errorContext})`
+            : `${n} attempts failed — retrying (${errorContext})`
+        );
         return;
       }
 
@@ -322,6 +396,13 @@ export function initializeMpegtsPlayerInstance(ctx) {
       // (MAX_STALE_TIME_MS) handles a truly-dead stream.
       if (shouldUseResilientProxy) {
         log('info', 'Stream loading complete — backend handles reconnect in resilient mode');
+        if (failureCountRef) failureCountRef.current += 1;
+        const n = failureCountRef ? failureCountRef.current : 1;
+        setRecoveryStatus(
+          n === 1
+            ? 'Server closed connection — retrying'
+            : `${n} attempts failed — retrying (server closed connection)`
+        );
         return;
       }
       attemptSoftRecovery('Stream ended (loading complete)');
@@ -366,6 +447,7 @@ export function initializeMpegtsPlayerInstance(ctx) {
       if (freshStartCountRef) freshStartCountRef.current = 0;
       if (totalRecoveryAttemptsRef) totalRecoveryAttemptsRef.current = 0;
       if (softRecoveryCountRef) softRecoveryCountRef.current = 0;
+      if (failureCountRef) failureCountRef.current = 0;
       if (recoveryTimestampsRef) recoveryTimestampsRef.current = [];
       if (streamUnstableRef) streamUnstableRef.current = false;
 
@@ -471,6 +553,26 @@ export function initializeMpegtsPlayerInstance(ctx) {
       isInitializingRef.current = false;
       if (getChannelId() !== currentChannelIdRef.current) {
         log('info', 'Channel changed, skipping recovery on video error');
+        return;
+      }
+      // Resilient-mode guard — same reasoning as the sibling 'ended',
+      // 'waiting' (handleStall), mpegts ERROR, and LOADING_COMPLETE
+      // handlers: calling attemptRecovery here cancels the in-flight
+      // backend fetch and spawns a fresh ffmpeg via cleanupPlayer +
+      // reinit. That was the *second* cancellation source we hadn't
+      // capped — distinct from PlayerView's notifyStreamDead loop,
+      // because attemptRecovery cycles internally up to MAX_RETRIES
+      // (6) before notifying. With this guard, the no-play timer +
+      // health check own the escalation path and PlayerView's
+      // MAX_REMOUNT_CYCLES cap bounds the total attempts.
+      if (shouldUseResilientProxy) {
+        if (failureCountRef) failureCountRef.current += 1;
+        const n = failureCountRef ? failureCountRef.current : 1;
+        setRecoveryStatus(
+          n === 1
+            ? 'Connection failed — retrying (video element error)'
+            : `${n} attempts failed — retrying (video element error)`
+        );
         return;
       }
       attemptRecovery('Video element error');
