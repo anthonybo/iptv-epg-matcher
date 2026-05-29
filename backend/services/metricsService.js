@@ -5,13 +5,14 @@
  */
 
 const logger = require('../config/logger');
-// Metrics continue to use SQLite directly (not migrated to PostgreSQL yet)
-const iptvDatabaseService = require('./iptvDatabaseService');
+// Metrics persist to Postgres (migrated off the legacy sqlite store).
+const postgresService = require('./postgresService');
 
 class MetricsService {
   constructor() {
-    // Database connection
-    this.db = null;
+    // Postgres readiness flag (pool lives in postgresService). Guards
+    // every persist path until initDatabase() resolves.
+    this.ready = false;
     this.initDatabase();
 
     // Write queue for batching database operations
@@ -93,10 +94,13 @@ class MetricsService {
   }
 
   /**
-   * Flush all queued writes in a single transaction
+   * Flush all queued writes in a single Postgres transaction. Each
+   * queued item carries PG-syntax SQL ($N placeholders, TRUE/FALSE).
+   * A single failing statement aborts the whole batch (rollback) so
+   * we never half-write a sampling tick.
    */
   async flushWriteQueue() {
-    if (!this.db || this.writeQueue.length === 0 || this.isProcessingQueue) {
+    if (!this.ready || this.writeQueue.length === 0 || this.isProcessingQueue) {
       return;
     }
 
@@ -105,44 +109,14 @@ class MetricsService {
     this.writeQueue = [];
 
     try {
-      await new Promise((resolve, reject) => {
-        this.db.serialize(() => {
-          this.db.run('BEGIN TRANSACTION', (err) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-
-            let completed = 0;
-            let hasError = false;
-
-            batch.forEach(({ query, params }) => {
-              this.db.run(query, params, (runErr) => {
-                if (runErr && !hasError) {
-                  hasError = true;
-                  logger.error('[MetricsService] Queue write error:', runErr);
-                }
-                completed++;
-
-                if (completed === batch.length) {
-                  if (hasError) {
-                    this.db.run('ROLLBACK', () => reject(new Error('Batch write failed')));
-                  } else {
-                    this.db.run('COMMIT', (commitErr) => {
-                      if (commitErr) reject(commitErr);
-                      else resolve();
-                    });
-                  }
-                }
-              });
-            });
-          });
-        });
+      await postgresService.transaction(async (client) => {
+        for (const { query, params } of batch) {
+          await client.query(query, params);
+        }
       });
-
-      logger.debug(`[MetricsService] Flushed ${batch.length} writes to database`);
+      logger.debug(`[MetricsService] Flushed ${batch.length} writes to Postgres`);
     } catch (error) {
-      logger.error('[MetricsService] Failed to flush write queue:', error);
+      logger.error('[MetricsService] Failed to flush write queue:', error.message);
     } finally {
       this.isProcessingQueue = false;
     }
@@ -161,49 +135,41 @@ class MetricsService {
   }
 
   /**
-   * Initialize database connection and populate cache
+   * Initialize: mark ready (Postgres pool is managed by
+   * postgresService) and warm the session cache.
    */
   async initDatabase() {
     try {
-      this.db = await iptvDatabaseService.connect();
-      logger.info('[MetricsService] Database connection initialized');
-
-      // Populate session cache with recent active sessions
+      this.ready = true;
+      logger.info('[MetricsService] Using Postgres for metrics');
       await this.populateSessionCache();
     } catch (error) {
-      logger.error('[MetricsService] Failed to initialize database:', error);
+      logger.error('[MetricsService] Failed to initialize:', error.message);
     }
   }
 
   /**
-   * Populate session cache from database on startup
+   * Populate session cache from Postgres on startup. Normalizes
+   * is_active to a boolean so the in-memory filters stay consistent.
    */
   async populateSessionCache() {
-    if (!this.db) return;
+    if (!this.ready) return;
 
     try {
       const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-
-      const sessions = await new Promise((resolve, reject) => {
-        this.db.all(
-          `SELECT * FROM metrics_sessions
-           WHERE is_active = 1 AND last_seen > ?
-           ORDER BY last_seen DESC`,
-          [fiveMinutesAgo],
-          (err, rows) => {
-            if (err) reject(err);
-            else resolve(rows || []);
-          }
-        );
-      });
-
-      sessions.forEach(session => {
+      const result = await postgresService.query(
+        `SELECT * FROM metrics_sessions
+          WHERE is_active = TRUE AND last_seen > $1
+          ORDER BY last_seen DESC`,
+        [fiveMinutesAgo]
+      );
+      (result.rows || []).forEach((session) => {
+        session.is_active = session.is_active === true;
         this.sessionCache.set(session.session_id, session);
       });
-
-      logger.info(`[MetricsService] Loaded ${sessions.length} active sessions into cache`);
+      logger.info(`[MetricsService] Loaded ${result.rows.length} active sessions into cache`);
     } catch (error) {
-      logger.error('[MetricsService] Failed to populate session cache:', error);
+      logger.error('[MetricsService] Failed to populate session cache:', error.message);
     }
   }
 
@@ -244,13 +210,14 @@ class MetricsService {
    * Persist stream start to database (queued)
    */
   persistStreamStart(streamInfo) {
-    if (!this.db) return;
+    if (!this.ready) return;
 
     this.queueWrite(
       `INSERT INTO metrics_streams (
         stream_key, channel_name, channel_id, source_name, source_id,
         stream_type, user_name, user_id, client_ip, start_time
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (stream_key) DO NOTHING`,
       [
         streamInfo.streamKey,
         streamInfo.channel,
@@ -287,12 +254,12 @@ class MetricsService {
    * Persist stream end to database (queued)
    */
   persistStreamEnd(streamKey, endTime, durationSeconds, bytesTransferred) {
-    if (!this.db) return;
+    if (!this.ready) return;
 
     this.queueWrite(
       `UPDATE metrics_streams
-       SET end_time = ?, duration_seconds = ?, bytes_transferred = ?
-       WHERE stream_key = ?`,
+       SET end_time = $1, duration_seconds = $2, bytes_transferred = $3
+       WHERE stream_key = $4`,
       [endTime, durationSeconds, bytesTransferred, streamKey]
     );
   }
@@ -357,32 +324,27 @@ class MetricsService {
    * Track or update a user session (uses cache + queue)
    */
   trackSession(sessionId, userId, userName, page, ip, userAgent) {
-    if (!this.db) {
-      logger.warn('[MetricsService] Database not initialized, skipping session tracking');
+    if (!this.ready) {
+      logger.warn('[MetricsService] Not initialized, skipping session tracking');
       return;
     }
 
     const now = Date.now();
-
-    // Check cache first
     const cached = this.sessionCache.get(sessionId);
 
     if (cached) {
-      // Update cache
       cached.last_seen = now;
       cached.current_page = page;
-      cached.is_active = 1;
+      cached.is_active = true;
 
-      // Queue database update
       logger.debug(`[MetricsService] Updating session (cached): ${sessionId}, page: ${page}`);
       this.queueWrite(
         `UPDATE metrics_sessions
-         SET last_seen = ?, current_page = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
-         WHERE session_id = ?`,
+         SET last_seen = $1, current_page = $2, is_active = TRUE, updated_at = CURRENT_TIMESTAMP
+         WHERE session_id = $3`,
         [now, page, sessionId]
       );
     } else {
-      // New session - add to cache and queue insert
       logger.info(`[MetricsService] Creating new session: ${sessionId}, user: ${userName}, page: ${page}`);
 
       const sessionData = {
@@ -394,16 +356,16 @@ class MetricsService {
         user_agent: userAgent,
         first_seen: now,
         last_seen: now,
-        is_active: 1
+        is_active: true
       };
 
       this.sessionCache.set(sessionId, sessionData);
 
       this.queueWrite(
-        `INSERT OR REPLACE INTO metrics_sessions (
+        `INSERT INTO metrics_sessions (
           session_id, user_id, user_name, current_page,
           client_ip, user_agent, first_seen, last_seen
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [sessionId, userId, userName, page, ip, userAgent, now, now]
       );
     }
@@ -413,24 +375,27 @@ class MetricsService {
    * Track a page view (queued)
    */
   trackPageView(sessionId, userId, page) {
-    if (!this.db) return;
+    if (!this.ready) return;
 
     const now = Date.now();
 
     // Record page view
     this.queueWrite(
       `INSERT INTO metrics_page_views (session_id, user_id, page, timestamp)
-       VALUES (?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4)`,
       [sessionId, userId, page, now]
     );
 
-    // Update last page view duration
+    // Close out the previous page's duration. Postgres can't reference
+    // the target table in a subquery's UPDATE the way the old sqlite
+    // form did against a correlated id, so we scope by a sub-select
+    // returning the most recent open page-view for this session.
     this.queueWrite(
       `UPDATE metrics_page_views
-       SET duration_seconds = (? - timestamp) / 1000
+       SET duration_seconds = ($1 - timestamp) / 1000
        WHERE id = (
          SELECT id FROM metrics_page_views
-         WHERE session_id = ? AND page != ? AND duration_seconds IS NULL
+         WHERE session_id = $2 AND page <> $3 AND duration_seconds IS NULL
          ORDER BY timestamp DESC
          LIMIT 1
        )`,
@@ -444,9 +409,10 @@ class MetricsService {
   getActiveSessions() {
     const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
 
-    // Return from cache - much faster than DB query
+    // Return from cache - much faster than DB query. is_active is a
+    // boolean now (Postgres); tolerate a legacy 1 just in case.
     const activeSessions = Array.from(this.sessionCache.values())
-      .filter(session => session.is_active === 1 && session.last_seen > fiveMinutesAgo)
+      .filter(session => (session.is_active === true || session.is_active === 1) && session.last_seen > fiveMinutesAgo)
       .sort((a, b) => b.last_seen - a.last_seen);
 
     logger.debug(`[MetricsService] Retrieved ${activeSessions.length} active sessions from cache`);
@@ -458,22 +424,22 @@ class MetricsService {
    * Mark inactive sessions as inactive (updates cache + queues DB write)
    */
   markInactiveSessions() {
-    if (!this.db) return;
+    if (!this.ready) return;
 
     const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
 
     // Update cache first
-    for (const [sessionId, session] of this.sessionCache.entries()) {
+    for (const [, session] of this.sessionCache.entries()) {
       if (session.last_seen < fiveMinutesAgo) {
-        session.is_active = 0;
+        session.is_active = false;
       }
     }
 
     // Queue database update
     this.queueWrite(
       `UPDATE metrics_sessions
-       SET is_active = 0
-       WHERE last_seen < ?`,
+       SET is_active = FALSE
+       WHERE last_seen < $1`,
       [fiveMinutesAgo]
     );
   }
@@ -675,22 +641,9 @@ class MetricsService {
   async shutdown() {
     logger.info('[MetricsService] Shutting down gracefully...');
 
-    // Flush any remaining writes
+    // Flush any remaining writes. The Postgres pool itself is owned by
+    // postgresService, so there's no connection to close here.
     await this.flushWriteQueue();
-
-    // Close database connection
-    if (this.db) {
-      await new Promise((resolve) => {
-        this.db.close((err) => {
-          if (err) {
-            logger.error('[MetricsService] Error closing database:', err);
-          } else {
-            logger.info('[MetricsService] Database connection closed');
-          }
-          resolve();
-        });
-      });
-    }
 
     logger.info('[MetricsService] Shutdown complete');
   }
@@ -731,13 +684,13 @@ class MetricsService {
     });
 
     // Persist to database (queued for batching)
-    if (this.db) {
+    if (this.ready) {
       // Bandwidth metrics
       this.queueWrite(
         `INSERT INTO metrics_bandwidth (
           timestamp, upload_bps, download_bps, upload_mbps, download_mbps,
           total_sent_bytes, total_received_bytes, active_streams
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           timestamp,
           bandwidthRate.uploadBps,
@@ -759,7 +712,7 @@ class MetricsService {
         `INSERT INTO metrics_requests (
           timestamp, total_requests, successful_requests, failed_requests,
           requests_per_minute, error_rate
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6)`,
         [
           timestamp,
           this.requestStats.total,
@@ -775,7 +728,7 @@ class MetricsService {
         `INSERT INTO metrics_system (
           timestamp, memory_used_mb, memory_total_mb, memory_percent,
           heap_used_mb, heap_total_mb, uptime_seconds, nodejs_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           timestamp,
           systemMetrics.memory.rssMB,
@@ -819,43 +772,21 @@ class MetricsService {
    * Keeps last 30 days of data
    */
   async cleanupOldMetrics() {
-    if (!this.db) return;
+    if (!this.ready) return;
 
     const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
 
     try {
-      // Wrap all db.run calls in Promises
-      await new Promise((resolve, reject) => {
-        this.db.run('DELETE FROM metrics_bandwidth WHERE timestamp < ?', [thirtyDaysAgo], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-
-      await new Promise((resolve, reject) => {
-        this.db.run('DELETE FROM metrics_requests WHERE timestamp < ?', [thirtyDaysAgo], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-
-      await new Promise((resolve, reject) => {
-        this.db.run('DELETE FROM metrics_system WHERE timestamp < ?', [thirtyDaysAgo], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-
-      await new Promise((resolve, reject) => {
-        this.db.run('DELETE FROM metrics_streams WHERE start_time < ? AND end_time IS NOT NULL', [thirtyDaysAgo], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-
+      await postgresService.query('DELETE FROM metrics_bandwidth WHERE timestamp < $1', [thirtyDaysAgo]);
+      await postgresService.query('DELETE FROM metrics_requests WHERE timestamp < $1', [thirtyDaysAgo]);
+      await postgresService.query('DELETE FROM metrics_system WHERE timestamp < $1', [thirtyDaysAgo]);
+      await postgresService.query(
+        'DELETE FROM metrics_streams WHERE start_time < $1 AND end_time IS NOT NULL',
+        [thirtyDaysAgo]
+      );
       logger.info('[MetricsService] Cleaned up metrics older than 30 days');
     } catch (error) {
-      logger.error('[MetricsService] Failed to cleanup old metrics:', error);
+      logger.error('[MetricsService] Failed to cleanup old metrics:', error.message);
     }
   }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import logger from '../utils/logger';
+import { getToken, refreshAuthToken } from '../utils/authToken';
 
 /**
  * Custom hook for tracking page views
@@ -30,35 +31,40 @@ export function usePageTracking(pageName) {
       console.log('[usePageTracking] Session ID:', sessionIdRef.current);
     }
 
-    // Track page view
+    // Track page view. Reads the freshest token from storage (not the
+    // closured `token`) so a heartbeat after a refresh elsewhere picks
+    // up the new token. On 401, attempts one silent refresh + retry so
+    // the weekly token expiry doesn't spew 401s from the 2-min
+    // heartbeat. This is background telemetry — a refresh failure just
+    // stops quietly; the user-facing redirect is owned by apiClient/SSE.
+    const baseUrl = window.location.hostname === 'localhost' ? '' : window.location.origin;
+    const postPageView = async (authToken) =>
+      fetch(`${baseUrl}/api/metrics/page-view`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ sessionId: sessionIdRef.current, page: pageName })
+      });
+
     const trackPageView = async () => {
       try {
-        const baseUrl = window.location.hostname === 'localhost'
-          ? ''
-          : window.location.origin;
+        let authToken = getToken() || token;
+        let response = await postPageView(authToken);
 
-        console.log('[usePageTracking] Tracking page view:', pageName);
-
-        const response = await fetch(`${baseUrl}/api/metrics/page-view`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            sessionId: sessionIdRef.current,
-            page: pageName
-          })
-        });
+        if (response.status === 401) {
+          const refreshed = await refreshAuthToken();
+          if (refreshed) {
+            response = await postPageView(refreshed);
+          }
+        }
 
         if (!response.ok) {
-          const errorText = await response.text();
-          console.error('[usePageTracking] Failed to track page view:', response.status, errorText);
-        } else {
-          console.log('[usePageTracking] Successfully tracked page view:', pageName);
+          console.warn('[usePageTracking] page view not tracked:', response.status);
         }
       } catch (error) {
-        console.error('[usePageTracking] Failed to track page view:', error);
+        console.warn('[usePageTracking] page view tracking error:', error?.message || error);
       }
     };
 

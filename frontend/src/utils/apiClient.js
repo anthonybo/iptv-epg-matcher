@@ -1,5 +1,6 @@
 import axios from 'axios';
 import SessionManager from './sessionManager';
+import { refreshAuthToken, redirectToLogin } from './authToken';
 
 /**
  * Configured axios instance with interceptors for handling session errors
@@ -44,14 +45,34 @@ apiClient.interceptors.response.use(
   (response) => {
     return response;
   },
-  (error) => {
-    // Check if this is an authentication error (401)
+  async (error) => {
+    // Authentication error (401): try a SILENT token refresh and
+    // retry the original request once before giving up. This turns
+    // the weekly token expiry from "kicked to the login screen
+    // mid-session" into a transparent reconnect. Only when the
+    // refresh itself fails (token expired beyond the server grace
+    // window, bad signature, user gone) do we clear creds + redirect.
+    const original = error.config;
+    const isRefreshCall = original && String(original.url || '').includes('/auth/refresh');
+
+    if (error.response && error.response.status === 401 && original && !original._retried && !isRefreshCall) {
+      original._retried = true;
+      const newToken = await refreshAuthToken();
+      if (newToken) {
+        original.headers = original.headers || {};
+        original.headers.Authorization = `Bearer ${newToken}`;
+        return apiClient(original); // replay with the fresh token
+      }
+      // Refresh failed → session is genuinely dead.
+      console.warn('Token refresh failed; redirecting to login');
+      redirectToLogin();
+      return Promise.reject(new Error('Your session has expired. Please log in again.'));
+    }
+
     if (error.response && error.response.status === 401) {
-      console.warn('Authentication expired, clearing auth token and redirecting to login');
-      localStorage.removeItem('auth_token');
-      localStorage.removeItem('user');
-      // Redirect to login page
-      window.location.href = '/login';
+      // A 401 on the refresh call itself, or an already-retried
+      // request → terminal.
+      redirectToLogin();
       return Promise.reject(new Error('Your session has expired. Please log in again.'));
     }
 

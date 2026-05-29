@@ -150,6 +150,47 @@ router.post('/login', async (req, res) => {
 });
 
 /**
+ * POST /api/auth/refresh
+ * Silent token refresh. Exchanges a current-or-recently-expired token
+ * for a fresh full-lifetime one so a client whose 7-day token lapsed
+ * mid-session isn't kicked to the login screen. Deliberately does NOT
+ * use authMiddleware (that would 401 an expired token before we get a
+ * chance to refresh it) — authService.refreshToken does its own
+ * signature + grace-window validation. The token can arrive in the
+ * Authorization header or the request body (EventSource clients that
+ * can't set headers send it in the body).
+ */
+router.post('/refresh', async (req, res) => {
+  try {
+    const headerToken = authService.extractTokenFromHeader(req.headers.authorization);
+    const oldToken = headerToken || req.body?.token;
+    if (!oldToken) {
+      return res.status(401).json({ error: 'Authentication required', message: 'No token to refresh' });
+    }
+
+    const { token, user } = authService.refreshToken(oldToken);
+
+    // Critical: authMiddleware validates every request's token against
+    // the user_sessions table, so the new token is dead-on-arrival
+    // until we register it. Migrate the user's existing session row
+    // (matched by the old token, expiry ignored) onto the new token.
+    // This MUST succeed for the refresh to be useful — surface a
+    // failure as a 500 rather than handing back an unusable token.
+    await userService.updateSessionToken(user.id, oldToken, token);
+
+    logger.info(`Token refreshed for user ${user.username} (ID: ${user.id})`);
+    return res.json({ success: true, token, user });
+  } catch (error) {
+    // Expired-beyond-grace / bad signature → the client must re-login.
+    logger.info(`Token refresh rejected: ${error.message}`);
+    return res.status(401).json({
+      error: 'Refresh failed',
+      message: 'Session could not be refreshed. Please log in again.'
+    });
+  }
+});
+
+/**
  * POST /api/auth/logout
  * Logout user and invalidate session
  */

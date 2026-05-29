@@ -89,6 +89,58 @@ function verifyToken(token) {
 }
 
 /**
+ * Refresh an access token. Accepts a token that may have JUST expired
+ * (within REFRESH_GRACE_SECONDS past `exp`) so the client can silently
+ * obtain a fresh one without forcing a full re-login on the weekly
+ * expiry. The signature must still verify and the user identity must
+ * be intact; we re-issue a brand-new full-lifetime token.
+ *
+ * Security note: this is a sliding-session model (no separate refresh
+ * token). The grace window bounds how long a leaked-but-expired token
+ * remains refreshable. A token expired beyond the grace window — or
+ * with a bad signature — is rejected, and the client falls back to
+ * login. For a stricter posture, swap to dedicated refresh tokens.
+ *
+ * @param {string} oldToken A current or recently-expired JWT
+ * @returns {{ token: string, user: { id, username, email } }}
+ * @throws if the token signature is invalid or it's expired past grace
+ */
+const REFRESH_GRACE_SECONDS = 14 * 24 * 60 * 60; // 14 days past expiry
+
+function refreshToken(oldToken) {
+  if (!oldToken) throw new Error('No token provided');
+
+  // ignoreExpiration so a just-expired token still verifies by
+  // signature; we enforce our own bounded grace window below.
+  let decoded;
+  try {
+    decoded = jwt.verify(oldToken, JWT_SECRET, { ignoreExpiration: true });
+  } catch (error) {
+    // Bad signature / malformed — never refreshable.
+    throw new Error('Invalid token');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (decoded.exp && now > decoded.exp + REFRESH_GRACE_SECONDS) {
+    throw new Error('Token expired beyond refresh window');
+  }
+  if (!decoded.userId) {
+    throw new Error('Token missing user identity');
+  }
+
+  // Re-issue with the same identity. generateToken reads {id,username,email}.
+  const token = generateToken({
+    id: decoded.userId,
+    username: decoded.username,
+    email: decoded.email
+  });
+  return {
+    token,
+    user: { id: decoded.userId, username: decoded.username, email: decoded.email }
+  };
+}
+
+/**
  * Extract token from Authorization header
  * @param {string} authHeader Authorization header value
  * @returns {string|null} Token or null if not found
@@ -254,6 +306,7 @@ module.exports = {
   comparePassword,
   generateToken,
   verifyToken,
+  refreshToken,
   extractTokenFromHeader,
   calculateTokenExpiration,
   validatePassword,

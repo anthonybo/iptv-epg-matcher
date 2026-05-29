@@ -6,20 +6,15 @@
 
 const logger = require('../utils/logger');
 
-// Feature flags from environment
-const USE_POSTGRES = process.env.USE_POSTGRES === 'true';
+// Postgres-only. The legacy sqlite fallback (iptvDatabaseService) has
+// been removed — the entire app runs on Postgres now, so there's no
+// runtime path that loads sqlite. USE_POSTGRES is kept as a constant
+// (true) because the compatibility branches below still read it; the
+// sqlite `else` branches are dead and never execute.
+const USE_POSTGRES = true;
+logger.info('🐘 Using PostgreSQL for IPTV data');
 
-// Log which database we're using
-if (USE_POSTGRES) {
-    logger.info('🐘 Using PostgreSQL for IPTV data');
-} else {
-    logger.info('📦 Using SQLite for IPTV data');
-}
-
-// Load the appropriate database service
-const db = USE_POSTGRES
-    ? require('./postgresService')
-    : require('./iptvDatabaseService');
+const db = require('./postgresService');
 
 // Export unified interface
 // This allows all existing code to work without changes

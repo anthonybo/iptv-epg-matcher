@@ -239,41 +239,60 @@ router.get('/player_api.php', async (req, res) => {
       return res.json({ epg_listings: [] });
     }
 
-    // Get EPG data from the EPG database
-    const path = require('path');
-    const epgDbPath = path.join(__dirname, '../data/epg.db');
-    const sqlite3 = require('sqlite3').verbose();
-    const epgDb = new sqlite3.Database(epgDbPath);
-
+    // EPG data now comes from Postgres (epg_programs), not the legacy
+    // sqlite epg.db. start_time/stop_time are real timestamps in PG;
+    // we format them back to the XMLTV string shape (YYYYMMDDHHMMSS)
+    // the downstream formatter already expects, so nothing below
+    // changes. NOW() filter replaces the old substr(stop,...) string
+    // comparison.
     const epgChannelIds = channels.map(ch => ch.epg_channel_id).filter(Boolean);
 
     if (epgChannelIds.length === 0) {
-      epgDb.close();
       return res.json({ epg_listings: [] });
     }
 
     const programLimit = limit ? parseInt(limit) : 100;
-    const placeholders = epgChannelIds.map(() => '?').join(',');
 
-    const programs = await new Promise((resolve, reject) => {
-      epgDb.all(`
-        SELECT channel_id, title, start, stop, description
-        FROM programs
-        WHERE channel_id IN (${placeholders})
-        AND substr(stop, 1, 14) >= strftime('%Y%m%d%H%M%S', 'now')
-        ORDER BY channel_id, start
-        LIMIT ?
-      `, [...epgChannelIds, programLimit], (err, rows) => {
-        if (err) {
-          logger.error(`Error fetching EPG data: ${err.message}`);
-          resolve([]);
-        } else {
-          resolve(rows || []);
-        }
-      });
-    });
+    let programs = [];
+    try {
+      // epg_programs is LIST-partitioned by source_id across 100+
+      // partitions. A channel_id-only filter can't prune them, so the
+      // planner fans out across every partition — cheap when warm but
+      // a multi-second cold-start (it touches all partitions' index
+      // pages). Resolve the channels' source_id(s) first so we can add
+      // a source_id predicate that prunes the scan to the one or few
+      // partitions that actually hold these channels' programs.
+      const srcRes = await postgresService.query(
+        `SELECT DISTINCT source_id FROM epg_channels WHERE id = ANY($1::text[])`,
+        [epgChannelIds]
+      );
+      const sourceIds = srcRes.rows.map(r => r.source_id).filter(Boolean);
 
-    epgDb.close();
+      const params = [epgChannelIds, programLimit];
+      let sourceClause = '';
+      if (sourceIds.length > 0) {
+        params.push(sourceIds);
+        sourceClause = `AND source_id = ANY($${params.length}::text[])`;
+      }
+
+      const result = await postgresService.query(`
+        SELECT channel_id,
+               title,
+               to_char(start_time, 'YYYYMMDDHH24MISS') AS start,
+               to_char(stop_time,  'YYYYMMDDHH24MISS') AS stop,
+               description
+          FROM epg_programs
+         WHERE channel_id = ANY($1::text[])
+           ${sourceClause}
+           AND stop_time >= NOW()
+         ORDER BY channel_id, start_time
+         LIMIT $2
+      `, params);
+      programs = result.rows || [];
+    } catch (err) {
+      logger.error(`Error fetching EPG data from Postgres: ${err.message}`);
+      programs = [];
+    }
 
     // Format EPG data for XTREAM API
     const epgListings = {};

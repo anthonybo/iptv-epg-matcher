@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { getToken, tokenNeedsRefresh, refreshAuthToken, redirectToLogin } from '../../utils/authToken';
 
 /**
  * BreakingModal — drawer that surfaces real-time real-world events
@@ -52,12 +53,17 @@ const BreakingModal = ({
     if (autoFocusRef) autoFocusRef.current = { focus: () => headerRef.current?.focus() };
   }, [autoFocusRef]);
 
-  const fetchEvents = useCallback(({ force = false } = {}) => {
+  // Tracks whether we've already tried a token-refresh + reconnect for
+  // the current fetch cycle, so a genuinely-dead session doesn't loop.
+  const authRetriedRef = useRef(false);
+
+  const fetchEvents = useCallback(async ({ force = false, _isAuthRetry = false } = {}) => {
     // Tear down any in-flight stream before starting a new one.
     if (esRef.current) {
       try { esRef.current.close(); } catch (_) {}
       esRef.current = null;
     }
+    if (!_isAuthRetry) authRetriedRef.current = false;
     if (force) setRefreshing(true);
     else setLoading(true);
     setError(null);
@@ -71,13 +77,24 @@ const BreakingModal = ({
     const t0 = Date.now();
     const tick = setInterval(() => setElapsedSec(Math.floor((Date.now() - t0) / 1000)), 1000);
 
-    // EventSource doesn't accept Authorization headers — fish the JWT
-    // out of storage and ride along as a query param, same way the
-    // VOD stream endpoints carry auth.
-    const token =
-      localStorage.getItem('auth_token') ||
-      sessionStorage.getItem('token') ||
-      localStorage.getItem('token');
+    // EventSource can't set an Authorization header, so the JWT rides
+    // along as a query param. Proactively refresh it first if it's
+    // expired or about to lapse — otherwise the stream opens, the
+    // backend 401s, and the user sees a misleading "Connection lost"
+    // for what is really an expired session. SSE connections are
+    // long-lived, so refresh ahead of a 60s window.
+    if (tokenNeedsRefresh(60)) {
+      const refreshed = await refreshAuthToken();
+      if (!refreshed) {
+        clearInterval(tick);
+        setLoading(false);
+        setRefreshing(false);
+        redirectToLogin();
+        return;
+      }
+    }
+
+    const token = getToken();
     const qs = new URLSearchParams();
     if (force) qs.set('force', '1');
     if (token) qs.set('token', token);
@@ -142,15 +159,37 @@ const BreakingModal = ({
       // OR a transport error (es.readyState === CLOSED). For the
       // transport case we'd see no `data`.
       let msg = 'Connection lost — try Refresh.';
+      let serverErr = false;
       try {
         if (ev?.data) {
           const d = JSON.parse(ev.data);
-          if (d?.error) msg = d.error;
+          if (d?.error) { msg = d.error; serverErr = true; }
         }
       } catch (_) {}
+
+      // A dataless transport error with the token expired is almost
+      // always a 401 (EventSource can't read the response body). Try
+      // a single silent refresh + reconnect before surfacing an error
+      // — this is what made "Connection lost" appear every time the
+      // weekly token lapsed. If refresh fails, the session is truly
+      // dead → login.
+      if (!serverErr && !authRetriedRef.current) {
+        authRetriedRef.current = true;
+        finish();
+        refreshAuthToken().then((newToken) => {
+          if (newToken) {
+            fetchEvents({ force, _isAuthRetry: true });
+          } else {
+            redirectToLogin();
+          }
+        });
+        return;
+      }
+
       setError(msg);
       finish();
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // First load when the drawer opens.
