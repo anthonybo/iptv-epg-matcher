@@ -197,8 +197,69 @@ async function updateAllScores() {
       liveGames = (result.rows || []).filter((r) => r.is_live === true).length;
     }
 
+    // ── Time-window is_live reconciliation ──────────────────────────
+    // The ESPN scoreboard poll above only flips is_live for events
+    // whose event_id matches an ESPN scoreboard entry. Events sourced
+    // from MLB Stats, TheSportsDB, the NHL API, etc. (event_id like
+    // 'mlbstats_…', 'tsdb_…') never match an 'espn_…' id, so their
+    // is_live flag stayed false forever — a real in-progress game
+    // showed as "Scheduled" and the slate's LIVE count read 0 even
+    // mid-game (observed: "Los Angeles Angels at Detroit Tigers",
+    // source mlbstats, in its window but never live).
+    //
+    // Fix: for every event the ESPN poll did NOT authoritatively touch
+    // this cycle, derive is_live from the wall clock — true when NOW()
+    // is inside [event_start, event_end] and the status isn't terminal.
+    // ESPN-matched events are excluded so we never override ESPN's
+    // authority (e.g. extra innings running past the nominal end time,
+    // or a final that ended early). Bounded to a ±1 day window so the
+    // UPDATE only scans events that could plausibly be live now.
+    const matchedIds = (allUpdates || []).map((u) => u.eventId);
+    let windowLive = 0;
+    try {
+      const reconResult = await postgresService.query(`
+        UPDATE live_events le
+        SET is_live = (
+              NOW() >= le.event_start
+              AND NOW() <= le.event_end
+              AND COALESCE(le.status_type, '') NOT IN
+                  ('STATUS_FINAL','STATUS_POSTPONED','STATUS_CANCELED','STATUS_SUSPENDED')
+              AND COALESCE(le.game_status, '') NOT IN
+                  ('Final','Postponed','Canceled','Cancelled','Suspended','Completed')
+              -- Don't window-mark a row live if a canonical sibling
+              -- (the same game ingested from another source, e.g. an
+              -- ESPN row next to a stale MLB-Stats row) already knows
+              -- the game is over. Without this, a game ESPN has moved
+              -- to FINAL still shows "live" via its sibling whose
+              -- status was never updated past "Scheduled".
+              AND NOT EXISTS (
+                SELECT 1 FROM live_events sib
+                WHERE le.canonical_id IS NOT NULL
+                  AND sib.canonical_id = le.canonical_id
+                  AND sib.event_id <> le.event_id
+                  AND (
+                    COALESCE(sib.status_type, '') IN
+                      ('STATUS_FINAL','STATUS_POSTPONED','STATUS_CANCELED','STATUS_SUSPENDED')
+                    OR COALESCE(sib.game_status, '') IN
+                      ('Final','Postponed','Canceled','Cancelled','Suspended','Completed')
+                  )
+              )
+            )
+        WHERE le.event_start <= NOW() + INTERVAL '1 day'
+          AND le.event_end   >= NOW() - INTERVAL '1 day'
+          AND NOT (le.event_id = ANY($1::text[]))
+        RETURNING le.is_live
+      `, [matchedIds]);
+      windowLive = (reconResult.rows || []).filter((r) => r.is_live === true).length;
+      liveGames += windowLive;
+    } catch (reconErr) {
+      // Reconciliation is best-effort; a failure here must not abort
+      // the score cycle. Log and continue with the ESPN-only counts.
+      logger.warn(`[Scores] window is_live reconciliation failed: ${reconErr.message}`);
+    }
+
     const duration = Date.now() - startTime;
-    logger.info(`Scores updated: ${totalUpdated} events, ${liveGames} live games (${duration}ms)`);
+    logger.info(`Scores updated: ${totalUpdated} events, ${liveGames} live games (${windowLive} via time-window) (${duration}ms)`);
 
     // Adaptive polling: adjust interval based on whether there are live games
     if (liveGames > 0) {
@@ -267,25 +328,35 @@ async function getLiveScores() {
     // Saturday morning, but the 4-day window has the tournament
     // showing as "live" the whole time. Top-bar predicate was
     // tightened in the same change to match this strict version.
+    // Dedup by canonical_id: the same game often exists as both an
+    // ESPN row (real scores + status) and an MLB-Stats/TheSportsDB row
+    // (no scores, stale status). Both can carry is_live=TRUE, which
+    // showed the game twice in the ticker — once with a score and once
+    // with "- - -". DISTINCT ON keeps the single best row per canonical
+    // game: real (non-Scheduled) status first, then most scores
+    // present, then freshest update. Rows with NULL canonical_id fall
+    // back to event_id so they're never merged.
     const result = await postgresService.query(`
       SELECT
-        event_id,
-        event_name,
-        sport_type,
-        league_name,
-        home_team,
-        away_team,
-        home_score,
-        away_score,
-        game_status,
-        game_clock,
-        is_live,
-        event_start,
-        scores_updated_at
-      FROM live_events
-      WHERE is_live = TRUE
-        AND event_end >= NOW() - INTERVAL '30 minutes'
-        AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
+        event_id, event_name, sport_type, league_name,
+        home_team, away_team, home_score, away_score,
+        game_status, game_clock, is_live, event_start, scores_updated_at
+      FROM (
+        SELECT DISTINCT ON (COALESCE(canonical_id, event_id))
+          event_id, event_name, sport_type, league_name,
+          home_team, away_team, home_score, away_score,
+          game_status, game_clock, is_live, event_start,
+          scores_updated_at, status_type
+        FROM live_events
+        WHERE is_live = TRUE
+          AND event_end >= NOW() - INTERVAL '30 minutes'
+          AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
+        ORDER BY
+          COALESCE(canonical_id, event_id),
+          (game_status IS NOT NULL AND game_status NOT IN ('Scheduled', '')) DESC,
+          (home_score IS NOT NULL OR away_score IS NOT NULL) DESC,
+          scores_updated_at DESC NULLS LAST
+      ) deduped
       ORDER BY sport_type, league_name, event_start
     `);
 

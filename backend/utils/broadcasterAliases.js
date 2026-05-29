@@ -469,6 +469,39 @@ function expandBroadcaster(name) {
   for (const aliases of Object.values(BROADCASTER_ALIASES)) {
     if (aliases.some((a) => String(a).toUpperCase() === upper)) return aliases;
   }
+
+  // 4. beIN Sports localized-channel decomposition.
+  //    ESPN sends verbose, country-suffixed strings for beIN's
+  //    numbered feeds — "beIN Sports HD 1 France", "BeIn Sports 2
+  //    France", "beIN SPORTS 1 USA", "beIN Sports Max 4 France", etc.
+  //    Our IPTV channels are named "|FR| beIN Sports 1 ᴴᴰ",
+  //    "|FR| BEIN SPORT 1 ˢᴰ", "|FR| BeIN Sport Max 6 ᴴᴰ" — the
+  //    country is a |XX| prefix and the quality tag is a unicode
+  //    superscript, so a verbatim ILIKE of the ESPN string never
+  //    matches and the game falls through to a fruitless event-name
+  //    search (observed: a live French handball match on
+  //    "beIN Sports HD 1 France" found 0 channels despite 5k+ beIN
+  //    rows in the DB).
+  //
+  //    Decompose into brand+number substrings that DO match: we emit
+  //    both the "Sports" and singular "Sport" spellings (both occur
+  //    in provider names) so the OR-of-ILIKE candidate filter pulls
+  //    the right feed into the pool; the relevance scorer + EPG
+  //    confirmation rank the correct country variant to the top.
+  if (/\bbe\s?in\b/i.test(trimmed)) {
+    const numMatch = trimmed.match(/\b(\d{1,2})\b/);
+    const isMax = /\bmax\b/i.test(trimmed);
+    if (numMatch) {
+      const n = numMatch[1];
+      if (isMax) {
+        return [`beIN Sport Max ${n}`, `beIN Sports Max ${n}`, 'BEIN SPORT MAX'];
+      }
+      return [`beIN Sports ${n}`, `beIN Sport ${n}`];
+    }
+    // beIN with no channel number — fall back to the brand family.
+    return ['BEIN SPORTS', 'BEIN SPORT', 'BEIN'];
+  }
+
   return [trimmed];
 }
 

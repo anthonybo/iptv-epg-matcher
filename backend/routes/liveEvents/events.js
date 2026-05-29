@@ -7,9 +7,32 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../../config/logger');
 const liveEventsService = require('../../services/liveEventsService');
+const liveScoresService = require('../../services/liveScoresService');
 const postgresService = require('../../services/postgresService');
 const iptvDatabaseService = require('../../services/iptvDatabase');
 const { expandBroadcaster, hasAlias, BROADCASTER_ALIASES } = require('../../utils/broadcasterAliases');
+
+/**
+ * POST /api/live-events/refresh-scores
+ * Force an immediate scores + is_live update instead of waiting for
+ * the background poll (every 30-120s). Powers the slate's REFRESH
+ * button — previously that button only re-queried the DB, so a game
+ * that had just gone live wouldn't surface until the next poll.
+ * Returns the same shape as updateAllScores so the client can show
+ * how many games are live right now.
+ */
+router.post('/refresh-scores', async (req, res) => {
+  try {
+    if (!req.user?.id) {
+      return res.status(401).json({ success: false, error: 'Authentication required' });
+    }
+    const result = await liveScoresService.updateAllScores();
+    return res.json({ success: result.success !== false, ...result });
+  } catch (error) {
+    logger.error('Force scores refresh failed:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 /**
  * POST /api/live-events/refresh
@@ -232,25 +255,50 @@ router.get('/today', async (req, res) => {
     // local-midnight and local-end-of-day counts as "today". The DB
     // stores TIMESTAMP without time zone (UTC by convention) so we
     // compare against ISO strings in UTC.
+    // Dedup by canonical_id: the same game is often ingested from
+    // multiple sources (e.g. an ESPN row carrying broadcasts + live
+    // status AND an MLB-Stats row with neither), and both share a
+    // canonical_id. Without collapsing them the slate shows the game
+    // twice — once "LIVE / no broadcaster data" (the bare source) and
+    // once with real status + channels. DISTINCT ON keeps the single
+    // best row per canonical game, ranked: live first, then most
+    // broadcasts, then a real (non-Scheduled) status, then freshest
+    // scores. Rows with a NULL canonical_id fall back to their
+    // event_id so they're never merged with anything else.
     const result = await postgresService.query(`
       SELECT
-        event_id,
-        event_name,
-        sport_type,
-        league_name,
-        home_team,
-        away_team,
-        event_start,
-        event_end,
-        home_score,
-        away_score,
-        game_status,
-        game_clock,
-        status_type,
-        is_live,
-        broadcasts
-      FROM live_events
-      WHERE event_start >= $1 AND event_start <= $2
+        event_id, event_name, sport_type, league_name,
+        home_team, away_team, event_start, event_end,
+        home_score, away_score, game_status, game_clock,
+        status_type, is_live, broadcasts
+      FROM (
+        SELECT DISTINCT ON (COALESCE(canonical_id, event_id))
+          event_id, event_name, sport_type, league_name,
+          home_team, away_team, event_start, event_end,
+          home_score, away_score, game_status, game_clock,
+          status_type, is_live, broadcasts, scores_updated_at
+        FROM live_events
+        WHERE (event_start >= $1 AND event_start <= $2)
+           -- Also include anything currently live, even if it started
+           -- on a prior day. Multi-day events (golf, tennis majors,
+           -- F1 weekends) and games that began just before the local
+           -- midnight boundary would otherwise be missing from the
+           -- slate while still showing in the live ticker — the two
+           -- views disagreed on what's live. Same anti-stale guard the
+           -- ticker uses so a forgotten is_live can't leak a finished
+           -- game in here.
+           OR (
+             is_live = TRUE
+             AND event_end >= NOW() - INTERVAL '30 minutes'
+             AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
+           )
+        ORDER BY
+          COALESCE(canonical_id, event_id),
+          is_live DESC,
+          COALESCE(array_length(broadcasts, 1), 0) DESC,
+          (game_status IS NOT NULL AND game_status NOT IN ('Scheduled', '')) DESC,
+          scores_updated_at DESC NULLS LAST
+      ) deduped
       ORDER BY is_live DESC, event_start ASC
     `, [start.toISOString(), end.toISOString()]);
 

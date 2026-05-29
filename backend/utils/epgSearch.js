@@ -139,7 +139,21 @@ async function findChannelsByEpg({
 
   try {
     const start = Date.now();
-    const result = await postgresService.query(sql, params);
+    // Bound the EPG-first pre-pass. This query joins the large
+    // partitioned epg_programs table with a double title regex
+    // (~* on both team names) and a now-window filter; on a miss it
+    // was observed running 50s before returning nothing, stalling the
+    // whole channel-find behind a pre-pass that didn't even help.
+    // A 6s ceiling keeps it as a fast "is the broadcaster literally
+    // airing this game right now?" probe — if it can't answer quickly
+    // we fall through to the broadcaster/name search (which is the
+    // path that actually finds most games). SET LOCAL scopes the
+    // timeout to this transaction only; on timeout Postgres cancels
+    // the query and we return [] so the caller proceeds.
+    const result = await postgresService.transaction(async (client) => {
+      await client.query(`SET LOCAL statement_timeout = '6s'`);
+      return client.query(sql, params);
+    });
     const took = Date.now() - start;
     const rows = result.rows || [];
     if (rows.length > 0) {

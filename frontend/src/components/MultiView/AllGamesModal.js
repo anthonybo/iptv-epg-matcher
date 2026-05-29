@@ -315,7 +315,12 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
 
   useEffect(() => { ensureFontsLoaded(); }, []);
 
-  const fetchEvents = useCallback(async () => {
+  // `forceScores` (set by the REFRESH button) first triggers an
+  // immediate server-side scores + is_live update, then re-queries.
+  // Without it the button only re-read the same stale DB rows, so a
+  // game that had just gone live (or a non-ESPN-sourced game the
+  // background poll can't flip) would never show as LIVE on demand.
+  const fetchEvents = useCallback(async (forceScores = false) => {
     const token = getToken();
     if (!token) {
       setError('Authentication required');
@@ -324,6 +329,18 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
     setLoading(true);
     setError(null);
     try {
+      if (forceScores) {
+        // Best-effort — if the scores refresh fails we still re-query
+        // so the user at least gets the latest stored data.
+        try {
+          await fetch('/api/live-events/refresh-scores', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        } catch (scoreErr) {
+          console.warn('[AllGamesModal] force scores refresh failed', scoreErr);
+        }
+      }
       const resp = await fetch(`/api/live-events/today?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -639,7 +656,7 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
             <div className="flex-1" />
 
             <button
-              onClick={fetchEvents}
+              onClick={() => fetchEvents(true)}
               disabled={loading}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 transition disabled:opacity-50"
               style={{
