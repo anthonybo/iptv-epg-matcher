@@ -1405,14 +1405,25 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                 let streamUrl = testChannel.stream_url;
                 let ffprobeHeaders = null;
 
-                // Build URL based on source type (matching liveEvents.js logic)
-                if (!streamUrl || testChannel.source_type === 'xtream') {
-                    if (testChannel.source_type === 'xtream' && testChannel.source_url && testChannel.source_username && testChannel.source_password) {
-                        // Extract channel number from channel_id (e.g., "xtream_12345" -> "12345")
-                        const channelNum = testChannel.channel_id.replace(/^xtream_/, '');
-                        const baseUrl = testChannel.source_url.replace(/\/+$/, '');
-                        streamUrl = `${baseUrl}/live/${testChannel.source_username}/${testChannel.source_password}/${channelNum}.ts`;
-                    }
+                // Prefer the stored stream_url — it carries the provider's
+                // real numeric stream_id (e.g. .../53602.ts) and is exactly
+                // what the playback path uses. Only rebuild a URL when it's
+                // missing.
+                //
+                // The previous code rebuilt for EVERY xtream channel from
+                // channel_id, assuming channel_id == "xtream_<streamId>".
+                // But some providers' M3Us give name-based channel_ids
+                // (e.g. "AMC.us", "AMCPlus.us"), so the rebuild produced
+                // .../AMC.us.ts → the provider returned 403 "Stream not
+                // found" and the test reported 0/5 even though every
+                // channel played fine. Using the stored URL fixes that.
+                if (!streamUrl && testChannel.source_type === 'xtream'
+                    && testChannel.source_url && testChannel.source_username && testChannel.source_password) {
+                    // Fallback only: channel_id is expected to be
+                    // "xtream_<streamId>" in this path.
+                    const channelNum = testChannel.channel_id.replace(/^xtream_/, '');
+                    const baseUrl = testChannel.source_url.replace(/\/+$/, '');
+                    streamUrl = `${baseUrl}/live/${testChannel.source_username}/${testChannel.source_password}/${channelNum}.ts`;
                 }
 
                 // Handle Stalker portal - need to get fresh token
@@ -1496,6 +1507,21 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                     '-of', 'json',
                     '-timeout', String(FFPROBE_TIMEOUT * 1000)
                 ];
+
+                // Send the SAME player User-Agent the playback path uses
+                // (routes/stream.js). Many Xtream providers gate `.ts`
+                // requests by UA and reject ffprobe's default "Lavf/…"
+                // with HTTP 403 — which made the test report 0/5 for
+                // sources whose channels actually play fine. Mirroring
+                // the playback UA removes that false negative. Stalker
+                // keeps its existing -headers blob (MAG UA + cookie),
+                // built above, so only set -user_agent for non-stalker.
+                if (testChannel.source_type !== 'stalker') {
+                    ffprobeArgs.push(
+                        '-user_agent',
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36'
+                    );
+                }
 
                 if (ffprobeHeaders) {
                     ffprobeArgs.push('-headers', ffprobeHeaders);
