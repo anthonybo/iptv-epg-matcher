@@ -13,7 +13,6 @@ import LocationSelector from './LocationSelector';
 
 const AuthWrapper = ({ children }) => {
   const { isAuthenticated, loading, user } = useAuth();
-  const [showAuth, setShowAuth] = useState(true); // Show auth screen by default
   const [authMode, setAuthMode] = useState('login'); // 'login' or 'register'
   const [sessionId, setSessionId] = useState(null);
 
@@ -39,17 +38,19 @@ const AuthWrapper = ({ children }) => {
     );
   }
 
-  // If authenticated or user skipped auth, show the app
-  if (isAuthenticated || !showAuth) {
+  // Authentication is required — every core route is requireAuth-gated,
+  // so a guest with no token gets 401'd out of every real feature.
+  // Show the app only when authenticated; otherwise the login/register
+  // screens. (The old "continue without an account" path rendered the
+  // shell but bounced to login on the first protected API call.)
+  if (isAuthenticated) {
     return children;
   }
 
-  // Show authentication screens
   if (authMode === 'login') {
     return (
       <Login
         onSwitchToRegister={() => setAuthMode('register')}
-        onSkip={() => setShowAuth(false)}
         sessionId={sessionId}
       />
     );
@@ -58,7 +59,6 @@ const AuthWrapper = ({ children }) => {
   return (
     <Register
       onSwitchToLogin={() => setAuthMode('login')}
-      onSkip={() => setShowAuth(false)}
       sessionId={sessionId}
     />
   );
