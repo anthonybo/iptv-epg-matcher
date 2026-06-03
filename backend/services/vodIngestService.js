@@ -4,6 +4,7 @@ const xtreamVod = require('./xtreamVodService');
 const stalkerVod = require('./stalkerVodService');
 const { from: copyFrom } = require('pg-copy-streams');
 const { tabEscape, streamRowsToCopy, dedupeBy } = require('../utils/pgCopyHelpers');
+const vodCatalog = require('./vodCatalogService');
 
 /**
  * vodIngestService — orchestrator for the eager-list phase of VOD
@@ -360,7 +361,19 @@ async function ingestVodForSource(source, opts = {}) {
   const tmdbEnrichmentService = require('./tmdbEnrichmentService');
   const releaseEnrichmentPause = tmdbEnrichmentService.pause();
   try {
-    return await _ingestVodForSourceInner(source, opts, wantMovies, wantSeries);
+    const summary = await _ingestVodForSourceInner(source, opts, wantMovies, wantSeries);
+    // The raw per-source rows just changed, so the precomputed browse
+    // catalog (vod_catalog_*) is now stale. Schedule a debounced rebuild
+    // — during a bulk refresh this coalesces into one rebuild after the
+    // last source settles, instead of one per source.
+    try {
+      const uid = source.user_id;
+      if (uid) {
+        if (wantMovies) vodCatalog.scheduleRefresh(uid, 'movie');
+        if (wantSeries) vodCatalog.scheduleRefresh(uid, 'series');
+      }
+    } catch (_) { /* never let catalog scheduling fail an ingest */ }
+    return summary;
   } finally {
     releaseEnrichmentPause();
     _releaseVodSlot();

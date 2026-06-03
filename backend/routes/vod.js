@@ -5,8 +5,40 @@ const postgresService = require('../services/postgresService');
 const xtreamVod = require('../services/xtreamVodService');
 const enrichmentService = require('../services/tmdbEnrichmentService');
 const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
+const aiLlmCache = require('../services/aiLlmCache');
+const vodCatalog = require('../services/vodCatalogService');
 
 router.use(authMiddleware);
+
+// The /genres aggregate (dedup canonical ids across the user's sources, then
+// unnest + group genres) is heavy — tens of seconds on a large catalog — and
+// genres change only as enrichment slowly adds titles. So we serve it from a
+// persistent cache and recompute it in the BACKGROUND on a dedicated
+// no-statement-timeout connection, never blocking (or timing out) the request.
+const GENRES_CACHE_TTL_S = 6 * 60 * 60;
+const genresInFlight = new Set();
+
+async function computeGenresInBackground(kind, userId, sql) {
+  const key = `${kind}:${userId}`;
+  if (genresInFlight.has(key)) return; // already computing
+  genresInFlight.add(key);
+  let client;
+  try {
+    client = await postgresService.pool.connect();
+    await client.query('BEGIN');
+    await client.query('SET LOCAL statement_timeout = 0'); // this aggregate legitimately takes a while
+    const r = await client.query(sql, [userId]);
+    await client.query('COMMIT');
+    await aiLlmCache.set('vod_genres', key, r.rows, GENRES_CACHE_TTL_S);
+    logger.info(`[VOD genres] cached ${r.rows.length} genres for ${key}`);
+  } catch (e) {
+    try { if (client) await client.query('ROLLBACK'); } catch (_) {}
+    logger.warn(`[VOD genres] background compute failed for ${key}: ${e.message}`);
+  } finally {
+    if (client) client.release();
+    genresInFlight.delete(key);
+  }
+}
 
 /**
  * VOD browse + detail routes.
@@ -73,29 +105,16 @@ router.get('/genres', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
     const kind = req.query.kind === 'series' ? 'series' : 'movie';
-    const sql = kind === 'series'
-      ? `SELECT g.genre, COUNT(DISTINCT sr.id)::int AS count
-         FROM series sr
-         JOIN series_sources ss ON ss.series_id = sr.id
-         JOIN iptv_sources s ON s.id = ss.source_id
-         CROSS JOIN LATERAL unnest(sr.genres) AS g(genre)
-         WHERE s.user_id = $1
-           AND sr.genres IS NOT NULL
-           AND array_length(sr.genres, 1) > 0
-         GROUP BY g.genre
-         ORDER BY count DESC, g.genre ASC`
-      : `SELECT g.genre, COUNT(DISTINCT m.id)::int AS count
-         FROM movies m
-         JOIN movie_streams ms ON ms.movie_id = m.id
-         JOIN iptv_sources s ON s.id = ms.source_id
-         CROSS JOIN LATERAL unnest(m.genres) AS g(genre)
-         WHERE s.user_id = $1
-           AND m.genres IS NOT NULL
-           AND array_length(m.genres, 1) > 0
-         GROUP BY g.genre
-         ORDER BY count DESC, g.genre ASC`;
-    const r = await postgresService.query(sql, [userId]);
-    res.json({ success: true, genres: r.rows });
+
+    // Both kinds are served straight from the precomputed catalog's
+    // genres_json (built at refresh time), so this is a trivial meta read
+    // — no full-table unnest, no background compute, no caching needed.
+    // getGenres self-heals if the catalog predates genres_json. A brand
+    // new (unbuilt) catalog returns [] and ensureFresh kicks off the
+    // first build in the background.
+    vodCatalog.ensureFresh(userId, kind);
+    const genres = await vodCatalog.getGenres(userId, kind);
+    res.json({ success: true, genres });
   } catch (error) {
     logger.error(`[VOD genres] failed: ${error.message}`);
     res.status(500).json({ success: false, error: error.message });
@@ -175,94 +194,144 @@ router.get('/movies', requireAuth, async (req, res) => {
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
     const cursor = decodeCursor(req.query.cursor);
 
-    // ── FAST PATH ──────────────────────────────────────────────────
-    // Mirror of /series fast path (see that route for context). The
-    // movie_streams table is even bigger (~1.4M rows) than series_sources
-    // (~300K), so the seq-scan-plus-double-sort original query was
-    // worse — and the movie-enrichment background job runs against the
-    // same table, contending for I/O constantly.
+    // ── CATALOG PATH (Plex/Jellyfin-style precomputed browse) ──────
+    // Cross-source browse/search/sort/genre reads the compact
+    // vod_catalog_movies table — ONE row per unique movie (deduped at
+    // ingest time), already indexed for recent/title/rating, trigram
+    // search, and genre filter. This replaces deduplicating the raw
+    // 1.8M-row movie_streams on every request (which was 15ms warm but
+    // 12-30s cold and timed out on search/title-sort). The
+    // provider-scoped drill-downs (sourceId / categoryId) fall through
+    // to the raw-table query below, where they're naturally fast
+    // because they touch only one source's rows.
     //
-    // With migration 039's (source_id, added_at DESC NULLS LAST, id DESC)
-    // composite index, LATERAL grabs the top ~50 most-recent rows per
-    // user source, so we aggregate over ~3,800 candidates instead of
-    // 1.4M. Only fires for the default (recent + no filters) path —
-    // search/category/single-source/non-recent sorts keep the original
-    // GROUP BY path for correctness.
-    if (sortKey === 'recent' && !search && !sourceId && !categoryId && !genre) {
-      const fastParams = [userId];
-      let havingClause = '';
-      if (cursor) {
-        // Group-level cursor filter via HAVING — see /series fast path
-        // for the full reasoning. Row-level filtering inside LATERAL
-        // caused duplicate React keys when the same movie's sources
-        // had different added_at across providers.
-        fastParams.push(cursor.k);
-        havingClause = `HAVING MAX(cand.added_at) < $${fastParams.length}::timestamptz`;
+    // The response `id` keeps the existing format ('m:<canonical>' or
+    // 'ms:<representative stream id>') so /api/vod/movies/:id is
+    // unchanged. Rows are unique here, so pagination is a clean keyset
+    // on (sort col, dedup_key) — no HAVING, no duplicate-key risk.
+    if (!sourceId && !categoryId) {
+      // Lazily rebuild the catalog in the background if it's missing or
+      // stale. Never blocks this request — we always serve what's there.
+      vodCatalog.ensureFresh(userId, 'movie');
+
+      const params = [userId];
+      const where = ['user_id = $1'];
+
+      if (search && search.length >= 2) {
+        // Same per-token AND trick as before, but over the small catalog
+        // title column instead of the raw provider rows.
+        const tokens = search.split(/\s+/).filter((t) => t.length >= 2).slice(0, 6);
+        (tokens.length ? tokens : [search]).forEach((tok) => {
+          params.push(`%${tok}%`);
+          where.push(`title ILIKE $${params.length}`);
+        });
       }
-      const perSourceLimit = Math.max(80, pageSize * 3);
-      fastParams.push(perSourceLimit);
-      const perSourceLimitIdx = fastParams.length;
-      fastParams.push(pageSize + 1);
-      const outerLimitIdx = fastParams.length;
+      if (genre) {
+        params.push(genre);
+        where.push(`genres @> ARRAY[$${params.length}]::text[]`);
+      }
 
-      // Dedup key: prefer the canonical movie_id (`m:5`) so all
-      // provider rows that the enrichment job has linked together
-      // collapse into one chip. For unenriched rows (movie_id IS NULL)
-      // fall back to an md5 of the normalised provider name — same
-      // title across multiple sources collapses to one chip instead
-      // of N separate ms:<id> rows. The response `id` returns the
-      // existing format (`m:<canonical>` or `ms:<representative>`)
-      // so /api/vod/movies/:id stays unchanged.
-      const fastSql = `
-        WITH user_sources AS (
-          SELECT id FROM iptv_sources WHERE user_id = $1
-        ),
-        candidates AS (
-          SELECT
-            ms.id, ms.movie_id, ms.provider_name, ms.poster_fallback,
-            ms.rating, ms.rating_fallback, ms.source_id, ms.added_at
-          FROM user_sources us,
-               LATERAL (
-                 SELECT id, movie_id, provider_name, poster_fallback,
-                        rating, rating_fallback, source_id, added_at
-                 FROM movie_streams
-                 WHERE source_id = us.id
-                 ORDER BY added_at DESC NULLS LAST, id DESC
-                 LIMIT $${perSourceLimitIdx}
-               ) ms
-        )
-        SELECT
-          COALESCE('m:' || MIN(m.id)::text, 'ms:' || MIN(cand.id)::text) AS id,
-          COALESCE(MIN(m.title), MIN(cand.provider_name)) AS title,
-          MIN(m.year) AS year,
-          COALESCE(MIN(m.poster_url), MIN(cand.poster_fallback)) AS poster_url,
-          MAX(COALESCE(m.rating_tmdb, cand.rating, cand.rating_fallback)) AS rating,
-          BOOL_OR(m.id IS NOT NULL) AS enriched,
-          COUNT(*)::int AS source_count,
-          MAX(cand.added_at) AS sort_added
-        FROM candidates cand
-        LEFT JOIN movies m ON m.id = cand.movie_id
-        GROUP BY COALESCE(
-          'm:' || m.id::text,
-          'pn:' || md5(LOWER(TRIM(cand.provider_name)))
-        )
-        ${havingClause}
-        ORDER BY MAX(cand.added_at) DESC NULLS LAST,
-                 COALESCE('m:' || MIN(m.id)::text, 'ms:' || MIN(cand.id)::text) DESC
-        LIMIT $${outerLimitIdx}
+      const idExpr = `COALESCE('m:' || movie_id::text, 'ms:' || rep_stream_id::text)`;
+      let orderBy;
+      if (sortKey === 'title') {
+        orderBy = 'lower(title) ASC, dedup_key ASC';
+        if (cursor) {
+          params.push(cursor.k); params.push(cursor.i);
+          where.push(`(lower(title), dedup_key) > ($${params.length - 1}, $${params.length})`);
+        }
+      } else if (sortKey === 'rating') {
+        orderBy = 'rating DESC NULLS LAST, dedup_key DESC';
+        if (cursor) {
+          params.push(cursor.k); params.push(cursor.i);
+          where.push(`(rating, dedup_key) < ($${params.length - 1}::numeric, $${params.length})`);
+        }
+      } else {
+        orderBy = 'max_added_at DESC NULLS LAST, dedup_key DESC';
+        if (cursor) {
+          params.push(cursor.k); params.push(cursor.i);
+          where.push(`(max_added_at, dedup_key) < ($${params.length - 1}::timestamptz, $${params.length})`);
+        }
+      }
+
+      params.push(pageSize + 1);
+      const catSql = `
+        SELECT ${idExpr} AS id, dedup_key, title, year, poster_url, rating,
+               enriched, source_count, max_added_at AS sort_added
+        FROM vod_catalog_movies
+        WHERE ${where.join(' AND ')}
+        ORDER BY ${orderBy}
+        LIMIT $${params.length}
       `;
-
-      const dataResult = await postgresService.query(fastSql, fastParams);
+      const dataResult = await postgresService.query(catSql, params);
       const hasMore = dataResult.rows.length > pageSize;
       const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
 
       let nextCursor = null;
       if (hasMore && rows.length > 0) {
         const last = rows[rows.length - 1];
+        const keyValue = sortKey === 'title'
+          ? (last.title || '').toLowerCase()
+          : sortKey === 'rating'
+            ? (last.rating != null ? String(last.rating) : null)
+            : (last.sort_added ? new Date(last.sort_added).toISOString() : null);
+        // Tiebreaker is dedup_key (the catalog's unique key), matching ORDER BY.
+        if (keyValue != null) nextCursor = encodeCursor(keyValue, last.dedup_key);
+      }
+
+      const movies = rows.map(({ sort_added, dedup_key, ...rest }) => rest);
+      return res.json({ success: true, pageSize, hasMore, nextCursor, movies });
+    }
+
+    // ── SCOPED RECENT FAST PATH (single-provider drill-down) ───────
+    // The Source dropdown narrows browse to one provider (sourceId, and
+    // optionally a categoryId). Deduping is mostly moot within one
+    // source, but GROUP-BY-ing that source's entire catalog (40k+ rows)
+    // timed out on a cold cache. Instead grab just its most-recent rows
+    // via idx_movie_streams_source_added and dedup those — same trick as
+    // the catalog refresh, scoped to one source. Recent sort + no
+    // search; search/title/rating-within-source fall to the slow path
+    // below (already scoped to one source's rows).
+    if (sortKey === 'recent' && !search && sourceId) {
+      const fp = [sourceId];
+      let catFilter = '';
+      if (categoryId) { fp.push(categoryId); catFilter = `AND provider_category_id = $${fp.length}`; }
+      let havingClause = '';
+      if (cursor) { fp.push(cursor.k); havingClause = `HAVING MAX(c.added_at) < $${fp.length}::timestamptz`; }
+      fp.push(Math.max(120, pageSize * 4)); const psIdx = fp.length;
+      fp.push(pageSize + 1); const outIdx = fp.length;
+      const scopedSql = `
+        WITH c AS (
+          SELECT id, movie_id, provider_name, poster_fallback, rating, rating_fallback, added_at
+          FROM movie_streams
+          WHERE source_id = $1 ${catFilter}
+          ORDER BY added_at DESC NULLS LAST, id DESC
+          LIMIT $${psIdx}
+        )
+        SELECT
+          COALESCE('m:' || MIN(m.id)::text, 'ms:' || MIN(c.id)::text) AS id,
+          COALESCE(MIN(m.title), MIN(c.provider_name)) AS title,
+          MIN(m.year) AS year,
+          COALESCE(MIN(m.poster_url), MIN(c.poster_fallback)) AS poster_url,
+          MAX(COALESCE(m.rating_tmdb, c.rating, c.rating_fallback)) AS rating,
+          BOOL_OR(m.id IS NOT NULL) AS enriched,
+          COUNT(*)::int AS source_count,
+          MAX(c.added_at) AS sort_added
+        FROM c LEFT JOIN movies m ON m.id = c.movie_id
+        GROUP BY COALESCE('m:' || m.id::text, 'pn:' || md5(LOWER(TRIM(c.provider_name))))
+        ${havingClause}
+        ORDER BY MAX(c.added_at) DESC NULLS LAST,
+                 COALESCE('m:' || MIN(m.id)::text, 'ms:' || MIN(c.id)::text) DESC
+        LIMIT $${outIdx}
+      `;
+      const dataResult = await postgresService.query(scopedSql, fp);
+      const hasMore = dataResult.rows.length > pageSize;
+      const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
+      let nextCursor = null;
+      if (hasMore && rows.length > 0) {
+        const last = rows[rows.length - 1];
         const keyValue = last.sort_added ? new Date(last.sort_added).toISOString() : null;
         if (keyValue != null) nextCursor = encodeCursor(keyValue, last.id);
       }
-
       const movies = rows.map(({ sort_added, ...rest }) => rest);
       return res.json({ success: true, pageSize, hasMore, nextCursor, movies });
     }
@@ -442,99 +511,128 @@ router.get('/series', requireAuth, async (req, res) => {
     const sortKey = ['recent', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'recent';
     const cursor = decodeCursor(req.query.cursor);
 
-    // ── FAST PATH ──────────────────────────────────────────────────
-    // Default "browse newest series" hits this every time the user
-    // opens the TV Series tab. Pre-rewrite: 4-6s seq-scanning all 300k
-    // series_sources rows then double-sorting to GROUP BY a synthesized
-    // expression. Post-rewrite: LATERAL grabs the top ~50 most-recent
-    // rows per source using migration-038's
-    // (source_id, updated_at DESC NULLS LAST, id DESC) index, so we
-    // aggregate over ~3,800 candidates instead of 300k. End-to-end
-    // sub-500ms.
-    //
-    // Only triggers when no filter narrows the dataset — for search /
-    // category / single-source / non-recent sort the existing GROUP BY
-    // path is already adequate (trgm index + small candidate set).
-    if (sortKey === 'recent' && !search && !sourceId && !categoryId && !genre) {
-      const fastParams = [userId];
-      let havingClause = '';
-      if (cursor) {
-        // CURSOR FILTERING AT THE GROUP LEVEL, NOT THE ROW LEVEL.
-        //
-        // Previously the cursor filtered inside the LATERAL on
-        // ss.updated_at < cursor.k, but a single series often has
-        // rows on multiple sources with different updated_at values.
-        // The cursor records MAX(updated_at) for the group; rows from
-        // OTHER sources of the same series might have updated_at <
-        // cursor.k, which means they sneak through the row-level
-        // filter and re-form the same group on the next page. Result:
-        // React "duplicate key" warning + visual duplicates.
-        //
-        // Filtering on HAVING MAX(updated_at) < cursor.k correctly
-        // excludes the WHOLE group whose MAX we've already shown.
-        // Strict `<` skips the boundary; rare case of two groups
-        // sharing an exact MAX is acceptable to skip.
-        fastParams.push(cursor.k);
-        havingClause = `HAVING MAX(cand.updated_at) < $${fastParams.length}::timestamptz`;
+    // ── CATALOG PATH (Plex/Jellyfin-style precomputed browse) ──────
+    // Mirror of /movies: cross-source browse/search/sort/genre reads the
+    // compact vod_catalog_series table (one row per unique series,
+    // deduped at ingest) instead of deduplicating raw series_sources on
+    // every request. Provider-scoped drill-downs (sourceId / categoryId)
+    // fall through to the raw-table query below. Response `id` keeps the
+    // existing 's:<canonical>' / 'ss:<stream id>' format so
+    // /api/vod/series/:id is unchanged; rows are unique here so
+    // pagination is a clean keyset with no duplicate-key risk.
+    if (!sourceId && !categoryId) {
+      vodCatalog.ensureFresh(userId, 'series');
+
+      const params = [userId];
+      const where = ['user_id = $1'];
+
+      if (search && search.length >= 2) {
+        const tokens = search.split(/\s+/).filter((t) => t.length >= 2).slice(0, 6);
+        (tokens.length ? tokens : [search]).forEach((tok) => {
+          params.push(`%${tok}%`);
+          where.push(`title ILIKE $${params.length}`);
+        });
       }
-      // Per-source slice — bump higher than before because the LATERAL
-      // no longer filters by cursor, so we need a larger pool to ensure
-      // enough groups remain after HAVING.
-      const perSourceLimit = Math.max(80, pageSize * 3);
-      fastParams.push(perSourceLimit);
-      const perSourceLimitIdx = fastParams.length;
-      fastParams.push(pageSize + 1);
-      const outerLimitIdx = fastParams.length;
+      if (genre) {
+        params.push(genre);
+        where.push(`genres @> ARRAY[$${params.length}]::text[]`);
+      }
 
-      const fastSql = `
-        WITH user_sources AS (
-          SELECT id FROM iptv_sources WHERE user_id = $1
-        ),
-        candidates AS (
-          SELECT
-            ss.id, ss.series_id, ss.provider_name, ss.poster_fallback,
-            ss.source_id, ss.updated_at
-          FROM user_sources us,
-               LATERAL (
-                 SELECT id, series_id, provider_name, poster_fallback, source_id, updated_at
-                 FROM series_sources
-                 WHERE source_id = us.id
-                 ORDER BY updated_at DESC NULLS LAST, id DESC
-                 LIMIT $${perSourceLimitIdx}
-               ) ss
-        )
-        SELECT
-          COALESCE('s:' || MIN(sr.id)::text, 'ss:' || MIN(cand.id)::text) AS id,
-          COALESCE(MIN(sr.title), MIN(cand.provider_name)) AS title,
-          MIN(sr.year) AS year,
-          COALESCE(MIN(sr.poster_url), MIN(cand.poster_fallback)) AS poster_url,
-          MAX(sr.rating_tmdb) AS rating,
-          BOOL_OR(sr.id IS NOT NULL) AS enriched,
-          COUNT(*)::int AS source_count,
-          MAX(cand.updated_at) AS sort_updated
-        FROM candidates cand
-        LEFT JOIN series sr ON sr.id = cand.series_id
-        GROUP BY COALESCE(
-          's:' || sr.id::text,
-          'pn:' || md5(LOWER(TRIM(cand.provider_name)))
-        )
-        ${havingClause}
-        ORDER BY MAX(cand.updated_at) DESC NULLS LAST,
-                 COALESCE('s:' || MIN(sr.id)::text, 'ss:' || MIN(cand.id)::text) DESC
-        LIMIT $${outerLimitIdx}
+      const idExpr = `COALESCE('s:' || series_id::text, 'ss:' || rep_stream_id::text)`;
+      let orderBy;
+      if (sortKey === 'title') {
+        orderBy = 'lower(title) ASC, dedup_key ASC';
+        if (cursor) {
+          params.push(cursor.k); params.push(cursor.i);
+          where.push(`(lower(title), dedup_key) > ($${params.length - 1}, $${params.length})`);
+        }
+      } else if (sortKey === 'rating') {
+        orderBy = 'rating DESC NULLS LAST, dedup_key DESC';
+        if (cursor) {
+          params.push(cursor.k); params.push(cursor.i);
+          where.push(`(rating, dedup_key) < ($${params.length - 1}::numeric, $${params.length})`);
+        }
+      } else {
+        orderBy = 'max_added_at DESC NULLS LAST, dedup_key DESC';
+        if (cursor) {
+          params.push(cursor.k); params.push(cursor.i);
+          where.push(`(max_added_at, dedup_key) < ($${params.length - 1}::timestamptz, $${params.length})`);
+        }
+      }
+
+      params.push(pageSize + 1);
+      const catSql = `
+        SELECT ${idExpr} AS id, dedup_key, title, year, poster_url, rating,
+               enriched, source_count, max_added_at AS sort_added
+        FROM vod_catalog_series
+        WHERE ${where.join(' AND ')}
+        ORDER BY ${orderBy}
+        LIMIT $${params.length}
       `;
-
-      const dataResult = await postgresService.query(fastSql, fastParams);
+      const dataResult = await postgresService.query(catSql, params);
       const hasMore = dataResult.rows.length > pageSize;
       const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
 
       let nextCursor = null;
       if (hasMore && rows.length > 0) {
         const last = rows[rows.length - 1];
+        const keyValue = sortKey === 'title'
+          ? (last.title || '').toLowerCase()
+          : sortKey === 'rating'
+            ? (last.rating != null ? String(last.rating) : null)
+            : (last.sort_added ? new Date(last.sort_added).toISOString() : null);
+        if (keyValue != null) nextCursor = encodeCursor(keyValue, last.dedup_key);
+      }
+
+      const series = rows.map(({ sort_added, dedup_key, ...rest }) => rest);
+      return res.json({ success: true, pageSize, hasMore, nextCursor, series });
+    }
+
+    // ── SCOPED RECENT FAST PATH (single-provider drill-down) ───────
+    // Mirror of /movies: narrow to one source's most-recent rows via
+    // migration-038's (source_id, updated_at DESC, id DESC) index and
+    // dedup those, instead of GROUP-BY-ing the whole source.
+    if (sortKey === 'recent' && !search && sourceId) {
+      const fp = [sourceId];
+      let catFilter = '';
+      if (categoryId) { fp.push(categoryId); catFilter = `AND provider_category_id = $${fp.length}`; }
+      let havingClause = '';
+      if (cursor) { fp.push(cursor.k); havingClause = `HAVING MAX(c.updated_at) < $${fp.length}::timestamptz`; }
+      fp.push(Math.max(120, pageSize * 4)); const psIdx = fp.length;
+      fp.push(pageSize + 1); const outIdx = fp.length;
+      const scopedSql = `
+        WITH c AS (
+          SELECT id, series_id, provider_name, poster_fallback, updated_at
+          FROM series_sources
+          WHERE source_id = $1 ${catFilter}
+          ORDER BY updated_at DESC NULLS LAST, id DESC
+          LIMIT $${psIdx}
+        )
+        SELECT
+          COALESCE('s:' || MIN(sr.id)::text, 'ss:' || MIN(c.id)::text) AS id,
+          COALESCE(MIN(sr.title), MIN(c.provider_name)) AS title,
+          MIN(sr.year) AS year,
+          COALESCE(MIN(sr.poster_url), MIN(c.poster_fallback)) AS poster_url,
+          MAX(sr.rating_tmdb) AS rating,
+          BOOL_OR(sr.id IS NOT NULL) AS enriched,
+          COUNT(*)::int AS source_count,
+          MAX(c.updated_at) AS sort_updated
+        FROM c LEFT JOIN series sr ON sr.id = c.series_id
+        GROUP BY COALESCE('s:' || sr.id::text, 'pn:' || md5(LOWER(TRIM(c.provider_name))))
+        ${havingClause}
+        ORDER BY MAX(c.updated_at) DESC NULLS LAST,
+                 COALESCE('s:' || MIN(sr.id)::text, 'ss:' || MIN(c.id)::text) DESC
+        LIMIT $${outIdx}
+      `;
+      const dataResult = await postgresService.query(scopedSql, fp);
+      const hasMore = dataResult.rows.length > pageSize;
+      const rows = hasMore ? dataResult.rows.slice(0, pageSize) : dataResult.rows;
+      let nextCursor = null;
+      if (hasMore && rows.length > 0) {
+        const last = rows[rows.length - 1];
         const keyValue = last.sort_updated ? new Date(last.sort_updated).toISOString() : null;
         if (keyValue != null) nextCursor = encodeCursor(keyValue, last.id);
       }
-
       const series = rows.map(({ sort_updated, ...rest }) => rest);
       return res.json({ success: true, pageSize, hasMore, nextCursor, series });
     }
