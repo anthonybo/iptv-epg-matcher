@@ -17,6 +17,15 @@
 
 /* Multi-view chrome motion. Scoped to literal class names rather than
    Tailwind utilities so the JIT can't strip them on rebuild. */
+
+/* Channels hero signal-equalizer bars — scale on the Y axis at offset
+   delays to read as a live audio meter. Referenced by the arbitrary
+   `animate-[chBar_...]` utility on the Channels title. */
+@keyframes chBar {
+  0%, 100% { transform: scaleY(0.45); }
+  50%      { transform: scaleY(1); }
+}
+
 @keyframes heart-pop {
   0%   { transform: scale(1); }
   40%  { transform: scale(1.45); }

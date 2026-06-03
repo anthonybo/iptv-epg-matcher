@@ -470,7 +470,18 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
   }
 
   return (
-    <div className="flex flex-col min-h-[calc(100vh-5rem)] bg-slate-950 text-slate-100">
+    <div className="relative flex flex-col min-h-[calc(100vh-5rem)] bg-slate-950 text-slate-100">
+      {/* Atmosphere — two faint cyan radial pools bleed in from the top
+          corners so the page reads as lit, not flat. Fixed + behind all
+          content, non-interactive. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 -z-10 opacity-70"
+        style={{
+          background:
+            'radial-gradient(70rem 32rem at 0% -8%, rgba(34,211,238,0.06), transparent 60%), radial-gradient(60rem 28rem at 100% -6%, rgba(56,189,248,0.05), transparent 55%)',
+        }}
+      />
       {/* Slim error strip — sits above the hero, doesn't crowd it. */}
       {error && (
         <div className="border-b border-rose-500/30 bg-rose-500/[0.06]">
@@ -490,8 +501,22 @@ const ChannelsView = ({ sessionId, onChannelSelect, selectedChannel, matchedChan
       <div className="border-b border-slate-800/70 bg-slate-950/95 px-6 py-5">
         <div className="max-w-[1600px] mx-auto flex items-end justify-between gap-4 flex-wrap">
           <div>
-            <h1 className="text-2xl font-bold text-slate-100 leading-tight">Channels</h1>
-            <div className="mt-1.5 font-mono text-[10.5px] uppercase tracking-[0.22em] tabular-nums text-slate-500">
+            <div className="flex items-center gap-3">
+              {/* Live signal-equalizer motif — three bars breathing at
+                  offset rates. Pure CSS, pauses under reduced-motion. */}
+              <span aria-hidden className="flex items-end gap-[3px] h-6 motion-reduce:hidden">
+                <span className="w-[3px] rounded-full bg-cyan-400/80 animate-[chBar_1.1s_ease-in-out_infinite] [height:40%]" />
+                <span className="w-[3px] rounded-full bg-cyan-400/60 animate-[chBar_1.1s_ease-in-out_infinite_0.18s] [height:90%]" />
+                <span className="w-[3px] rounded-full bg-cyan-400/80 animate-[chBar_1.1s_ease-in-out_infinite_0.36s] [height:60%]" />
+              </span>
+              <h1
+                className="text-[28px] font-extrabold text-slate-50 leading-none tracking-[-0.02em]"
+                style={{ fontFamily: '"Bricolage Grotesque", system-ui, sans-serif' }}
+              >
+                Channels
+              </h1>
+            </div>
+            <div className="mt-2 font-mono text-[10.5px] uppercase tracking-[0.22em] tabular-nums text-slate-500">
               {loading && filteredCount === 0 ? (
                 <span className="text-cyan-300/80 inline-flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
@@ -886,10 +911,10 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
         boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5)'
       }}
     >
-      <div className="relative w-full h-full rounded-xl overflow-hidden border-2 border-purple-600 bg-slate-950 flex flex-col">
+      <div className="relative w-full h-full rounded-xl overflow-hidden border border-cyan-500/40 bg-slate-950 flex flex-col shadow-[0_0_28px_-6px_rgba(34,211,238,0.35)]">
         {/* Header */}
         {!isMinimized && (
-          <div className="flex-shrink-0 z-50 bg-slate-950 px-3 py-2 border-b border-purple-600/40">
+          <div className="flex-shrink-0 z-50 bg-slate-950/95 px-3 py-2 border-b border-slate-800/70 backdrop-blur-sm">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 {channel.logo && (
@@ -906,8 +931,10 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
                     </div>
                     <VideoQualityBadge quality={videoQuality} size="sm" />
                   </div>
-                  <div className={`text-xs ${isActive ? 'text-purple-400' : foundWorking ? 'text-green-400' : 'text-slate-400'}`}>
-                    {isActive ? `Testing ${currentIndex + 1} of ${totalChannels}` : foundWorking ? '✓ Working channel' : 'Reached end'}
+                  <div className={`font-mono text-[10px] uppercase tracking-[0.16em] tabular-nums inline-flex items-center gap-1.5 ${isActive ? 'text-cyan-300' : foundWorking ? 'text-emerald-300' : 'text-slate-500'}`}>
+                    {isActive && <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />}
+                    {foundWorking && !isActive && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />}
+                    {isActive ? `Testing ${currentIndex + 1} / ${totalChannels}` : foundWorking ? 'On air' : 'Reached end'}
                   </div>
                 </div>
               </div>
@@ -915,7 +942,7 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
                 {/* Add to Multiview button */}
                 <button
                   onClick={handleAddToMultiview}
-                  className="p-1 rounded hover:bg-purple-500/20 text-slate-400 hover:text-purple-400 transition-colors"
+                  className="p-1 rounded hover:bg-cyan-500/15 text-slate-400 hover:text-cyan-300 transition-colors"
                   title="Add to Multi-View"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -926,10 +953,10 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
                 {/* Skip/Next button - always visible */}
                 <button
                   onClick={onSkip}
-                  className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                  className={`px-2.5 py-1 rounded font-mono text-[10px] font-bold uppercase tracking-[0.14em] transition-colors ${
                     isActive
-                      ? 'bg-slate-800 hover:bg-slate-700 text-slate-200'
-                      : 'bg-blue-600 hover:bg-blue-500 text-white'
+                      ? 'bg-slate-800/80 hover:bg-slate-700 text-slate-200'
+                      : 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-500/40'
                   }`}
                   title={isActive ? "Skip to next channel" : "Continue testing next channel"}
                 >
@@ -938,7 +965,7 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
                 {/* Stop/Close button */}
                 <button
                   onClick={onStop}
-                  className="px-2 py-1 rounded text-xs font-medium bg-red-900/50 hover:bg-red-900 text-red-300 transition-colors"
+                  className="px-2.5 py-1 rounded font-mono text-[10px] font-bold uppercase tracking-[0.14em] bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 transition-colors"
                   title={isActive ? "Stop auto-testing" : "Close player"}
                 >
                   {isActive ? 'Stop' : 'Close'}
@@ -962,7 +989,7 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
         {isMinimized && (
           <button
             onClick={() => setIsMinimized(false)}
-            className="w-full h-full flex flex-col items-center justify-center bg-purple-900/20 hover:bg-purple-900/30 transition-colors border-2 border-purple-600 rounded-xl"
+            className="w-full h-full flex flex-col items-center justify-center bg-cyan-500/[0.08] hover:bg-cyan-500/15 transition-colors border border-cyan-500/40 rounded-xl"
             title="Expand auto-test player"
           >
             {channel.logo ? (
@@ -972,12 +999,12 @@ const AutoTestPiPPlayer = React.memo(({ channel, sessionId, currentIndex, totalC
                 className="w-8 h-8 object-contain mb-1"
               />
             ) : (
-              <svg className="w-6 h-6 text-purple-400 mb-1 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-6 h-6 text-cyan-300 mb-1 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             )}
-            <span className="text-xs text-purple-400">{currentIndex + 1}/{totalChannels}</span>
+            <span className="font-mono text-[10px] tabular-nums text-cyan-300">{currentIndex + 1}/{totalChannels}</span>
           </button>
         )}
 

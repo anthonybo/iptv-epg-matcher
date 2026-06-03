@@ -20,6 +20,17 @@ export const useChannels = (sessionId, sourceId = null) => {
       return '';
     }
   });
+  // Debounced mirror of `searchTerm`. The text input binds to `searchTerm`
+  // so typing stays instant, but the expensive work (clearing the list +
+  // re-fetching from the backend over the full channel set) keys off
+  // `debouncedSearchTerm`, which only settles ~300ms after the last
+  // keystroke. Without this, every character triggered a list reset +
+  // network fetch + full re-render, freezing the input mid-type.
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(searchTerm);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearchTerm(searchTerm), 300);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
   const [loading, setLoading] = useState(true);
   // `categoriesLoading` is distinct from `loading` so the category
   // sidebar can show "Loading…" while its own fetch is in flight,
@@ -118,11 +129,11 @@ export const useChannels = (sessionId, sourceId = null) => {
     }
   }, [sourceId]);
 
-  // Reset page and channels when sourceId or searchTerm changes
+  // Reset page and channels when sourceId or the (debounced) search changes
   useEffect(() => {
     setPage(1);
     setChannels([]);
-  }, [sourceId, searchTerm]);
+  }, [sourceId, debouncedSearchTerm]);
 
   // Fetch channels
   useEffect(() => {
@@ -152,9 +163,9 @@ export const useChannels = (sessionId, sourceId = null) => {
         }
 
         // Add search filter if provided
-        if (searchTerm) {
-          url += `&search=${encodeURIComponent(searchTerm)}`;
-          console.log('[useChannels] Fetching with search term:', searchTerm);
+        if (debouncedSearchTerm) {
+          url += `&search=${encodeURIComponent(debouncedSearchTerm)}`;
+          console.log('[useChannels] Fetching with search term:', debouncedSearchTerm);
         }
 
         const response = await apiClient.get(url, { signal: abortController.signal });
@@ -207,12 +218,12 @@ export const useChannels = (sessionId, sourceId = null) => {
       isSubscribed = false;
       abortController.abort();
     };
-  }, [sessionId, page, selectedCategories, sourceId, searchTerm]);
+  }, [sessionId, page, selectedCategories, sourceId, debouncedSearchTerm]);
 
   // Filter channels based on selected categories (search is handled on backend)
   const filteredChannels = useMemo(() => {
     // If search is active, return all channels (already filtered by backend)
-    if (searchTerm) {
+    if (debouncedSearchTerm) {
       return channels;
     }
 
@@ -233,7 +244,7 @@ export const useChannels = (sessionId, sourceId = null) => {
       seen.add(key);
       return true;
     });
-  }, [channels, selectedCategories, searchTerm]);
+  }, [channels, selectedCategories, debouncedSearchTerm]);
 
   // Toggle category selection
   const toggleCategory = (categoryName) => {
