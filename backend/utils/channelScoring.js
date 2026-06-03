@@ -11,11 +11,21 @@ const FuzzySet = require('fuzzyset');
  * - Individual words (for partial matching)
  * - Location/school name (typically the first word(s) before the mascot)
  */
+// Placeholder "team" values used by team-less events (racing, individual
+// sports, TBD matchups). These must yield NO search terms — otherwise a
+// query like "Unknown at Unknown" (a NASCAR race with no home/away teams)
+// extracts the term "unknown" and matches channels that merely contain the
+// word, e.g. "24/7 Anthony Bourdain Parts Unknown".
+const PLACEHOLDER_TEAM_NAMES = new Set(['unknown', 'tbd', 'tba', 'n/a', 'na', '-', '--', '---']);
+
 function extractSearchTerms(teamName) {
   if (!teamName) return [];
 
   const terms = new Set();
   const cleaned = teamName.trim();
+
+  // Bail on placeholder names so they never become a matchable term.
+  if (PLACEHOLDER_TEAM_NAMES.has(cleaned.toLowerCase())) return [];
 
   // Add full name
   terms.add(cleaned);

@@ -6,7 +6,7 @@
  *
  * Providers (all free tier):
  *   - Groq         · llama-3.3-70b-versatile          · 30 RPM
- *   - Cerebras     · llama3.1-8b                       · 30 RPM
+ *   - Cerebras     · gpt-oss-120b                      · 30 RPM
  *   - Gemini       · gemini-2.5-flash                  · 15 RPM, 1500 RPD
  *   - SambaNova    · Meta-Llama-3.3-70B-Instruct       · daily quota
  *   - Mistral      · mistral-small-latest              · 1 RPS
@@ -32,7 +32,7 @@ const logger = require('../../config/logger');
 
 const CLOUD_PROVIDERS = {
   groq:      { name: 'groq',      baseUrl: 'https://api.groq.com/openai/v1',                          defaultModel: 'llama-3.3-70b-versatile' },
-  cerebras:  { name: 'cerebras',  baseUrl: 'https://api.cerebras.ai/v1',                              defaultModel: 'llama3.1-8b' },
+  cerebras:  { name: 'cerebras',  baseUrl: 'https://api.cerebras.ai/v1',                              defaultModel: 'gpt-oss-120b' },
   gemini:    { name: 'gemini',    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',defaultModel: 'gemini-2.5-flash' },
   sambanova: { name: 'sambanova', baseUrl: 'https://api.sambanova.ai/v1',                             defaultModel: 'Meta-Llama-3.3-70B-Instruct' },
   mistral:   { name: 'mistral',   baseUrl: 'https://api.mistral.ai/v1',                               defaultModel: 'mistral-small-latest' }
@@ -115,7 +115,10 @@ function makeProviderState(def, apiKey) {
     name: def.name,
     baseUrl: def.baseUrl,
     apiKey,
-    model: def.defaultModel,
+    // Per-provider model override via env (e.g. LLM_MODEL_CEREBRAS) so a
+    // model rename/deprecation can be fixed without a code change. Falls
+    // back to the built-in default.
+    model: process.env[`LLM_MODEL_${def.name.toUpperCase()}`] || def.defaultModel,
     rateLimitedUntil: 0,
     consecutiveFailures: 0,
     lastUsed: 0,

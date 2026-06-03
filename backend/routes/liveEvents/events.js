@@ -11,6 +11,7 @@ const liveScoresService = require('../../services/liveScoresService');
 const postgresService = require('../../services/postgresService');
 const iptvDatabaseService = require('../../services/iptvDatabase');
 const { expandBroadcaster, hasAlias, BROADCASTER_ALIASES } = require('../../utils/broadcasterAliases');
+const aiChannelMatcher = require('../../services/ai/aiChannelMatcher');
 
 /**
  * POST /api/live-events/refresh-scores
@@ -302,10 +303,59 @@ router.get('/today', async (req, res) => {
       ORDER BY is_live DESC, event_start ASC
     `, [start.toISOString(), end.toISOString()]);
 
+    const events = result.rows || [];
+
+    // ── AI broadcaster enrichment (feature-flagged) ──────────────────
+    // For events the source gave no broadcaster for (racing, tennis,
+    // niche leagues), resolve likely networks via the AI resolver. It's
+    // DB-cached per (sport, league) for a week, so this is one LLM call
+    // per league at most and cheap DB reads thereafter. We attach them as
+    // a SEPARATE `aiBroadcasts` field (real ESPN broadcasts untouched) so
+    // the UI can tag them clearly as AI-resolved. Bounded + parallel so a
+    // cold cache can't stall the slate.
+    const aiEnabled = aiChannelMatcher.isEnabled();
+    if (aiEnabled) {
+      try {
+        const emptyEvents = events.filter((e) => !Array.isArray(e.broadcasts) || e.broadcasts.length === 0);
+        // Distinct (sport, league) buckets — one lookup per league.
+        const buckets = new Map();
+        for (const e of emptyEvents) {
+          const key = `${e.sport_type || ''}|${e.league_name || ''}`;
+          if (!buckets.has(key)) buckets.set(key, { sportType: e.sport_type, leagueName: e.league_name, eventName: e.event_name });
+        }
+        // Attach what's CACHED now (fast). Grounded lookups take ~5s, so we
+        // never block the slate on a cold league — instead we fire a
+        // background warm so it's ready on the next open/refresh.
+        const cachePairs = await Promise.all(
+          Array.from(buckets.entries()).map(async ([key, b]) => [key, await aiChannelMatcher.getCachedBroadcasters(b)])
+        );
+        const byLeague = new Map(cachePairs);
+
+        const MAX_WARM = 8; // cap background warm bursts per request
+        let warmed = 0;
+        for (const [key, b] of buckets.entries()) {
+          const names = byLeague.get(key);
+          if ((!Array.isArray(names) || names.length === 0) && warmed < MAX_WARM) {
+            warmed++;
+            aiChannelMatcher.resolveBroadcasters(b).catch(() => {}); // fire-and-forget warm
+          }
+        }
+        if (warmed > 0) logger.info(`[AI Slate] warming ${warmed} uncached league(s) in background`);
+
+        for (const e of emptyEvents) {
+          const names = byLeague.get(`${e.sport_type || ''}|${e.league_name || ''}`);
+          if (Array.isArray(names) && names.length > 0) e.aiBroadcasts = names;
+        }
+      } catch (err) {
+        logger.warn(`[AI Slate] broadcaster enrichment failed (non-fatal): ${err.message}`);
+      }
+    }
+
     res.json({
       success: true,
-      events: result.rows || [],
-      count: (result.rows || []).length,
+      events,
+      count: events.length,
+      aiEnabled,
       date: localDate.toISOString().slice(0, 10)
     });
   } catch (error) {

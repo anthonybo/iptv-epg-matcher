@@ -321,10 +321,17 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
     }
 
     setSearchingStream(true);
+    // Some events have no two teams — racing (NASCAR/F1/IndyCar), individual
+    // sports, or TBD matchups store home/away as the literal "Unknown". Treat
+    // those as team-less so we search by the real event name instead of
+    // "Unknown at Unknown" (which matches channels like "Anthony Bourdain
+    // Parts Unknown").
+    const isPlaceholderTeam = (t) => !t || ['unknown', 'tbd', 'tba', 'n/a', 'na'].includes(String(t).trim().toLowerCase());
+    const hasTeams = !isPlaceholderTeam(score.away_team) && !isPlaceholderTeam(score.home_team);
     // Build a status label using whichever team data we have. Falls
-    // back to the event name (e.g. "ESPN: NBA Finals Game 5") when
+    // back to the event name (e.g. "NASCAR Cup Series at Nashville") when
     // both teams aren't provided.
-    const eventLabel = (score.away_team && score.home_team)
+    const eventLabel = hasTeams
       ? `${score.away_team} vs ${score.home_team}`
       : (score.event_name || 'live event');
     setSearchStatus(`Finding stream for ${eventLabel}`);
@@ -334,14 +341,11 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
         ? streams.map((s) => s.sourceId).filter((id) => id)
         : [];
       const currentChannelIds = streams.map((s) => s.id).filter((id) => id);
-      const currentEventIds = streams.map((s) => s.espnEventId).filter((id) => id);
-      if (currentEventIds.includes(score.event_id)) {
-        console.warn(`${tag} blocked: ${score.event_name} already in multi-view`);
-        showToast('This game is already in your Multi-View', 'info');
-        setSearchingStream(false);
-        setSearchStatus(null);
-        return;
-      }
+      // Intentionally NOT blocking when this game is already in multi-view.
+      // The user may want a backup/alternate feed for the same game, or the
+      // first pick was wrong (e.g. a bad auto-match) and they want to retry.
+      // `excludeChannelIds` below guarantees we surface a DIFFERENT stream
+      // rather than re-adding the identical channel.
 
       const token = getToken();
       if (!token) {
@@ -352,11 +356,24 @@ export function useStreamFinder({ streams, autoFillSettings, setShowSettingsModa
         return;
       }
 
-      console.log(`${tag} firing search: "${score.away_team} at ${score.home_team}" (${score.sport_type}/${score.league_name})`);
-
       // Use "Team1 at Team2" so the backend event parser picks up both
-      // teams (the searchChannel endpoint splits on at/vs/@).
-      const searchQuery = `${score.away_team} at ${score.home_team}`;
+      // teams (the searchChannel endpoint splits on at/vs/@). For team-less
+      // events (racing/individual/TBD) fall back to the event name, which
+      // carries the real identity (e.g. "Monaco Grand Prix") — sending
+      // "Unknown at Unknown" would match the literal word "Unknown".
+      const searchQuery = hasTeams
+        ? `${score.away_team} at ${score.home_team}`
+        : (score.event_name || '').trim();
+
+      console.log(`${tag} firing search: "${searchQuery}" (${score.sport_type}/${score.league_name})`);
+
+      if (!searchQuery || searchQuery.length < 2) {
+        console.warn(`${tag} blocked: no usable search query (teams="${score.away_team}/${score.home_team}", event_name="${score.event_name}")`);
+        showToast('No stream info available for this event', 'info');
+        setSearchingStream(false);
+        setSearchStatus(null);
+        return;
+      }
       const response = await fetch('/api/live-events/search-channel', {
         method: 'POST',
         headers: {

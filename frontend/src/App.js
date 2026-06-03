@@ -104,6 +104,24 @@ function AppContent() {
     loadDataIfNeeded();
   }, [activeTab, sessionId, categories.length, fetchCategoriesFromApi, fetchMatchedChannels]);
 
+  // Reconcile a stale source filter. When the selected source is
+  // deleted (e.g. "Remove N" on a failing provider), userSources
+  // refetches without it, but selectedSourceFilter still holds the
+  // now-dead source object — so the Channels page sits empty, pinned
+  // to a source that no longer exists. Fall back to "All sources"
+  // when the selection isn't in the current list. Guarded on a
+  // non-empty list so a transient empty refetch doesn't wrongly
+  // clear a valid selection.
+  useEffect(() => {
+    if (!selectedSourceFilter || userSources.length === 0) return;
+    const selId = String(selectedSourceFilter.id ?? selectedSourceFilter);
+    const stillExists = userSources.some((s) => String(s.id) === selId);
+    if (!stillExists) {
+      console.warn(`[App] Selected source ${selId} no longer exists — resetting to All sources`);
+      setSelectedSourceFilter(null);
+    }
+  }, [userSources, selectedSourceFilter, setSelectedSourceFilter]);
+
   // Generate new XTREAM credentials
   const handleGenerate = async () => {
     setIsGenerating(true);

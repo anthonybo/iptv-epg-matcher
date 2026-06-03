@@ -17,6 +17,7 @@ const { expandBroadcastersList, expandLeagueBroadcastersFallback, expandBroadcas
 const broadcasterStats = require('../../services/broadcasterMatchStats');
 const { findChannelsByEpg } = require('../../utils/epgSearch');
 const { lookupSoccerBroadcasters } = require('../../utils/liveSoccerTvEnricher');
+const aiChannelMatcher = require('../../services/ai/aiChannelMatcher');
 
 /**
  * POST /api/live-events/search-channel
@@ -186,6 +187,20 @@ router.post('/search-channel', async (req, res) => {
       if (tvs.length > 0) {
         broadcasterTerms = expandBroadcastersList(tvs);
         logger.info(`[Find Alternative] Broadcasters from LiveSoccerTV: ${tvs.join(', ')} → ${broadcasterTerms.length} search terms`);
+      }
+    }
+
+    // Phase 3: still no broadcasters — ask the AI which networks carry this
+    // event. This is the path that handles racing (NASCAR/F1/IndyCar) and
+    // niche/international events ESPN omits and our static maps miss; the
+    // resolved network names flow through the SAME expandBroadcastersList
+    // pipeline as ESPN codes. Feature-flagged + cached per (sport, league),
+    // and returns [] on any failure — so flag-off is exactly today's path.
+    if (broadcasterTerms.length === 0 && (sportType || leagueName) && aiChannelMatcher.isEnabled()) {
+      const aiNames = await aiChannelMatcher.resolveBroadcasters({ sportType, leagueName, eventName: searchQuery });
+      if (aiNames.length > 0) {
+        broadcasterTerms = expandBroadcastersList(aiNames);
+        logger.info(`[Find Alternative] Broadcasters from AI (${leagueName || sportType}): ${aiNames.join(', ')} → ${broadcasterTerms.length} search terms`);
       }
     }
     // `eventConfirmed` is true when the caller passed an espnEventId —
@@ -615,6 +630,11 @@ router.post('/search-channel', async (req, res) => {
     let totalChannelsTested = 0;
     let totalChannelsMatched = 0;
     let lowQualitySkipped = 0;
+    // Run the AI channel picker at most once per search (on the first batch
+    // with real candidates — the SQL coarse-sort surfaces the contenders
+    // there). Bounds LLM usage to ≤1 call/search and keeps us well within
+    // free-tier rate limits.
+    let aiPickerRan = false;
     // Track EPG coverage so we can tell the user something actionable
     // when the search fails: if at least 3 candidates had EPG data and
     // NONE of them had the search teams in their current program, the
@@ -1081,6 +1101,27 @@ router.post('/search-channel', async (req, res) => {
       });
       if (beforeDedupe > channels.length) {
         logger.info(`[Batch ${batchNum + 1}] Collapsed ${beforeDedupe - channels.length} duplicate (name,host) channels; ${channels.length} unique remain`);
+      }
+
+      // AI channel picker (feature-flagged). Once per search, ask the LLM
+      // to re-rank these scored candidates for THIS specific event so the
+      // ffprobe test loop below probes genuinely-relevant streams first and
+      // confidently-wrong matches (e.g. a "24/7 Anthony Bourdain Parts
+      // Unknown" channel for a NASCAR race) are demoted/dropped instead of
+      // tested first. Reorder-only by default; a candidate is dropped only
+      // when the AI rejects it with high confidence AND accepted another.
+      // Any failure returns the list unchanged, so this can't strand a real
+      // match — and with the flag off, isEnabled() short-circuits entirely.
+      if (!aiPickerRan && channels.length > 1 && aiChannelMatcher.isEnabled()) {
+        aiPickerRan = true;
+        try {
+          channels = await aiChannelMatcher.rerankCandidates({
+            channels,
+            event: { sportType, leagueName, eventName: searchQuery, homeTeam, awayTeam, espnEventId },
+          });
+        } catch (err) {
+          logger.warn(`[AI Picker] rerank failed, using scoring order: ${err.message}`);
+        }
       }
 
       // Test channels in parallel batches

@@ -9,6 +9,7 @@ import StreamTypeChart from './components/Dashboard/StreamTypeChart';
 import ActiveSessionsPanel from './components/Dashboard/ActiveSessionsPanel';
 import PageActivityPanel from './components/Dashboard/PageActivityPanel';
 import CommercialDetectionPanel from './components/Dashboard/CommercialDetectionPanel';
+import AiMatchingPanel from './components/Dashboard/AiMatchingPanel';
 
 /**
  * MetricCard - Displays a single metric value
@@ -369,6 +370,11 @@ const DashboardView = () => {
           </h3>
           <CommercialDetectionPanel />
         </div>
+      </div>
+
+      {/* AI Channel Matching control + telemetry */}
+      <div className="mb-6">
+        <AiMatchingPanel />
       </div>
 
       {/* Active Streams Table */}

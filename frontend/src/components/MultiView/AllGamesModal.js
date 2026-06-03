@@ -296,6 +296,7 @@ function TeamTile({ name }) {
 
 const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatusChange }) => {
   const [events, setEvents] = useState([]);
+  const [aiEnabled, setAiEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   // The Play / chip click currently in flight. Stored as
@@ -349,6 +350,7 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
         throw new Error(data?.error || `HTTP ${resp.status}`);
       }
       setEvents(data.events || []);
+      setAiEnabled(Boolean(data.aiEnabled));
     } catch (err) {
       console.error('[AllGamesModal] fetch failed', err);
       setError(err.message || 'Failed to load events');
@@ -514,6 +516,22 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
             >
               &mdash; live, scheduled, and final
             </span>
+            {aiEnabled && (
+              <span
+                title="AI channel matching is on: broadcasters tagged ✦AI were resolved by AI, and clicking PLAY uses AI to pick the right channel."
+                className="ml-auto inline-flex items-center gap-1.5 px-2 py-0.5 text-[9.5px] tracking-[0.12em]"
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontWeight: 700,
+                  color: '#67e8f9',
+                  background: 'rgba(34,211,238,0.10)',
+                  border: '1px solid rgba(34,211,238,0.3)',
+                  borderRadius: '3px'
+                }}
+              >
+                ✦ AI MATCHING ON
+              </span>
+            )}
           </div>
 
           {/* Search input — broadcaster console style, scanline-toned
@@ -970,10 +988,21 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
                           in on a very narrow viewport. */}
                       <div className="flex-1 min-w-0">
                         <div className="flex flex-col gap-1.5">
-                          {[
-                            { name: e.away_team, score: e.away_score, side: 'AWAY' },
-                            { name: e.home_team, score: e.home_score, side: 'HOME' }
-                          ].map((t, idx) => {
+                          {(() => {
+                            // Team-less events (tennis tournaments, racing,
+                            // individual sports) store home/away as the
+                            // literal "Unknown" while the real identity lives
+                            // in event_name ("Roland Garros"). Render a single
+                            // event-name row instead of two "Unknown" lines.
+                            const isPh = (t) => !t || ['unknown', 'tbd', 'tba', 'n/a', 'na'].includes(String(t).trim().toLowerCase());
+                            const teamless = isPh(e.away_team) && isPh(e.home_team) && e.event_name;
+                            return teamless
+                              ? [{ name: e.event_name, score: null, side: 'EVENT' }]
+                              : [
+                                  { name: e.away_team, score: e.away_score, side: 'AWAY' },
+                                  { name: e.home_team, score: e.home_score, side: 'HOME' }
+                                ];
+                          })().map((t, idx) => {
                             // Winner detection on finals — bold + bright vs dimmed.
                             const isFinal = kind === 'final';
                             const hasOpponentScore = isFinal && hasScore;
@@ -1143,6 +1172,81 @@ const AllGamesModal = ({ isOpen, onPick, onPickBroadcaster, onAfterPick, onStatu
                                 </button>
                               );
                             })
+                          ) : (Array.isArray(e.aiBroadcasts) && e.aiBroadcasts.length > 0) ? (
+                            <>
+                              {/* AI-resolved networks — tagged so it's clear
+                                  the AI filled these in. Honest tooltip: these
+                                  are the LIKELY carriers, not a guaranteed feed. */}
+                              <span
+                                title="Resolved by AI — the likely network(s) for this event, not a guaranteed live feed"
+                                className="inline-flex items-center gap-1 px-1.5 py-1"
+                                style={{
+                                  fontFamily: FONT_MONO,
+                                  fontSize: '9px',
+                                  fontWeight: 700,
+                                  letterSpacing: '0.1em',
+                                  color: '#67e8f9',
+                                  background: 'rgba(34,211,238,0.12)',
+                                  border: '1px solid rgba(34,211,238,0.35)',
+                                  borderRadius: '2px'
+                                }}
+                              >
+                                ✦ AI
+                              </span>
+                              {e.aiBroadcasts.map((b, idx) => {
+                                const chipKey = `${e.event_id}::${b}`;
+                                const isThisLoading = picking?.kind === 'broadcaster' && picking.id === chipKey;
+                                const isOtherLoading = Boolean(picking) && !isThisLoading;
+                                const canPick = Boolean(onPickBroadcaster);
+                                return (
+                                  <button
+                                    key={`${e.event_id}-ai-${idx}`}
+                                    type="button"
+                                    onClick={(ev) => { ev.stopPropagation(); if (canPick) handlePickBroadcaster(e.event_id, b); }}
+                                    disabled={!canPick || isOtherLoading}
+                                    title={canPick ? `AI-resolved — try ${b} (searches your catalog)` : b}
+                                    className="inline-flex items-center gap-1.5 px-2 py-1 transition"
+                                    style={{
+                                      fontFamily: FONT_BODY,
+                                      fontSize: '11px',
+                                      fontWeight: 700,
+                                      letterSpacing: '0.04em',
+                                      background: isOtherLoading ? 'rgba(34,211,238,0.04)' : 'rgba(34,211,238,0.10)',
+                                      border: `1px dashed ${isOtherLoading ? '#1f2632' : 'rgba(34,211,238,0.45)'}`,
+                                      color: isOtherLoading ? '#475569' : '#a5f3fc',
+                                      borderRadius: '2px',
+                                      cursor: isOtherLoading || !canPick ? 'not-allowed' : 'pointer'
+                                    }}
+                                    onMouseEnter={(ev) => {
+                                      if (canPick && !isOtherLoading) {
+                                        ev.currentTarget.style.background = 'rgba(34,211,238,0.22)';
+                                        ev.currentTarget.style.borderColor = 'rgba(34,211,238,0.7)';
+                                        ev.currentTarget.style.color = '#e0f7ff';
+                                      }
+                                    }}
+                                    onMouseLeave={(ev) => {
+                                      if (canPick && !isOtherLoading) {
+                                        ev.currentTarget.style.background = 'rgba(34,211,238,0.10)';
+                                        ev.currentTarget.style.borderColor = 'rgba(34,211,238,0.45)';
+                                        ev.currentTarget.style.color = '#a5f3fc';
+                                      }
+                                    }}
+                                  >
+                                    {isThisLoading ? (
+                                      <svg className="animate-spin" style={{ width: 11, height: 11 }} fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                                      </svg>
+                                    ) : (
+                                      <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15.536a5 5 0 010-7.072m-2.828 9.9a9 9 0 010-12.728" />
+                                      </svg>
+                                    )}
+                                    {b}
+                                  </button>
+                                );
+                              })}
+                            </>
                           ) : (
                             <span
                               className="inline-flex items-center gap-1.5 px-2 py-1"

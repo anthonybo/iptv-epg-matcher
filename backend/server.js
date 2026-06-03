@@ -410,6 +410,7 @@ const commercialProfileRoutes = require('./routes/commercialProfile');
 const vodRoutes = require('./routes/vod');
 const vodStreamRoutes = require('./routes/vodStream');
 const metricsRoutes = require('./routes/metrics');
+const aiMatchingRoutes = require('./routes/aiMatching');
 const logsRoutes = require('./routes/logs');
 const userLocationsRoutes = require('./routes/userLocations');
 const liveScoresRoutes = require('./routes/liveScores');
@@ -472,6 +473,7 @@ app.use('/api/commercial-profile', commercialProfileRoutes); // Per-user, per-ch
 app.use('/api/vod', vodRoutes); // VOD browse: /movies, /series, /series/:id/episodes (lazy)
 app.use('/api/vod-stream', vodStreamRoutes); // VOD playback proxy: /movie/:id and /episode/:id with byte-range
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
+app.use('/api/ai-matching', aiMatchingRoutes); // AI channel-matching toggle + stats
 app.use('/api/logs', logsRoutes); // Frontend logging endpoint
 app.use('/api/user/locations', userLocationsRoutes); // User locations for local news
 app.use('/api/live-scores', liveScoresRoutes); // Live sports scores
@@ -851,6 +853,10 @@ if (global.gc) {
 // Start server
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => logger.info(`Backend running on http://localhost:${PORT}`));
+
+// Keep the breaking-events channel-match index warm so the first Breaking
+// tab load doesn't eat the ~40s cold-cache hit on the 874k-row search table.
+try { require('./services/breakingEvents').startMatchWarmer(); } catch (e) { logger.warn(`[Boot] breaking warmer not started: ${e.message}`); }
 
 // Handle process termination gracefully
 process.on('SIGTERM', async () => {
