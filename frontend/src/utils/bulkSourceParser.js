@@ -34,6 +34,31 @@ const normalizeServer = (rawUrl) => {
 // `host.tld` or `host.tld:port` — no scheme. Must have at least one dot in the
 // host and a TLD of 2+ letters so we don't falsely match MACs or random text.
 const BARE_HOST_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)+(?::\d{1,5})?$/;
+
+// Labeled server line common to IPTV-checker dumps:
+//   HOST:host:port   SERVER: http://host   PORTAL=host   REAL URL: ...
+// The value may be a bare host[:port] or a full http(s) URL. Note "user"
+// and "pass" are deliberately NOT in this set so credential labels don't
+// match here.
+const SERVER_LABEL_RE = /^\s*(?:host|server|portal|real[\s-]*url|url|dns|domain|line)\s*[:=]\s*(.+?)\s*$/i;
+
+// Extract a server URL from a labeled line. Returns a normalized
+// `http://host[:port]` (or the URL's origin) or null if the value
+// doesn't look like a host. A line carrying a full Xtream get.php URL
+// is left for the dedicated xtream parser, so we bail on those.
+const extractLabeledServer = (line) => {
+  const m = line.match(SERVER_LABEL_RE);
+  if (!m) return null;
+  const value = stripTrailingPunctuation(m[1].trim());
+  if (!value) return null;
+  if (GET_PHP_RE.test(value)) return null; // full xtream URL — not just a server
+  if (/^https?:\/\//i.test(value)) return normalizeServer(value);
+  // Bare host[:port] (possibly with a leading // or trailing path) — take
+  // the authority and validate it looks like a real host.
+  const authority = value.replace(/^\/\//, '').split('/')[0];
+  if (BARE_HOST_RE.test(authority)) return `http://${authority}`;
+  return null;
+};
 // user:pass — anything non-whitespace/non-colon as user, anything non-whitespace as pass.
 const COLON_CREDS_RE = /^([^\s:]+):(\S+)$/;
 
@@ -138,6 +163,19 @@ export const parseBulkSources = (rawText, options = {}) => {
     }
 
     const nonXtreamUrls = urlsInLine.filter((u) => !GET_PHP_RE.test(u));
+
+    // Priority 1.5: labeled server line (HOST:/SERVER:/PORTAL:/URL:/DNS:).
+    // Common in IPTV-checker dumps where HOST, USER and PASS live on
+    // separate lines. Sets the server context for the USER/PASS lines
+    // that follow. Only matches when the line ISN'T a credential line
+    // (those carry user/pass labels, handled below).
+    if (!userPass) {
+      const labeledServer = extractLabeledServer(line);
+      if (labeledServer) {
+        currentServer = labeledServer;
+        return;
+      }
+    }
 
     // Priority 2: compact columnar format — `host:port  user:pass  <metadata>`.
     // Runs before the label and MAC checks because the line has no scheme and

@@ -1309,6 +1309,7 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                 connection: 0,
                 notFound: 0,
                 noVideo: 0,
+                blocked: 0,
                 other: 0
             },
             serverLocation: null,
@@ -1567,6 +1568,19 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                     result.errorType = 'notFound';
                     result.error = 'HTTP 404 Not Found';
                     streamDiagnostics.errorBreakdown.notFound++;
+                } else if (errorMsg.includes('444') || errorMsg.includes('not one of 40{0,1,3,4}')) {
+                    // nginx 444 = connection closed with no response. IPTV
+                    // providers use it to reject stream requests they don't
+                    // like (IP not whitelisted / anti-leech / geo-block) even
+                    // when player_api auth succeeds. ffprobe otherwise
+                    // surfaces this as a "timed out", which misleads — it's a
+                    // provider-side rejection, not a network timeout. Checked
+                    // BEFORE the timeout branch for that reason. Note: actual
+                    // playback gets the same 444, so this is a true failure,
+                    // just correctly attributed.
+                    result.errorType = 'blocked';
+                    result.error = 'Provider rejected stream (HTTP 444 — IP block / anti-leech)';
+                    streamDiagnostics.errorBreakdown.blocked = (streamDiagnostics.errorBreakdown.blocked || 0) + 1;
                 } else if (errorMsg.includes('timed out') || errorMsg.includes('ETIMEDOUT') || errorMsg.includes('timeout')) {
                     result.errorType = 'timeout';
                     result.error = 'Connection timed out';
@@ -1614,6 +1628,10 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                 streamDiagnostics.suggestions.push('• Check for concurrent connection limits');
                 streamDiagnostics.suggestions.push('• Verify subscription is active');
             }
+        }
+
+        if (streamDiagnostics.errorBreakdown.blocked > streamDiagnostics.tested * 0.5) {
+            streamDiagnostics.suggestions.push('Provider rejected stream requests (HTTP 444). The account authenticates but the server refuses to stream to this IP — usually anti-leech, an IP/device lock, or a geo-block. The same rejection happens on real playback. Try a VPN matching the provider region, or contact the provider.');
         }
 
         if (streamDiagnostics.errorBreakdown.timeout > streamDiagnostics.tested * 0.5) {
