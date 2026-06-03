@@ -142,11 +142,26 @@ const BreakingModal = ({
     es.addEventListener('matching_start', () => setStage('matching'));
     es.addEventListener('matching_ok', () => setStage('matching'));
 
+    es.addEventListener('cached', (ev) => {
+      // Preloaded last-known still-active events from the DB — render them
+      // immediately so the tab isn't blank while the live refresh runs.
+      // 'complete' replaces this with the fresh set.
+      const data = JSON.parse(ev.data);
+      if (Array.isArray(data.events) && data.events.length > 0) {
+        setEvents(data.events);
+        setMeta((m) => ({ ...(m || {}), source: data.source || 'db-cache', preloaded: true }));
+      }
+    });
+
     es.addEventListener('complete', (ev) => {
       const data = JSON.parse(ev.data);
-      setEvents(Array.isArray(data.events) ? data.events : []);
+      const fresh = Array.isArray(data.events) ? data.events : [];
+      // A fresh non-empty result wins. But if the refresh came back empty
+      // (all web-search/feeds throttled/down), DON'T wipe the preloaded
+      // cached events — keep showing the last-known active set.
+      setEvents((prev) => (fresh.length > 0 ? fresh : (prev.length > 0 ? prev : fresh)));
       setMeta({
-        source: data.source || null,
+        source: fresh.length > 0 ? (data.source || null) : 'db-cache',
         cachedAt: data.cachedAt || null,
         elapsedMs: data.elapsedMs || null
       });
@@ -271,11 +286,16 @@ const BreakingModal = ({
           </span>
           {meta.source && (
             <span className={`px-1.5 py-px rounded-sm font-mono text-[9px] tracking-[0.06em] ${
-              meta.source === 'llm'
+              (meta.source === 'llm' || /grounded/.test(meta.source))
                 ? 'bg-cyan-500/15 text-cyan-300 ring-1 ring-cyan-500/30'
                 : 'bg-slate-800/80 text-slate-500 ring-1 ring-slate-700/40'
             }`}>
-              {meta.source === 'llm' ? 'AI · ' + (meta.elapsedMs ? `${meta.elapsedMs}ms` : '') : meta.source === 'fallback' ? 'RAW' : 'EMPTY'}
+              {/grounded/.test(meta.source) ? 'AI · WEB'
+                : meta.source === 'llm' ? `AI${meta.elapsedMs ? ` · ${meta.elapsedMs}ms` : ''}`
+                : meta.source === 'db-cache' ? 'CACHED'
+                : meta.source === 'fallback' ? 'RAW'
+                : meta.source === 'empty' ? 'EMPTY'
+                : 'LIVE'}
             </span>
           )}
         </div>
@@ -311,7 +331,7 @@ const BreakingModal = ({
             sourceStatus={sourceStatus}
             stage={stage}
             hint={elapsedSec > 8 && stage === 'sources'
-              ? 'Reddit + GDELT can take ~25s when rate-limited. Cached 15 min after.'
+              ? 'Reddit + GDELT can take ~25s when rate-limited; AI web search runs in parallel. Cached 15 min after.'
               : null}
           />
         )}
@@ -331,6 +351,32 @@ const BreakingModal = ({
               sports subs. Try Refresh to force a new pull.
             </p>
           </HelperBlock>
+        )}
+
+        {/* Background-refresh banner — shown when we already have (preloaded)
+            events AND a live pull is still running, so it's clear new events
+            are being searched for and will load in dynamically. */}
+        {loading && events.length > 0 && (
+          <div className="mb-2 px-3 py-2 rounded-lg bg-cyan-500/[0.05] ring-1 ring-cyan-500/20">
+            <div className="flex items-center gap-2 text-[11px] font-mono text-cyan-300">
+              <DotSpinner />
+              <span>
+                {stage === 'synthesis' ? 'Synthesizing new events…'
+                  : stage === 'matching' ? 'Matching channels…'
+                  : 'Searching live sources for new events…'}
+              </span>
+              <span className="ml-auto text-slate-500 tabular-nums">{elapsedSec}s</span>
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              <SourceProgressRow label="Reddit" status={sourceStatus.reddit} />
+              <SourceProgressRow label="GDELT" status={sourceStatus.gdelt} />
+              {sourceStatus.grounding && (
+                <div className="col-span-2">
+                  <SourceProgressRow label="AI Web Search" status={sourceStatus.grounding} />
+                </div>
+              )}
+            </div>
+          </div>
         )}
 
         {events.length > 0 && (
@@ -409,6 +455,14 @@ const EventRow = ({ event, idx, isExpanded, onToggleExpand, onPickChannel, picki
                 <span className={`flex-shrink-0 font-mono text-[8.5px] tracking-[0.12em] uppercase ${confTone}`} title={`Confidence: ${event.confidence}`}>
                   · {event.confidence}
                 </span>
+                {event.grounded && (
+                  <span
+                    title="Surfaced by AI web search (Gemini grounding) — live web sources, not the Reddit/GDELT feed"
+                    className="flex-shrink-0 inline-flex items-center px-1 py-px rounded-sm font-mono text-[8.5px] tracking-[0.12em] ring-1 ring-cyan-500/40 text-cyan-300 bg-cyan-500/[0.10]"
+                  >
+                    ✦ AI
+                  </span>
+                )}
               </div>
               {event.location && (
                 <div className="mt-0.5 text-[10px] text-slate-500 font-mono">
@@ -564,6 +618,11 @@ const SpinnerBlock = ({ label, elapsedSec = 0, hint = null, sourceStatus = null,
       <div className="w-full max-w-xs grid grid-cols-2 gap-1.5 mt-1">
         <SourceProgressRow label="Reddit" status={sourceStatus.reddit} />
         <SourceProgressRow label="GDELT"  status={sourceStatus.gdelt}  />
+        {sourceStatus.grounding && (
+          <div className="col-span-2">
+            <SourceProgressRow label="AI Web Search" status={sourceStatus.grounding} />
+          </div>
+        )}
       </div>
     )}
     {stage && stage !== 'sources' && (

@@ -25,7 +25,7 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../config/logger');
 const { authMiddleware } = require('../middleware/authMiddleware');
-const { getBreakingEvents } = require('../services/breakingEvents');
+const { getBreakingEvents, getPersistedBreakingEvents } = require('../services/breakingEvents');
 
 router.use(authMiddleware);
 
@@ -99,6 +99,19 @@ router.get('/stream', async (req, res) => {
   const t0 = Date.now();
   try {
     send('open', { startedAt: t0 });
+
+    // Preload: emit the last-known still-active events from the DB right away
+    // so the tab populates instantly instead of showing an empty/loading
+    // screen while the slow/flaky web-search + synthesis runs below.
+    try {
+      const cached = await getPersistedBreakingEvents(userId);
+      if (cached.events.length > 0 && !closed) {
+        send('cached', { ...cached, elapsedMs: Date.now() - t0 });
+      }
+    } catch (e) {
+      logger.warn(`[breaking-events/stream] preload failed: ${e.message}`);
+    }
+
     const result = await getBreakingEvents(userId, {
       force,
       onProgress: (ev) => send(ev.type, ev)

@@ -29,10 +29,27 @@ const logger = require('../../config/logger');
 const { collectHotThreads } = require('./redditHotSource');
 const { collectArticles } = require('./gdeltSource');
 const { isLlmReady, generateJson } = require('../llm/client');
+const webSearch = require('../llm/webSearch');
 const pg = require('../postgresService');
 
 const SYNTH_CACHE_TTL_MS = 15 * 60 * 1000;
 const synthCache = { ts: 0, events: null };
+
+// Web-grounded breaking events run ALONGSIDE the Reddit/GDELT synthesizer
+// (which is left untouched). They backstop the common case where both free
+// feeds are rate-limited (429) and enrich the populated case. Cached
+// user-independently like synthCache.
+const GROUNDED_CACHE_TTL_MS = 15 * 60 * 1000;
+const groundedCache = { ts: 0, events: null };
+
+// Per-user cache of channel-MATCHED events. attachChannelMatches is the
+// expensive step (it scans the 874k-row iptv_channels_search shadow). The
+// synthesized+grounded events are stable for ~15 min, so the matched
+// result is too — caching it keeps repeated polls/refreshes instant
+// instead of re-running the match each time. Keyed by userId; a content
+// signature guards against serving stale matches when the events change.
+const MATCH_CACHE_TTL_MS = 15 * 60 * 1000;
+const matchCache = new Map(); // userId -> { ts, sig, events }
 
 const SYSTEM_PROMPT = `You are a real-time event extractor for a live-TV viewer app.
 
@@ -496,23 +513,281 @@ async function attachChannelMatches(userId, events) {
  *   const result = await getBreakingEvents(userId, { force: true });
  *   // { events: […], cachedAt, source }
  */
+/**
+ * ADDITIVE source: query the live web (Gemini google_search grounding) for
+ * what's breaking RIGHT NOW. This does NOT replace the Reddit/GDELT
+ * synthesizer — it runs alongside it. It's the reliable path when both free
+ * feeds are 429'd (which is most of the time), and otherwise enriches the
+ * synthesized set. User-independent, cached 15 min. Returns [] on any
+ * failure / when grounding isn't configured.
+ */
+async function fetchGroundedBreaking({ force = false } = {}) {
+  if (!webSearch.isAvailable()) return [];
+  if (!force && groundedCache.events && Date.now() - groundedCache.ts < GROUNDED_CACHE_TTL_MS) {
+    return groundedCache.events;
+  }
+  const prompt =
+    'What are the most significant BREAKING news events and major live happenings in the ' +
+    'United States RIGHT NOW (active wildfires, severe weather, police chases / manhunts / ' +
+    'standoffs, major sports moments, and major breaking national news)? Respond with ONLY a ' +
+    'JSON object {"events":[ ... ]}, max 10 events, each: {"title":"short headline","type":' +
+    '"fire|chase|weather|disaster|protest|breaking|sport|politics|other","location":"city, ST ' +
+    'or null","summary":"one sentence","channel_hints":[...]}.\n' +
+    'channel_hints MUST be actual TELEVISION channels a viewer could tune to that are likely ' +
+    'airing coverage of this story: relevant national news/weather networks (e.g. CNN, Fox ' +
+    'News, MSNBC, The Weather Channel, ABC News, NBC News, CBS News; ESPN/Fox Sports for ' +
+    'sports) AND, for a LOCAL story, the specific local TV affiliate CALL LETTERS for that ' +
+    'city (for example Albuquerque/New Mexico → KOB, KOAT, KRQE; Los Angeles → KTLA, KABC, ' +
+    'KNBC). Give 4-6. NEVER list government agencies (e.g. NIFC), websites, apps, fire/weather ' +
+    'maps, wire services, or generic phrases like "local news" — ONLY real broadcast TV ' +
+    'channel names/call letters.\n' +
+    'No prose, no markdown.';
+
+  let r;
+  try {
+    // json:true → forces structured output (Groq compound otherwise
+    // intermittently returns a prose refusal that fails to parse).
+    r = await webSearch.search(prompt, { timeoutMs: 20000, json: true });
+  } catch (err) {
+    logger.warn(`[BreakingEvents:grounded] call failed: ${err.message}`);
+    return groundedCache.events || [];
+  }
+  if (!r || !r.text) return groundedCache.events || [];
+
+  let arr;
+  try {
+    let txt = r.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    // Accept either {"events":[...]} (JSON object mode) or a bare [...]
+    // array (some providers ignore json mode). Slice to the JSON payload.
+    const objStart = txt.indexOf('{');
+    const arrStart = txt.indexOf('[');
+    if (arrStart !== -1 && (objStart === -1 || arrStart < objStart)) {
+      const end = txt.lastIndexOf(']');
+      if (end > arrStart) arr = JSON.parse(txt.slice(arrStart, end + 1));
+    } else if (objStart !== -1) {
+      const end = txt.lastIndexOf('}');
+      const obj = JSON.parse(txt.slice(objStart, end + 1));
+      arr = Array.isArray(obj) ? obj : (Array.isArray(obj.events) ? obj.events : []);
+    }
+  } catch (err) {
+    logger.warn(`[BreakingEvents:grounded] JSON parse failed: ${err.message}`);
+    return groundedCache.events || [];
+  }
+  if (!Array.isArray(arr)) return groundedCache.events || [];
+
+  const events = arr.slice(0, 10).map((e) => ({
+    title: String(e.title || '').slice(0, 160),
+    type: normalizeType(e.type),
+    location: e.location || null,
+    summary: String(e.summary || '').slice(0, 240),
+    channel_hints: Array.isArray(e.channel_hints) ? e.channel_hints.slice(0, 6).map(String) : [],
+    confidence: ['high', 'medium', 'low'].includes(e.confidence) ? e.confidence : 'high',
+    sources: [],
+    grounded: true,
+  })).filter((e) => e.title);
+
+  groundedCache.events = events;
+  groundedCache.ts = Date.now();
+  logger.info(`[BreakingEvents:grounded] ${events.length} web-grounded events (${r.sources} sources)`);
+  return events;
+}
+
+// Merge grounded events into the synthesized set, deduped by a normalized
+// title so the same story from both pipelines shows once. Synthesized
+// (Reddit/GDELT) events keep priority/order; grounded extras are appended.
+function mergeBreaking(primary, grounded) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const seen = new Set((primary || []).map((e) => norm(e.title)));
+  const extra = (grounded || []).filter((e) => {
+    const k = norm(e.title);
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return [...(primary || []), ...extra].slice(0, 20);
+}
+
+/* ────────── DB persistence (preload + background refresh) ──────────── */
+// Events persist so the tab can show the last-known still-active set
+// instantly while a fresh pull runs. User-independent (no channel data).
+const ACTIVE_WINDOW_MS = 3 * 60 * 60 * 1000; // an event stays "active" 3h after last seen
+
+const eventKey = (title) => String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 200);
+
+// Fire-and-forget UPSERT of the merged event set, refreshing last_seen /
+// expires_at for stories seen again. Prunes expired rows opportunistically.
+function persistEvents(events) {
+  if (!Array.isArray(events) || events.length === 0) return;
+  const sql = `
+    INSERT INTO breaking_events
+      (event_key, title, type, location, summary, channel_hints, confidence, grounded, sources, last_seen, expires_at)
+    VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::jsonb, CURRENT_TIMESTAMP, $10)
+    ON CONFLICT (event_key) DO UPDATE SET
+      title = EXCLUDED.title, type = EXCLUDED.type, location = EXCLUDED.location,
+      summary = EXCLUDED.summary, channel_hints = EXCLUDED.channel_hints,
+      confidence = EXCLUDED.confidence, grounded = breaking_events.grounded OR EXCLUDED.grounded,
+      sources = EXCLUDED.sources, last_seen = CURRENT_TIMESTAMP, expires_at = EXCLUDED.expires_at
+  `;
+  const expires = new Date(Date.now() + ACTIVE_WINDOW_MS).toISOString();
+  Promise.all(events.map((e) => {
+    const k = eventKey(e.title);
+    if (!k) return Promise.resolve();
+    return pg.query(sql, [
+      k, String(e.title || '').slice(0, 200), e.type || null, e.location || null,
+      String(e.summary || '').slice(0, 400), JSON.stringify(e.channel_hints || []),
+      e.confidence || null, Boolean(e.grounded), JSON.stringify(e.sources || []), expires,
+    ]).catch(() => {});
+  }))
+    .then(() => pg.query('DELETE FROM breaking_events WHERE expires_at < CURRENT_TIMESTAMP').catch(() => {}))
+    .catch((err) => logger.warn(`[BreakingEvents] persist failed: ${err.message}`));
+}
+
+// Load the still-active persisted events (user-independent).
+async function loadPersistedActive(limit = 20) {
+  try {
+    const { rows } = await pg.query(
+      `SELECT title, type, location, summary, channel_hints, confidence, grounded, sources
+         FROM breaking_events
+        WHERE expires_at > CURRENT_TIMESTAMP
+        ORDER BY last_seen DESC
+        LIMIT $1`,
+      [limit]
+    );
+    return rows.map((r) => ({
+      title: r.title,
+      type: normalizeType(r.type),
+      location: r.location || null,
+      summary: r.summary || '',
+      channel_hints: Array.isArray(r.channel_hints) ? r.channel_hints : [],
+      confidence: r.confidence || 'medium',
+      grounded: Boolean(r.grounded),
+      sources: Array.isArray(r.sources) ? r.sources : [],
+    }));
+  } catch (err) {
+    logger.warn(`[BreakingEvents] loadPersistedActive failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Instant preload: the last-known still-active events from the DB, with this
+ * user's channel matches attached. Returns { events, source, count } — used
+ * by the SSE route to populate the tab immediately before the live refresh.
+ */
+async function getPersistedBreakingEvents(userId) {
+  const persisted = await loadPersistedActive(20);
+  if (persisted.length === 0) return { events: [], source: 'db-empty', count: 0 };
+  const events = await attachChannelMatches(userId, persisted);
+  return { events, source: 'db-cache', count: events.length };
+}
+
 async function getBreakingEvents(userId, opts = {}) {
   // `opts.onProgress` (if provided) is forwarded into synthesis so
   // the SSE route can stream per-source updates.
-  const synth = await synthesizeEvents(opts);
-  if (typeof opts.onProgress === 'function') {
-    try { opts.onProgress({ type: 'matching_start', count: synth.events.length }); } catch (_) {}
+  const emit = (type, payload = {}) => {
+    if (typeof opts.onProgress !== 'function') return;
+    try { opts.onProgress({ type, ...payload }); } catch (_) {}
+  };
+
+  // Run the (untouched) Reddit/GDELT synthesizer and the additive
+  // web-grounded source IN PARALLEL — grounding no longer waits for the
+  // ~20s Reddit/GDELT backoff to finish first.
+  const groundingOn = webSearch.isAvailable();
+  if (groundingOn) emit('source_start', { source: 'grounding' });
+  const groundedT0 = Date.now();
+  const [synth, grounded] = await Promise.all([
+    synthesizeEvents(opts),
+    groundingOn
+      ? fetchGroundedBreaking({ force: opts.force })
+          .then((g) => {
+            const ms = Date.now() - groundedT0;
+            if (g.length === 0) {
+              // Be honest in the UI: "rate-limited" (all backends throttled)
+              // vs "found nothing", instead of a misleading 0.
+              const ws = webSearch.getStatus();
+              const allLimited = (ws.providers || []).filter((p) => p.available).every((p) => p.rateLimited);
+              if (allLimited) emit('source_err', { source: 'grounding', error: 'rate-limited', ms });
+              else emit('source_ok', { source: 'grounding', count: 0, ms });
+            } else {
+              emit('source_ok', { source: 'grounding', count: g.length, ms });
+            }
+            return g;
+          })
+          .catch(() => { emit('source_err', { source: 'grounding', ms: Date.now() - groundedT0 }); return []; })
+      : Promise.resolve([]),
+  ]);
+
+  const merged = mergeBreaking(synth.events, grounded);
+  // Persist the merged (user-independent) set so subsequent loads can preload
+  // it instantly while a fresh pull runs in the background. Fire-and-forget.
+  if (merged.length > 0) persistEvents(merged);
+  emit('matching_start', { count: merged.length });
+
+  // Per-user matched-events cache: skip the expensive channel match when
+  // the merged event set is unchanged and still fresh.
+  const sig = `${merged.length}:${merged.map((e) => e.title).join('|')}`;
+  const cachedMatch = matchCache.get(userId);
+  let events;
+  if (!opts.force && cachedMatch && cachedMatch.sig === sig && Date.now() - cachedMatch.ts < MATCH_CACHE_TTL_MS) {
+    events = cachedMatch.events;
+  } else {
+    events = await attachChannelMatches(userId, merged);
+    matchCache.set(userId, { ts: Date.now(), sig, events });
   }
-  const events = await attachChannelMatches(userId, synth.events);
-  if (typeof opts.onProgress === 'function') {
-    try { opts.onProgress({ type: 'matching_ok', count: events.length }); } catch (_) {}
+  emit('matching_ok', { count: events.length });
+
+  // Reflect that grounding contributed, so the UI isn't "empty" when the
+  // synthesizer struck out but grounding found events.
+  const source = synth.source === 'empty'
+    ? (grounded.length > 0 ? 'grounded' : 'empty')
+    : (grounded.length > 0 ? `${synth.source}+grounded` : synth.source);
+
+  return { ...synth, events, source };
+}
+
+/* ────────── Match-index warmer ─────────────────────────────────────── */
+
+// The channel-match query is ~70ms warm but ~40s COLD — the first hit after
+// the 874k-row iptv_channels_search GIN index + heap pages get evicted has
+// to read them from disk. There's no background synthesis schedule, so the
+// first user to open the Breaking tab would eat that cold cost. This warmer
+// runs the real match (via attachChannelMatches with common news/sports
+// hints) shortly after boot and on an interval, keeping those pages hot so
+// user-facing matches stay fast.
+const WARM_HINTS = [
+  'CNN', 'FOX NEWS', 'MSNBC', 'ESPN', 'THE WEATHER CHANNEL', 'ABC NEWS',
+  'NBC NEWS', 'CBS NEWS', 'BBC NEWS', 'FOX SPORTS 1', 'KTLA', 'NEWSNATION',
+];
+let warmerStarted = false;
+
+async function warmMatchCache() {
+  try {
+    const u = await pg.query('SELECT DISTINCT user_id FROM iptv_channels_search WHERE user_id IS NOT NULL LIMIT 5');
+    const t = Date.now();
+    for (const row of u.rows) {
+      // Reuse the exact match path so we warm precisely the pages it reads.
+      await attachChannelMatches(row.user_id, [{ channel_hints: WARM_HINTS, title: 'warm', type: 'other', summary: '', location: null }]).catch(() => {});
+    }
+    logger.info(`[BreakingEvents] match index warmed for ${u.rows.length} user(s) in ${Date.now() - t}ms`);
+  } catch (err) {
+    logger.warn(`[BreakingEvents] match warm failed: ${err.message}`);
   }
-  return { ...synth, events };
+}
+
+/** Start the background warmer (call once from server boot). */
+function startMatchWarmer() {
+  if (warmerStarted) return;
+  warmerStarted = true;
+  setTimeout(() => { warmMatchCache(); }, 30 * 1000);          // ~30s after boot
+  setInterval(() => { warmMatchCache(); }, 10 * 60 * 1000);    // every 10 min
+  logger.info('[BreakingEvents] match-index warmer scheduled');
 }
 
 module.exports = {
   getBreakingEvents,
+  getPersistedBreakingEvents,
   synthesizeEvents,
+  startMatchWarmer,
   // Exposed for tests / smoke runs
   _collectHotThreads: collectHotThreads
 };
