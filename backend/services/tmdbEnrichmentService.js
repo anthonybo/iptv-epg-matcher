@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const logger = require('../config/logger');
 const postgresService = require('./postgresService');
+const featureFlags = require('./featureFlags');
 
 /**
  * vodEnrichmentService (file kept as tmdbEnrichmentService.js for
@@ -93,7 +94,10 @@ function pause() {
 }
 
 function isPaused() {
-  return pauseHoldCount > 0;
+  // pauseHoldCount = transient pause held by user-initiated ingest/deletes.
+  // The feature flag is a runtime kill switch (e.g. while reindexing the
+  // 1.5M-row movie_streams table) that survives across ticks.
+  return pauseHoldCount > 0 || featureFlags.isEnabled('pause_vod_enrichment', false);
 }
 
 let lastApiCallAt = 0;

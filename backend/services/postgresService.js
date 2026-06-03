@@ -23,7 +23,12 @@ const pool = new Pool({
     min: 5,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
-    statement_timeout: 600000, // 10 minute query timeout for bulk operations
+    // 30s cap for normal (OLTP) queries. A 10-minute timeout let a single
+    // slow query hog a pooled connection for 10 min — under load they piled
+    // up and saturated the DB (movies/search/genres all hung). Bulk jobs
+    // (migrations, ingest, index builds) run on dedicated connections and
+    // raise this with `SET statement_timeout` as needed.
+    statement_timeout: parseInt(process.env.POSTGRES_STATEMENT_TIMEOUT_MS) || 30000,
     ssl: process.env.NODE_ENV === 'production' ? {
         rejectUnauthorized: false
     } : false
@@ -737,22 +742,36 @@ async function getChannelsForSession(sessionId, options = {}) {
         paramIndex++;
     }
 
-    // Count total - use fast estimate for large result sets
-    // For pagination, an approximate count is acceptable and MUCH faster
+    // Count total.
+    //
+    // For SEARCH queries we deliberately SKIP COUNT(*). `name ILIKE '%term%'`
+    // is a leading-wildcard scan over ~874k rows with no usable index —
+    // measured at 4s ("nhl") to 28s ("sport"). The 2s JS timeout below only
+    // abandons the *Promise*; Postgres keeps running the query, so fast
+    // typing stacks several multi-second scans that exhaust the connection
+    // pool and make the whole app lag. The frontend derives "has more" from
+    // the returned page length and never reads this total, so an estimate is
+    // fine. The exact count is computed AFTER the data fetch (below) only
+    // when not searching.
     let total = 0;
-    try {
-        // Try exact count with a short timeout for small result sets
-        const countQuery = query.replace(/SELECT c\.channel_id as id.*?\n.*?FROM/s, 'SELECT COUNT(*) as total FROM');
-        const countResult = await Promise.race([
-            queryWithRetry(countQuery, params),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Count timeout')), 2000))
-        ]);
-        total = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].total) : 0;
-    } catch (err) {
-        // If count times out, estimate based on limit
-        // This is acceptable for pagination UX - users don't need exact totals
-        logger.debug('Using estimated count for pagination');
-        total = limit * 100; // Estimate: assume up to 100 pages worth of data
+    let didCount = false;
+    if (!search) {
+        try {
+            // Try exact count with a short timeout for small result sets
+            const countQuery = query.replace(/SELECT c\.channel_id as id.*?\n.*?FROM/s, 'SELECT COUNT(*) as total FROM');
+            const countResult = await Promise.race([
+                queryWithRetry(countQuery, params),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Count timeout')), 2000))
+            ]);
+            total = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].total) : 0;
+            didCount = true;
+        } catch (err) {
+            // If count times out, estimate based on limit
+            // This is acceptable for pagination UX - users don't need exact totals
+            logger.debug('Using estimated count for pagination');
+            total = limit * 100; // Estimate: assume up to 100 pages worth of data
+            didCount = true;
+        }
     }
 
     // Get paginated results
@@ -766,6 +785,13 @@ async function getChannelsForSession(sessionId, options = {}) {
     params.push(limit, offset);
 
     const result = await queryWithRetry(query, params);
+
+    // Search path: estimate the total from how full this page came back,
+    // rather than running the expensive COUNT(*) scan. If the page is full
+    // there's at least one more page; otherwise this is the last page.
+    if (!didCount) {
+        total = offset + result.rows.length + (result.rows.length === limit ? limit : 0);
+    }
 
     return {
         channels: result.rows,
