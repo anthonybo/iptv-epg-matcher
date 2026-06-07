@@ -527,7 +527,7 @@ const EpisodeRow = ({ episode, onPlay, playing }) => (
   </button>
 );
 
-const VodDetail = ({ kind, id, onBack }) => {
+const VodDetail = ({ kind, id, onBack, onGenre }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
@@ -937,20 +937,41 @@ const VodDetail = ({ kind, id, onBack }) => {
               </div>
             </div>
 
-            {/* Genre chips — pulled out of the inline meta line so they
-                read as classification tags rather than another bullet. */}
-            {Array.isArray(row.genres) && row.genres.length > 0 && (
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {row.genres.slice(0, 6).map((g) => (
-                  <span
-                    key={g}
-                    className="inline-flex items-center h-6 px-2.5 rounded-md border border-slate-800 bg-slate-900/50 text-slate-300 font-mono text-[10px] uppercase tracking-[0.16em]"
-                  >
-                    {g}
-                  </span>
-                ))}
-              </div>
-            )}
+            {/* Classification tags. Canonical genres (from enrichment)
+                when we have them; otherwise the provider's own category
+                bucket as a fallback, so the long tail of unenriched
+                titles still shows how it's classified. The fallback is
+                styled muted to read as the provider's label, not a
+                canonical genre. */}
+            {(() => {
+              const genres = Array.isArray(row.genres) ? row.genres : [];
+              const cats = Array.isArray(data.categories) ? data.categories : [];
+              if (genres.length === 0 && cats.length === 0) return null;
+              return (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {genres.slice(0, 6).map((g) => (
+                    <button
+                      key={`g-${g}`}
+                      type="button"
+                      onClick={() => onGenre && onGenre(g)}
+                      title={`Browse ${g} ${kind === 'movie' ? 'movies' : 'series'}`}
+                      className="inline-flex items-center h-6 px-2.5 rounded-md border border-slate-800 bg-slate-900/50 text-slate-300 hover:border-cyan-500/60 hover:text-cyan-300 hover:bg-cyan-500/10 transition-colors cursor-pointer font-mono text-[10px] uppercase tracking-[0.16em]"
+                    >
+                      {g}
+                    </button>
+                  ))}
+                  {genres.length === 0 && cats.slice(0, 4).map((c) => (
+                    <span
+                      key={`c-${c}`}
+                      title="Provider category (no canonical genre yet)"
+                      className="inline-flex items-center h-6 px-2.5 rounded-md border border-slate-800/70 bg-slate-900/30 text-slate-500 font-mono text-[10px] tracking-[0.12em]"
+                    >
+                      {c}
+                    </span>
+                  ))}
+                </div>
+              );
+            })()}
 
             {!row.overview && !enriching && !row.enriched_at && (
               <p className="text-[12px] text-slate-500 italic max-w-3xl">

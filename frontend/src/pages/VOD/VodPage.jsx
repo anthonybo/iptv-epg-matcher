@@ -11,6 +11,14 @@ import VodDetail from './VodDetail';
  */
 const VodPage = ({ kind }) => {
   const [openItem, setOpenItem] = useState(null);
+  // When the user clicks a genre chip on a detail page, we return to the
+  // grid pre-filtered to that genre. Held here (not in VodBrowse, which
+  // remounts on every back-navigation) so it survives the detail→grid
+  // hop. Cleared whenever a detail is opened normally so a stale genre
+  // doesn't silently re-apply on a later, unrelated back-navigation.
+  const [browseGenre, setBrowseGenre] = useState('');
+
+  const openDetail = (item) => { setBrowseGenre(''); setOpenItem(item); };
 
   // When the sidebar flips between Movies and TV Series, clear any
   // open detail page — otherwise the previous tab's ID (e.g. a
@@ -19,6 +27,7 @@ const VodPage = ({ kind }) => {
   // doesn't match (movies use `m:`, series use `s:`).
   useEffect(() => {
     setOpenItem(null);
+    setBrowseGenre('');
   }, [kind]);
 
   // Reset the scroll container when the user switches between Movies
@@ -52,10 +61,11 @@ const VodPage = ({ kind }) => {
         kind={kind}
         id={openItem.id}
         onBack={() => setOpenItem(null)}
+        onGenre={(g) => { setBrowseGenre(g); setOpenItem(null); }}
       />
     );
   }
-  return <VodBrowse kind={kind} onOpen={setOpenItem} />;
+  return <VodBrowse kind={kind} onOpen={openDetail} initialGenre={browseGenre} />;
 };
 
 export default VodPage;

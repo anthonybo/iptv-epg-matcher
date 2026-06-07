@@ -73,7 +73,7 @@ function buildRefreshSql(kind) {
       COALESCE(MAX(c.poster_url), MIN(ms.poster_fallback)) AS poster_url,
       MAX(${k.ratingExpr}) AS rating,
       bool_or(c.id IS NOT NULL) AS enriched,
-      COALESCE(MAX(c.genres), '{}'::text[]) AS genres,
+      normalize_genres(COALESCE(MAX(c.genres), '{}'::text[])) AS genres,
       COUNT(*)::int AS source_count,
       MAX(${k.addedAtCol}) AS max_added_at
     FROM ${k.rawTable} ms

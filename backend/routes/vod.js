@@ -7,6 +7,7 @@ const enrichmentService = require('../services/tmdbEnrichmentService');
 const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
 const aiLlmCache = require('../services/aiLlmCache');
 const vodCatalog = require('../services/vodCatalogService');
+const { normalizeGenres } = require('../utils/genreNormalize');
 
 router.use(authMiddleware);
 
@@ -849,6 +850,10 @@ router.get('/movies/:id', requireAuth, async (req, res) => {
     // multiple sources that share the same host (e.g., 6 different
     // lordstreams.live accounts). source_account_status surfaces dead
     // / expired accounts so the user can skip them without clicking.
+    // vc.name = the provider's own category bucket for this stream
+    // ("Action Movies", "[PT] Portuguese Movies", …). We surface it as a
+    // fallback "classification" on the detail page for the long tail of
+    // unenriched titles that have no canonical genre.
     const sourcesSql = movieId
       ? `SELECT ms.id AS movie_stream_id, ms.source_id,
                 s.name AS source_name, s.nickname AS source_nickname,
@@ -856,8 +861,9 @@ router.get('/movies/:id', requireAuth, async (req, res) => {
                 s.account_status AS source_account_status,
                 s.exp_date AS source_exp_date,
                 ms.provider_stream_id, ms.container_extension, ms.added_at, ms.provider_name, ms.rating,
-                ms.raw_meta
+                ms.raw_meta, vc.name AS provider_category
          FROM movie_streams ms JOIN iptv_sources s ON s.id = ms.source_id
+         LEFT JOIN vod_categories vc ON vc.source_id = ms.source_id AND vc.provider_category_id = ms.provider_category_id AND vc.kind = 'movie'
          WHERE ms.movie_id = $1 AND s.user_id = $2 ORDER BY ms.added_at DESC NULLS LAST`
       : `SELECT ms.id AS movie_stream_id, ms.source_id,
                 s.name AS source_name, s.nickname AS source_nickname,
@@ -865,8 +871,9 @@ router.get('/movies/:id', requireAuth, async (req, res) => {
                 s.account_status AS source_account_status,
                 s.exp_date AS source_exp_date,
                 ms.provider_stream_id, ms.container_extension, ms.added_at, ms.provider_name, ms.rating,
-                ms.raw_meta
+                ms.raw_meta, vc.name AS provider_category
          FROM movie_streams ms JOIN iptv_sources s ON s.id = ms.source_id
+         LEFT JOIN vod_categories vc ON vc.source_id = ms.source_id AND vc.provider_category_id = ms.provider_category_id AND vc.kind = 'movie'
          WHERE ms.id = $1 AND s.user_id = $2`;
     const sourcesResult = await postgresService.query(sourcesSql, [movieId || idNum, userId]);
 
@@ -889,7 +896,7 @@ router.get('/movies/:id', requireAuth, async (req, res) => {
       poster_url: firstRaw.stream_icon || firstRaw.screenshot_uri || firstRaw.movie_image || firstRaw.cover_big || firstRaw.cover || firstRaw.pic || null,
       backdrop_url: firstRaw.backdrop_path?.[0] || null,
       runtime_secs: null,
-      genres: firstRaw.genre ? String(firstRaw.genre).split(/[,/]/).map(s => s.trim()).filter(Boolean) : null,
+      genres: normalizeGenres(firstRaw.genre ? String(firstRaw.genre).split(/[,/]/) : []),
       director: firstRaw.director || null,
       cast_json: null,
       // Provider rating arrives as a NUMERIC string ("0", "7.5"). Coerce
@@ -901,9 +908,21 @@ router.get('/movies/:id', requireAuth, async (req, res) => {
       enriched_at: null
     };
 
+    // Normalize canonical genres (collapse Sci-Fi/Science Fiction etc.)
+    // so the detail chips match the filter labels.
+    if (canonical) canonical.genres = normalizeGenres(canonical.genres);
+
+    // Distinct provider category buckets across this movie's sources —
+    // the frontend shows these as the classification when there are no
+    // real genres (the unenriched long tail).
+    const categories = [...new Set(
+      sourcesResult.rows.map((r) => r.provider_category).filter(Boolean)
+    )];
+
     res.json({
       success: true,
       movie: canonical || synthetic,
+      categories,
       sources: sourcesResult.rows
     });
   } catch (error) {
@@ -958,8 +977,9 @@ router.get('/series/:id', requireAuth, async (req, res) => {
                 s.account_status AS source_account_status,
                 s.exp_date AS source_exp_date,
                 ss.provider_series_id, ss.last_episode_fetch, ss.provider_name, ss.raw_meta,
-                ss.updated_at
+                ss.updated_at, vc.name AS provider_category
          FROM series_sources ss JOIN iptv_sources s ON s.id = ss.source_id
+         LEFT JOIN vod_categories vc ON vc.source_id = ss.source_id AND vc.provider_category_id = ss.provider_category_id AND vc.kind = 'series'
          WHERE ss.series_id = $1 AND s.user_id = $2 ORDER BY ss.updated_at DESC NULLS LAST`
       : `SELECT ss.id AS series_source_id, ss.source_id,
                 s.name AS source_name, s.nickname AS source_nickname,
@@ -967,8 +987,9 @@ router.get('/series/:id', requireAuth, async (req, res) => {
                 s.account_status AS source_account_status,
                 s.exp_date AS source_exp_date,
                 ss.provider_series_id, ss.last_episode_fetch, ss.provider_name, ss.raw_meta,
-                ss.updated_at
+                ss.updated_at, vc.name AS provider_category
          FROM series_sources ss JOIN iptv_sources s ON s.id = ss.source_id
+         LEFT JOIN vod_categories vc ON vc.source_id = ss.source_id AND vc.provider_category_id = ss.provider_category_id AND vc.kind = 'series'
          WHERE ss.id = $1 AND s.user_id = $2`;
     const sourcesResult = await postgresService.query(sourcesSql, [seriesId || idNum, userId]);
 
@@ -990,16 +1011,22 @@ router.get('/series/:id', requireAuth, async (req, res) => {
       overview: firstRaw.plot || firstRaw.description || null,
       poster_url: firstRaw.cover || firstRaw.cover_big || firstRaw.screenshot_uri || firstRaw.pic || firstRaw.stream_icon || null,
       backdrop_url: Array.isArray(firstRaw.backdrop_path) ? firstRaw.backdrop_path[0] : null,
-      genres: firstRaw.genre ? String(firstRaw.genre).split(/[,/]/).map(s => s.trim()).filter(Boolean) : null,
+      genres: normalizeGenres(firstRaw.genre ? String(firstRaw.genre).split(/[,/]/) : []),
       cast_json: null,
       rating_tmdb: null,
       trailer_youtube_id: null,
       enriched_at: null
     };
 
+    if (canonical) canonical.genres = normalizeGenres(canonical.genres);
+    const categories = [...new Set(
+      sourcesResult.rows.map((r) => r.provider_category).filter(Boolean)
+    )];
+
     res.json({
       success: true,
       series: canonical || synthetic,
+      categories,
       sources: sourcesResult.rows
     });
   } catch (error) {

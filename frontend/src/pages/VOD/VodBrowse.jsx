@@ -179,7 +179,7 @@ const FmtRatingOverlay = ({ rating, enriched = true }) => {
   );
 };
 
-const VodBrowse = ({ kind, onOpen }) => {
+const VodBrowse = ({ kind, onOpen, initialGenre }) => {
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [sort, setSort] = useState('recent');
@@ -189,7 +189,10 @@ const VodBrowse = ({ kind, onOpen }) => {
   // scoped to one provider. Setting this filter implicitly drops
   // unenriched rows (no genres array) since the backend INNER JOINs
   // the canonical `movies`/`series` table.
-  const [genre, setGenre] = useState('');
+  // Seed from initialGenre so opening the grid from a detail-page genre
+  // chip lands pre-filtered. VodBrowse remounts on every back-navigation,
+  // so this initializer runs each visit.
+  const [genre, setGenre] = useState(initialGenre || '');
   const [genres, setGenres] = useState([]);
 
   const [items, setItems] = useState([]);
@@ -238,9 +241,17 @@ const VodBrowse = ({ kind, onOpen }) => {
   // applies to series, Animation overlaps, etc.) so we reset the
   // active genre when kind flips. We don't reset on sourceId change
   // because genres are cross-source.
+  const skipGenreResetRef = useRef(true);
   useEffect(() => {
     let cancelled = false;
-    setGenre('');
+    // Skip clearing the genre on the initial mount so a genre seeded from
+    // a detail-page chip (initialGenre) survives; only clear when kind
+    // actually flips (movie vs series genre sets differ).
+    if (skipGenreResetRef.current) {
+      skipGenreResetRef.current = false;
+    } else {
+      setGenre('');
+    }
     vodService.getGenres(kind).then((data) => {
       if (cancelled) return;
       setGenres(data.genres || []);
