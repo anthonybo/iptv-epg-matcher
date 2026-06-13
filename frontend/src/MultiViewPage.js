@@ -21,7 +21,8 @@ import {
   LayoutPanel,
   CommandPalette,
   DrawerShell,
-  MultiViewTaskBar
+  MultiViewTaskBar,
+  OPLiveFeedPanel
 } from './components/MultiView';
 import LiveScoresTicker from './components/LiveScoresTicker';
 
@@ -91,6 +92,22 @@ const MultiViewPage = ({ sessionId }) => {
     const saved = localStorage.getItem('multiview_layout_mode');
     return saved || 'grid';
   });
+  // Live-chatter feed side panel. Unlike the drawer panels (overlays),
+  // this opens as a column BESIDE the grid so videos + chatter are both
+  // visible. open/width/tag persist so it comes back the way you left it.
+  const [feedPanel, setFeedPanel] = useState(() => {
+    const saved = localStorage.getItem('multiview_social_feed');
+    const defaults = { open: false, width: 380, tag: 'OPLive' };
+    if (saved) {
+      try { return { ...defaults, ...JSON.parse(saved) }; } catch { return defaults; }
+    }
+    return defaults;
+  });
+  // Functional updates so these stay referentially stable (no feedPanel dep).
+  const toggleFeedPanel = useCallback(() => setFeedPanel((p) => ({ ...p, open: !p.open })), []);
+  const closeFeedPanel = useCallback(() => setFeedPanel((p) => ({ ...p, open: false })), []);
+  const setFeedTag = useCallback((tag) => setFeedPanel((p) => ({ ...p, tag })), []);
+  const setFeedWidth = useCallback((width) => setFeedPanel((p) => ({ ...p, width })), []);
 
   // ─── Drawer/panel management ───────────────────────────────────────
   // Each rail icon opens a drawer via the panel manager (search,
@@ -280,6 +297,9 @@ const MultiViewPage = ({ sessionId }) => {
   useEffect(() => {
     localStorage.setItem('multiview_layout_mode', layoutMode);
   }, [layoutMode]);
+  useEffect(() => {
+    localStorage.setItem('multiview_social_feed', JSON.stringify(feedPanel));
+  }, [feedPanel]);
   // Close all panels when theatre mode flips on — they'd be invisible
   // anyway, and stale open state would resurface them on exit.
   useEffect(() => {
@@ -906,6 +926,8 @@ const MultiViewPage = ({ sessionId }) => {
           onOpenBreaking={openBreakingPanel}
           onOpenYouTube={openYouTubePanel}
           onOpenCoverage={openCoveragePanel}
+          onToggleFeed={toggleFeedPanel}
+          feedOpen={feedPanel.open}
           onLocalNews={findLocalNews}
           onOpenBlacklist={openBlacklistPanel}
           onOpenSettings={openSettingsPanel}
@@ -1296,6 +1318,23 @@ const MultiViewPage = ({ sessionId }) => {
           </>
         )}
       </div>
+
+      {/* ─── Live-chatter feed ───────────────────────────────────────
+          Opens BESIDE the grid as a real flex sibling of the content
+          column, so the videos shrink to make room instead of being
+          covered (unlike the DrawerShell overlays). Lets you watch the
+          show and read the #OPLive chatter at the same time. Only in
+          this multiview display; hidden in theatre mode. */}
+      {!isTheatreMode && feedPanel.open && (
+        <OPLiveFeedPanel
+          tag={feedPanel.tag}
+          onChangeTag={setFeedTag}
+          width={feedPanel.width}
+          onResize={setFeedWidth}
+          onClose={closeFeedPanel}
+          bottomGap={tickerHeight}
+        />
+      )}
 
       {/* Exit theatre — only visible while in theatre mode. */}
       {isTheatreMode && (

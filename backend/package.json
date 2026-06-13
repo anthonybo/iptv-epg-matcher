@@ -10,6 +10,7 @@
   "dependencies": {
     "@streamparser/json": "^0.0.22",
     "@streamparser/json-whatwg": "^0.0.22",
+    "@the-convocation/twitter-scraper": "^0.22.3",
     "abort-controller": "^3.0.0",
     "axios": "^1.8.4",
     "bcryptjs": "^3.0.2",

@@ -481,6 +481,7 @@ app.use('/api/trending', trendingChannelsRoutes); // Live trending TV channels (
 app.use('/api/youtube', require('./routes/youtube')); // YouTube channel resolve/search/favorites + live HLS for multi-view tiles
 app.use('/api/llm',     require('./routes/llm'));     // LLM provider rotation status + smoke test
 app.use('/api/breaking-events', require('./routes/breakingEvents')); // Real-time real-world events (fires, pursuits, weather, breaking news) with channel hints
+app.use('/api/social-feed', require('./routes/socialFeed')); // Realtime X/Twitter hashtag feed for the multiview "Live chatter" side panel
 trendingChannelsService.startRefreshLoop();
 
 // Initialise the LLM provider registry once on boot. Cheap (no network

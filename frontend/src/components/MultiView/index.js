@@ -21,3 +21,4 @@ export { default as CommandPalette } from './CommandPalette';
 export { default as AdBreakChip } from './AdBreakChip';
 export { default as DrawerShell } from './DrawerShell';
 export { default as MultiViewTaskBar } from './MultiViewTaskBar';
+export { default as OPLiveFeedPanel } from './OPLiveFeedPanel';

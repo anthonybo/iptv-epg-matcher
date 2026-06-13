@@ -43,6 +43,7 @@ const SECTIONS = [
       { id: 'breaking',       kind: 'modal',  label: 'Breaking events',    icon: ICON_BREAKING() },
       { id: 'youtube',        kind: 'modal',  label: 'YouTube channel',    icon: ICON_YOUTUBE() },
       { id: 'coverage',       kind: 'modal',  label: 'Broadcaster coverage', icon: ICON_BROADCAST() },
+      { id: 'social-feed',    kind: 'panel',  label: 'Live chatter (#OPLive)', accent: 'cyan', icon: ICON_CHAT() },
       { id: 'local-news',     kind: 'action', label: 'Local news',         icon: ICON_NEWS() }
     ]
   },
@@ -73,6 +74,7 @@ const MultiViewRail = ({
   onOpenBreaking,
   onOpenYouTube,
   onOpenCoverage,
+  onToggleFeed,
   onOpenBlacklist,
   onOpenSettings,
   onOpenClearConfirm,
@@ -85,6 +87,7 @@ const MultiViewRail = ({
   // Panel toggles
   activePanel,           // 'favorites' | 'layout' | null
   onTogglePanel,         // (id) => void
+  feedOpen = false,      // live-chatter side panel open?
   // Toggle states + setters
   isTheatreMode,
   onToggleTheatre,
@@ -106,6 +109,7 @@ const MultiViewRail = ({
       case 'breaking':   return onOpenBreaking?.();
       case 'youtube':    return onOpenYouTube?.();
       case 'coverage':   return onOpenCoverage?.();
+      case 'social-feed': return onToggleFeed?.();
       case 'local-news': return onLocalNews?.();
       case 'favorites':  return onTogglePanel?.('favorites');
       case 'blacklist':  return onOpenBlacklist?.();
@@ -120,6 +124,9 @@ const MultiViewRail = ({
   // Derive runtime state for each item so the rail renders the right
   // active treatment without piping a 20-field state object.
   const isActive = (item) => {
+    // The live-chatter feed is a standalone side column (not part of the
+    // single-drawer activePanel set), so it tracks its own open flag.
+    if (item.id === 'social-feed') return feedOpen;
     if (item.kind === 'panel') return activePanel === item.id;
     if (item.id === 'theatre') return isTheatreMode;
     return false;
@@ -404,6 +411,17 @@ function ICON_BROADCAST() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
       <path strokeLinecap="round" strokeLinejoin="round" d="M4.93 19.07a10 10 0 010-14.14M19.07 4.93a10 10 0 010 14.14M8.46 16.46a5 5 0 010-7.07M15.54 9.39a5 5 0 010 7.07" />
       <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+function ICON_CHAT() {
+  // Speech bubble with dots — reads as "live conversation / chatter".
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
+      <path d="M21 11.5a8.38 8.38 0 01-8.5 8.5 9 9 0 01-3.9-.9L3 21l1.9-5.6A8.38 8.38 0 014 11.5 8.38 8.38 0 0112.5 3 8.38 8.38 0 0121 11.5z" />
+      <circle cx="9" cy="11.5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="12.5" cy="11.5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="16" cy="11.5" r="0.7" fill="currentColor" stroke="none" />
     </svg>
   );
 }
