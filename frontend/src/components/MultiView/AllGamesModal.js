@@ -29,7 +29,15 @@ const STATUS_PALETTE = {
 function statusKindOf(event) {
   if (event.is_live) return 'live';
   const sType = String(event.status_type || '').toUpperCase();
-  if (sType.includes('FINAL') || sType.includes('POST')) return 'final';
+  const gStat = String(event.game_status || '').toUpperCase();
+  // Soccer reports a finished match as STATUS_FULL_TIME / "Full Time" (and
+  // after-extra-time / penalties), NOT STATUS_FINAL — so the old FINAL-only
+  // check mislabeled a finished World Cup game as "scheduled". Treat all of
+  // those terminal states as final.
+  if (
+    sType.includes('FINAL') || sType.includes('FULL_TIME') || sType.includes('PLAY_COMPLETE') || sType.includes('POST') ||
+    ['FULL TIME', 'FT', 'FINAL', 'COMPLETED'].includes(gStat) || gStat.includes('AET')
+  ) return 'final';
   return 'scheduled';
 }
 

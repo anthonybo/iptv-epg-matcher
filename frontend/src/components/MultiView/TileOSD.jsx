@@ -34,6 +34,7 @@ const TileOSD = ({
   onVolumeChange,
   onToggleFavorite,
   onRefresh,
+  onMinimize,
   onAlternateSources,
   onFindAlternative,
   onFindDifferentGame,
@@ -162,6 +163,16 @@ const TileOSD = ({
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </svg>
           </OSDButton>
+
+          {/* Minimize to the bottom tray — parks this stream small + out
+              of the way while it keeps playing (e.g. during an ad break). */}
+          {onMinimize && (
+            <OSDButton onClick={onMinimize} title="Minimize to tray — keeps playing" color="slate">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v9m0 0l-3.5-3.5M12 13l3.5-3.5M5 19h14" />
+              </svg>
+            </OSDButton>
+          )}
 
           {/* Heart with pop motion. */}
           {onToggleFavorite && (

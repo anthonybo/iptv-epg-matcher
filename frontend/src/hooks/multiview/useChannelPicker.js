@@ -1,7 +1,6 @@
 import { useCallback, useState } from 'react';
 import { showToast } from '../../components/Toast';
 import { addToMultiview, removeFromMultiview, updateMutedState } from '../../utils/multiviewManager';
-import { getBlacklistedChannelIds } from '../../utils/streamBlacklist';
 
 function getToken() {
   return (
@@ -84,7 +83,10 @@ export function useChannelPicker({
     }
 
     const excludeSourceIds = Array.isArray(opts.excludeSourceIds) ? opts.excludeSourceIds : [];
-    const excludeChannelIds = Array.isArray(opts.excludeChannelIds) ? opts.excludeChannelIds : [];
+    // Composite (source+channel) pairs so the backend hides ONLY the exact
+    // tile, not every account sharing a channel_id (they collide across
+    // providers — "24/7 Jackass" is xtream_526396 on 18 of the user's accounts).
+    const excludeChannels = Array.isArray(opts.excludeChannels) ? opts.excludeChannels : [];
 
     try {
       const response = await fetch('/api/live-events/channel-candidates', {
@@ -96,7 +98,7 @@ export function useChannelPicker({
         body: JSON.stringify({
           query,
           excludeSourceIds,
-          excludeChannelIds,
+          excludeChannels,
           // 100 is high enough that the user sees every distinct
           // (name, host, account) combination for popular channels
           // like Reelz. The picker has a filter input so a long
@@ -168,14 +170,16 @@ export function useChannelPicker({
     setLoading(true);
     setIsOpen(true);
 
-    // Exclude both current grid channels (no point offering tiles
-    // already on screen) and blacklisted dead channels (no point
-    // offering known-broken sources).
-    const excludeChannelIds = Array.from(new Set([
-      ...streams.map((s) => s.id).filter(Boolean),
-      ...getBlacklistedChannelIds()
-    ]));
-    const result = await fetchCandidates(q, { excludeChannelIds });
+    // Hide only the exact tiles already on screen — by (source, channel)
+    // pair, NOT channel_id alone. channel_id collides across accounts, so a
+    // bare exclusion would hide all 18 copies of a channel you're already
+    // watching (that was the "jackass → only 4" bug). Also don't exclude the
+    // dead-stream blacklist: a query the user typed should surface every
+    // option, including ones that died earlier (they may want to retry).
+    const excludeChannels = streams
+      .filter((s) => s.id)
+      .map((s) => ({ sourceId: s.sourceId, channelId: s.id }));
+    const result = await fetchCandidates(q, { excludeChannels });
 
     if (!result.ok) {
       setError(result.error);
@@ -226,21 +230,16 @@ export function useChannelPicker({
     setLoading(true);
     setIsOpen(true);
 
-    // Exclude channels currently in the grid OTHER THAN this one (we
-    // want the user to be able to re-select the current channel as a
-    // refresh, but not see other tiles in the picker), plus dead
-    // channels from the session blacklist.
-    const excludeChannelIds = [
-      ...streams
-        .filter((s) => !(s.id === stream.id && s.sourceId === stream.sourceId))
-        .map((s) => s.id)
-        .filter(Boolean),
-      ...getBlacklistedChannelIds()
-    ];
-    // Dedupe — current id may appear in both lists.
-    const uniqExcludeChannelIds = Array.from(new Set(excludeChannelIds));
+    // Exclude the OTHER tiles on screen — by (source, channel) pair so we
+    // don't hide other accounts of the same channel_id. The current tile is
+    // intentionally NOT excluded (re-picking it is a valid refresh). We also
+    // don't exclude the dead-stream blacklist: "Switch source" is exactly
+    // when the user wants to see every account to try a different one.
+    const excludeChannels = streams
+      .filter((s) => s.id && !(s.id === stream.id && s.sourceId === stream.sourceId))
+      .map((s) => ({ sourceId: s.sourceId, channelId: s.id }));
 
-    const result = await fetchCandidates(q, { excludeChannelIds: uniqExcludeChannelIds });
+    const result = await fetchCandidates(q, { excludeChannels });
 
     if (!result.ok) {
       setError(result.error);

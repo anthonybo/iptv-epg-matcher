@@ -167,6 +167,14 @@ const ChannelPickerModal = ({
     () => candidates.filter(filterRow),
     [candidates, filter]
   );
+  // How many DISTINCT channel names the visible rows collapse to — the rows
+  // are per-account duplicates of these. Shown in the count header so the
+  // user understands "22 matches" is really "2 channels across your accounts"
+  // without us hiding any of the per-account picks.
+  const distinctNameCount = useMemo(
+    () => new Set(filteredCandidates.map((c) => String(c.name || '').toLowerCase().trim())).size,
+    [filteredCandidates]
+  );
   const filteredFavorites = useMemo(
     () => favorites.map(favoriteToChannel).filter(filterRow),
     [favorites, filter]
@@ -624,9 +632,19 @@ const ChannelPickerModal = ({
               totalCount={tabTotal}
             />
           ) : (
-            <ul className="space-y-1">
-              {tabRows.map(renderRow)}
-            </ul>
+            <>
+              {!isFavoritesTab && !filter && (
+                <div className="px-1.5 pb-2 text-[11px] text-slate-500">
+                  Showing <span className="text-slate-300 font-medium">all {tabShown}</span> live match{tabShown === 1 ? '' : 'es'}
+                  {distinctNameCount !== tabShown && (
+                    <> · <span className="text-slate-300 font-medium">{distinctNameCount}</span> channel{distinctNameCount === 1 ? '' : 's'} across your accounts</>
+                  )}
+                </div>
+              )}
+              <ul className="space-y-1">
+                {tabRows.map((c) => renderRow(c))}
+              </ul>
+            </>
           )}
         </div>
 
@@ -639,7 +657,7 @@ const ChannelPickerModal = ({
               ? (isFavoritesTab ? 'No favorites saved' : 'No matches')
               : filter
               ? `${tabShown} of ${tabTotal} match`
-              : `${tabTotal} ${isFavoritesTab ? (tabTotal === 1 ? 'favorite' : 'favorites') : (tabTotal === 1 ? 'channel' : 'channels')}`}
+              : `${tabTotal} ${isFavoritesTab ? (tabTotal === 1 ? 'favorite' : 'favorites') : (tabTotal === 1 ? 'source' : 'sources')}`}
           </span>
           <span className="flex items-center gap-1.5 flex-shrink-0">
             <kbd className="px-1 py-px rounded border border-slate-800 bg-slate-900 font-mono text-[9px] text-slate-500 normal-case tracking-normal">

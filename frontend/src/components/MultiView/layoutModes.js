@@ -64,6 +64,18 @@ export const LAYOUT_MODES = {
       </svg>
     ),
     description: 'Two large stacked, rest on right'
+  },
+  portrait: {
+    id: 'portrait',
+    name: 'Portrait stack',
+    icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <rect x="6" y="2" width="12" height="6" rx="1" strokeWidth="2"/>
+        <rect x="6" y="9" width="12" height="6" rx="1" strokeWidth="2"/>
+        <rect x="6" y="16" width="12" height="6" rx="1" strokeWidth="2"/>
+      </svg>
+    ),
+    description: 'Vertical column — pairs with the chatter feed'
   }
 };
 
@@ -112,6 +124,15 @@ export const getGridContainerStyle = (layoutMode, isTheatreMode, streamCount, la
         display: 'grid',
         gridTemplateColumns: `repeat(${Math.max(2, Math.min(streamCount - 2, 5))}, 1fr)`,
         gridTemplateRows: `1fr 1fr ${secondarySize}`,
+        gap
+      };
+    case 'portrait':
+      // Single vertical column. Few streams fill the height; many overflow
+      // into a scroll (the tile-grid wrapper is overflow-auto).
+      return {
+        display: 'grid',
+        gridTemplateColumns: '1fr',
+        gridAutoRows: streamCount <= 3 ? '1fr' : 'minmax(210px, 1fr)',
         gap
       };
     case 'dual_right': {

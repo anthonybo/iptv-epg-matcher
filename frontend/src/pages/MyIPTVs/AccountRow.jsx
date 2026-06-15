@@ -403,7 +403,7 @@ const AccountRow = ({
                 const map = {
                   ok:      { label: 'OK',       cls: 'bg-emerald-500/15 ring-emerald-400/30 text-emerald-200' },
                   pending: { label: 'PENDING',  cls: 'bg-cyan-500/15 ring-cyan-400/30 text-cyan-200' },
-                  failed:  { label: 'FAILED',   cls: 'bg-rose-500/15 ring-rose-400/30 text-rose-200' },
+                  failed:  { label: 'NO EPG',   cls: 'bg-amber-500/15 ring-amber-400/30 text-amber-200' },
                   no_url:  { label: 'NO URL',   cls: 'bg-slate-700/40 ring-slate-600/40 text-slate-400' },
                 };
                 const m = map[s] || { label: 'NEVER', cls: 'bg-slate-700/30 ring-slate-700/40 text-slate-500' };
@@ -457,8 +457,8 @@ const AccountRow = ({
               </div>
             )}
             {bundledEpgView.status === 'failed' && bundledEpgView.error && (
-              <div className="mt-1.5 break-words rounded border border-rose-500/30 bg-rose-500/[0.06] px-2 py-1 font-mono text-[10.5px] text-rose-200">
-                {bundledEpgView.error}
+              <div className="mt-1.5 break-words rounded border border-amber-500/30 bg-amber-500/[0.06] px-2 py-1 font-mono text-[10.5px] text-amber-200">
+                <span className="text-amber-300/80">Channels are fine — only the provider's bundled EPG is unavailable:</span> {bundledEpgView.error}
               </div>
             )}
             {bundledEpgView.status === 'no_url' && (

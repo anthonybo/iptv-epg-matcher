@@ -108,6 +108,24 @@ const MultiViewPage = ({ sessionId }) => {
   const closeFeedPanel = useCallback(() => setFeedPanel((p) => ({ ...p, open: false })), []);
   const setFeedTag = useCallback((tag) => setFeedPanel((p) => ({ ...p, tag })), []);
   const setFeedWidth = useCallback((width) => setFeedPanel((p) => ({ ...p, width })), []);
+  // Minimize-to-tray: streams "parked" in the bottom shelf — still playing,
+  // shrunk, out of the way (e.g. park a stream when an ad comes up, watch
+  // the others, restore it after). Keyed by stable `${sourceId}_${id}` so a
+  // parked stream survives an auto-refresh instead of popping back.
+  const [minimizedKeys, setMinimizedKeys] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('multiview_minimized') || '[]');
+      return new Set(Array.isArray(saved) ? saved : []);
+    } catch { return new Set(); }
+  });
+  const toggleMinimize = useCallback((stableKey) => {
+    setMinimizedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(stableKey)) next.delete(stableKey);
+      else next.add(stableKey);
+      return next;
+    });
+  }, []);
 
   // ─── Drawer/panel management ───────────────────────────────────────
   // Each rail icon opens a drawer via the panel manager (search,
@@ -300,6 +318,21 @@ const MultiViewPage = ({ sessionId }) => {
   useEffect(() => {
     localStorage.setItem('multiview_social_feed', JSON.stringify(feedPanel));
   }, [feedPanel]);
+  useEffect(() => {
+    localStorage.setItem('multiview_minimized', JSON.stringify([...minimizedKeys]));
+  }, [minimizedKeys]);
+  // Drop parked keys for streams that no longer exist (removed tiles), so
+  // the shelf can't hold a ghost.
+  useEffect(() => {
+    setMinimizedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(streams.map((s) => `${s.sourceId}_${s.id}`));
+      let changed = false;
+      const next = new Set();
+      for (const k of prev) { if (present.has(k)) next.add(k); else changed = true; }
+      return changed ? next : prev;
+    });
+  }, [streams]);
   // Close all panels when theatre mode flips on — they'd be invisible
   // anyway, and stale open state would resurface them on exit.
   useEffect(() => {
@@ -1021,9 +1054,11 @@ const MultiViewPage = ({ sessionId }) => {
             onToggleFavorite={handleToggleTileFavorite}
             autoMutedKeys={commercial.autoMutedKeys}
             tileStates={commercial.tileStates}
-            onRegisterVideoElement={commercial.registerVideoElement}
-            onUnregisterVideoElement={commercial.unregisterVideoElement}
+            onRegisterVideoElement={null}
+            onUnregisterVideoElement={null}
             onUndoAdMute={commercial.undoForKey}
+            minimizedKeys={minimizedKeys}
+            onToggleMinimize={toggleMinimize}
             onQualityDetected={onQualityDetected}
           />
         </div>

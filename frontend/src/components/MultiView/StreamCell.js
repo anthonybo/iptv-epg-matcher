@@ -52,6 +52,8 @@ const StreamCellInner = memo(({
   onUndoAdMute,
   onVideoElement,
   onQualityDetected,
+  onMinimize,
+  isMinimized = false,
   dragHandleProps
 }) => {
   // YouTube tiles use a dedicated init path that resolves a fresh
@@ -79,7 +81,7 @@ const StreamCellInner = memo(({
       {/* On-screen-display overlay. Always-on title strip + hover
           control strip. The strip absorbs all pointer events for its
           own area; everywhere else clicks pass through to the player. */}
-      {!isTheatreMode && (
+      {!isTheatreMode && !isMinimized && (
         <TileOSD
           stream={stream}
           quality={quality}
@@ -102,6 +104,7 @@ const StreamCellInner = memo(({
           onFindDifferentGame={isYoutube ? null : onFindDifferentGame}
           onBlacklist={isYoutube ? null : onBlacklist}
           onRemove={onRemove}
+          onMinimize={onMinimize}
         />
       )}
 
@@ -135,6 +138,7 @@ const StreamCellInner = memo(({
     prevProps.streamKey === nextProps.streamKey &&
     prevProps.stream._refreshKey === nextProps.stream._refreshKey &&
     prevProps.isTheatreMode === nextProps.isTheatreMode &&
+    prevProps.isMinimized === nextProps.isMinimized &&
     prevProps.isMuted === nextProps.isMuted &&
     prevProps.volume === nextProps.volume &&
     prevProps.quality?.resolution === nextProps.quality?.resolution &&
@@ -175,7 +179,9 @@ export const SortableStreamCell = ({
   onToggleFavorite,
   onUndoAdMute,
   onVideoElement,
-  onQualityDetected
+  onQualityDetected,
+  onMinimize,
+  isMinimized = false
 }) => {
   const {
     attributes,
@@ -224,6 +230,8 @@ export const SortableStreamCell = ({
         onRemove={onRemove}
         onToggleFavorite={onToggleFavorite}
         onQualityDetected={onQualityDetected}
+        onMinimize={onMinimize}
+        isMinimized={isMinimized}
         dragHandleProps={dragHandleProps}
       />
     </div>

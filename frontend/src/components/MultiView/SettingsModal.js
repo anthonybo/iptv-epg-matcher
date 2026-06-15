@@ -442,37 +442,28 @@ const SettingsModal = ({
                 hint="Scrolling sports ticker at the bottom of the screen"
               />
 
-              {/* Commercial auto-skip — Phase 1 audio + Phase 2 visual
-                  detection. Master toggle gates the whole feature;
-                  sub-toggles let the user lean on just audio (best
-                  for sports) or include logo detection (best for
-                  cable shows). */}
+              {/* Commercial auto-skip — server-side audio-fingerprint
+                  detection. The backend learns repeated ad creatives by
+                  cross-channel/cross-time repetition and mutes a tile when
+                  its audio matches a confirmed ad. High precision: it only
+                  mutes ads it has already learned, so detection improves the
+                  more you watch. */}
               <Toggle
                 active={Boolean(autoFillSettings.commercialAutoSkip)}
                 onToggle={() =>
                   setSetting({ commercialAutoSkip: !autoFillSettings.commercialAutoSkip })
                 }
                 label="Commercial auto-skip"
-                hint="Mute when a break starts on the audible tile and unmute the next tile that isn't in a break"
+                hint="Server-side audio-fingerprint detection. Mutes a tile when its audio matches a learned ad; the AD chip's Undo restores it. Learns ads by repetition, so it gets better over time."
               />
               {autoFillSettings.commercialAutoSkip && (
-                <div className="ml-4 pl-3 border-l border-slate-800/80 space-y-3">
-                  <Toggle
-                    active={autoFillSettings.commercialDetectAudio !== false}
-                    onToggle={() =>
-                      setSetting({ commercialDetectAudio: autoFillSettings.commercialDetectAudio === false })
-                    }
-                    label="Detect by audio"
-                    hint="Silence + loudness step at the break boundary. Best signal for live sports."
-                  />
-                  <Toggle
-                    active={autoFillSettings.commercialDetectLogo !== false}
-                    onToggle={() =>
-                      setSetting({ commercialDetectLogo: autoFillSettings.commercialDetectLogo === false })
-                    }
-                    label="Detect by logo + black frame"
-                    hint="Watches the channel bug in the corner; adds black-frame boundaries. Best for cable shows like Reelz."
-                  />
+                <div className="ml-4 pl-3 border-l border-slate-800/80">
+                  <p className="text-[11px] leading-relaxed text-slate-500">
+                    Each visible IPTV tile is analyzed upstream (one extra
+                    connection per channel). A brand-new ad isn't muted on its
+                    first airing — it's catalogued once it repeats, then muted
+                    on later airings. Shared across all your channels.
+                  </p>
                 </div>
               )}
             </section>
