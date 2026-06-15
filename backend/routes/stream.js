@@ -333,7 +333,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         // For streaming, first try to fetch ONLY the specific channel needed
         // This prevents timeout issues with sources that have 40k+ channels
         try {
-            logger.info(`Fetching specific channel ${channelId} from database for source ${sourceId}`);
+            logger.debug(`Fetching specific channel ${channelId} from database for source ${sourceId}`);
             const db = await iptvDatabaseService.connect();
 
             const channelRow = await new Promise((resolve, reject) => {
@@ -362,7 +362,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             });
 
             if (channelRow) {
-                logger.info(`Found channel ${channelId} directly from database`);
+                logger.debug(`Found channel ${channelId} directly from database`);
                 channels = [{
                     id: channelRow.id,
                     tvgId: channelRow.tvg_id || channelRow.id,
@@ -385,7 +385,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         // Fallback: Try to get ALL channels from database if direct lookup failed
         if (channels.length === 0) {
             try {
-                logger.info(`Fetching channels from IPTV database for streaming session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
+                logger.debug(`Fetching channels from IPTV database for streaming session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}`);
                 const dbResult = await iptvDatabaseService.getChannelsForSession(sessionId, {
                     page: 1,
                     limit: 999999, // Essentially unlimited - load ALL channels for streaming
@@ -406,29 +406,6 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                         url: ch.url,
                         categories: ch.categories || []
                     }));
-
-                    // Debug: Log first few channels to see their structure
-                    const samples = channels.slice(0, 5).map(ch => ({
-                        id: ch.id,
-                        tvgId: ch.tvgId,
-                        name: ch.name
-                    }));
-                    logger.info(`Sample channels from database: ${JSON.stringify(samples, null, 2)}`);
-
-                    // Debug: Find NHL channels if we're looking for one
-                    if (channelId.toLowerCase().includes('nhl') || channelId.toLowerCase().includes('699083') || channelId.toLowerCase().includes('xtream')) {
-                        const nhlChannels = channels.filter(ch =>
-                            ch.name.toLowerCase().includes('nhl') ||
-                            ch.id.toLowerCase().includes('nhl') ||
-                            ch.id.includes('699083') ||
-                            ch.id.includes('xtream')
-                        ).slice(0, 10);
-                        logger.info(`Found ${nhlChannels.length} NHL/matching channels: ${JSON.stringify(nhlChannels.map(ch => ({
-                            id: ch.id,
-                            tvgId: ch.tvgId,
-                            name: ch.name
-                        })), null, 2)}`);
-                    }
                 }
             } catch (dbError) {
                 logger.warn(`Error loading channels from database: ${dbError.message}, falling back to in-memory`);
@@ -460,14 +437,11 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         let normalizedChannelId = channelId;
         let channel;
 
-        logger.info(`Looking for channel with ID: "${channelId}" among ${channels.length} channels`);
+        logger.debug(`Looking for channel with ID: "${channelId}" among ${channels.length} channels`);
 
         // Try multiple lookup strategies
         // 1. Try by ID first (most reliable)
         channel = channels.find(ch => ch.id === channelId);
-        if (channel) {
-            logger.info(`Found channel by ID match`);
-        }
 
         // 2. If not found, try by tvgId
         if (!channel) {
@@ -478,18 +452,12 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         if (!channel && !channelId.startsWith('channel_')) {
             normalizedChannelId = `channel_${channelId}`;
             channel = channels.find(ch => ch.id === normalizedChannelId || ch.tvgId === normalizedChannelId);
-            if (channel) {
-                logger.info(`Found channel with prefix: ${normalizedChannelId}`);
-            }
         }
 
         // 4. If still not found and has 'channel_' prefix, try without it
         if (!channel && channelId.startsWith('channel_')) {
             normalizedChannelId = channelId.replace(/^channel_/, '');
             channel = channels.find(ch => ch.id === normalizedChannelId || ch.tvgId === normalizedChannelId);
-            if (channel) {
-                logger.info(`Found channel without prefix: ${normalizedChannelId}`);
-            }
         }
 
         if (!channel) {
@@ -505,11 +473,11 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: 'No stream URL for this channel' });
         }
         
-        logger.info(`Streaming channel: ${channel.name} (${normalizedChannelId}) from URL: ${channel.url}`);
+        logger.info(`Streaming channel: ${channel.name} (${normalizedChannelId})`);
 
         // For HEAD requests, skip expensive Stalker token fetching - just check if channel exists
         if (req.method === 'HEAD') {
-            logger.info(`[HEAD] Channel exists in database, returning 200`);
+            logger.debug(`[HEAD] Channel exists in database, returning 200`);
             return res.status(200).end();
         }
 
@@ -517,7 +485,7 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
         let streamUrl = channel.url;
         if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
             try {
-                logger.info(`[STREAM] Requesting fresh Stalker link from portal for channel ${normalizedChannelId}...`);
+                logger.debug(`[STREAM] Requesting fresh Stalker link from portal for channel ${normalizedChannelId}...`);
 
                 // Query database to get source information including MAC address
                 const db = await iptvDatabaseService.connect();
@@ -559,16 +527,14 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
 
                     if (createLinkResponse.ok) {
                         const linkData = await createLinkResponse.json();
-                        logger.info(`[STREAM] create_link response:`, JSON.stringify(linkData, null, 2));
-                        logger.info(`[STREAM] linkData type: ${typeof linkData}, has js: ${!!linkData?.js}, has cmd: ${!!linkData?.js?.cmd}`);
+                        logger.debug(`[STREAM] create_link response has js: ${!!linkData?.js}, has cmd: ${!!linkData?.js?.cmd}`);
 
                         if (linkData && linkData.js && linkData.js.cmd) {
                             const freshCmd = linkData.js.cmd;
-                            logger.info(`[STREAM] Extracted cmd from response: ${freshCmd}`);
                             const match = freshCmd.match(/ffmpeg\s+(.+)/);
                             if (match && match[1]) {
                                 let freshUrl = match[1];
-                                logger.info(`[STREAM] Got FRESH Stalker stream URL: ${freshUrl}`);
+                                logger.debug(`[STREAM] Got fresh Stalker stream URL`);
 
                                 // Extract play_token from fresh URL
                                 const freshTokenMatch = freshUrl.match(/play_token=([^&]+)/);
@@ -579,16 +545,14 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                                 const originalCmdMatch = channel.url.match(/cmd=([^&]+)/);
                                 if (originalCmdMatch && freshToken) {
                                     const originalCmd = decodeURIComponent(originalCmdMatch[1]);
-                                    logger.info(`[STREAM] Original cmd: ${originalCmd}`);
                                     const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
                                     const originalStreamId = originalStreamMatch ? originalStreamMatch[1] : null;
 
                                     if (originalStreamId) {
                                         // Check if fresh URL has empty stream parameter
                                         if (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/)) {
-                                            logger.info(`[STREAM] Portal returned empty stream ID - using original stream ID: ${originalStreamId}`);
+                                            logger.debug(`[STREAM] Portal returned empty stream ID - using original stream ID`);
                                             freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
-                                            logger.info(`[STREAM] Fixed stream URL: ${freshUrl}`);
                                         }
                                     }
                                 }
@@ -600,13 +564,13 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                                     const sourceUrl = new URL(channel.url);
                                     const serverAddress = `${sourceUrl.protocol}//${sourceUrl.host}`;
                                     streamUrl = streamUrl.replace(/http:\/\/localhost/g, serverAddress);
-                                    logger.info(`[STREAM] Replaced localhost with server address: ${streamUrl}`);
+                                    logger.debug(`[STREAM] Replaced localhost with server address`);
                                 }
                             } else {
-                                logger.warn(`[STREAM] Could not extract stream URL from cmd: ${freshCmd.substring(0, 100)}`);
+                                logger.warn(`[STREAM] Could not extract stream URL from create_link cmd`);
                             }
                         } else {
-                            logger.warn(`[STREAM] Invalid create_link response structure:`, JSON.stringify(linkData, null, 2));
+                            logger.warn(`[STREAM] Invalid create_link response structure`);
                         }
                     } else {
                         logger.error(`[STREAM] create_link request failed: ${createLinkResponse.status} ${createLinkResponse.statusText}`);
@@ -653,16 +617,14 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 // DNS resolution errors
                 if (error.code === 'ENOTFOUND') {
                     errorMessage = 'Stream source domain cannot be resolved';
-                    logger.error(`DNS resolution failed for stream URL: ${streamUrl}`);
                 } else if (error.code === 'ETIMEDOUT' || error.cause?.code === 'ETIMEDOUT') {
                     errorMessage = 'Stream source connection timed out';
                 } else if (error.code === 'ECONNREFUSED' || error.cause?.code === 'ECONNREFUSED') {
                     errorMessage = 'Stream source connection was refused';
                 }
 
-                logger.error(`Stream availability check failed: ${error.message}`, {
+                logger.error(`Stream availability check failed for ${channelId}: ${error.message}`, {
                     channelId,
-                    url: streamUrl,
                     errorCode: error.code || error.cause?.code
                 });
                 
@@ -854,11 +816,10 @@ router.get('/:sessionId/:channelId', authMiddleware, async (req, res) => {
                 statusCode = 502;
             }
 
-            logger.error(`${errorMessage}: ${streamError.message}`, {
+            logger.error(`${errorMessage} for channel ${channelId}: ${streamError.message}`, {
                 error: streamError.message,
                 stack: streamError.stack,
-                channelId,
-                url: channel.url
+                channelId
             });
 
             // If streaming has already started, we can't send a JSON response

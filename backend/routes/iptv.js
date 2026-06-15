@@ -136,7 +136,7 @@ router.get('/provider/:providerId', async (req, res) => {
       });
     }
     
-    logger.info(`Getting IPTV provider details: ${providerId}`);
+    logger.debug(`Getting IPTV provider details: ${providerId}`);
     
     // Fetch provider details (excluding password)
     const providerDetails = await iptvDatabaseService.runQuery(
@@ -415,7 +415,7 @@ router.get('/:sessionId/channels', async (req, res) => {
     
     const { provider } = session;
     
-    logger.info(`Getting channels for provider: ${provider.id}, session: ${sessionId}`);
+    logger.debug(`Getting channels for provider: ${provider.id}, session: ${sessionId}`);
     
     // Get channels from database
     let channels = await iptvDatabaseService.getChannelsByProviderId(provider.id);
@@ -466,7 +466,7 @@ router.get('/:sessionId/categories', async (req, res) => {
     
     const { provider } = session;
     
-    logger.info(`Getting categories for provider: ${provider.id}, session: ${sessionId}`);
+    logger.debug(`Getting categories for provider: ${provider.id}, session: ${sessionId}`);
     
     // Get categories from database
     const categories = await iptvDatabaseService.getCategoriesByProviderId(provider.id);

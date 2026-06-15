@@ -381,7 +381,7 @@ async function parsePrograms(filePath, sourceId, validChannelIds, onProgress = n
         const shouldReport = (programs.length % 5000 === 0) || (now - lastProgressTime >= PROGRESS_INTERVAL_MS);
         if (shouldReport) {
           const progressMsg = `Parsed ${programs.length.toLocaleString()} programs (skipped ${skippedCount.toLocaleString()})...`;
-          logger.info(`[XMLTV Parser] ${progressMsg}`);
+          logger.debug(`[XMLTV Parser] ${progressMsg}`);
           if (onProgress) onProgress(progressMsg);
           lastProgressTime = now;
         }

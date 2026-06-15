@@ -103,7 +103,7 @@ router.post('/random-working-stream', async (req, res) => {
       const searchTerms = [...new Set([...homeTerms, ...awayTerms])]; // Dedupe
 
       if (searchTerms.length === 0) {
-        logger.info(`Event ${event.event_id} has no team names, skipping`);
+        logger.debug(`Event ${event.event_id} has no team names, skipping`);
         continue;
       }
 
@@ -116,13 +116,13 @@ router.post('/random-working-stream', async (req, res) => {
       let queryParams = [userId, ...searchParams];
 
       if (excludeSourceIds.length > 0) {
-        logger.info(`Excluding sources: ${excludeSourceIds.join(', ')}`);
+        logger.debug(`Excluding sources: ${excludeSourceIds.join(', ')}`);
         const sourceParamIndex = queryParams.length + 1;
         const sourcePlaceholders = excludeSourceIds.map((_, i) => `$${sourceParamIndex + i}`).join(', ');
         sourceExclusion = `AND s.id NOT IN (${sourcePlaceholders})`;
         queryParams.push(...excludeSourceIds);
       } else {
-        logger.info('No sources to exclude');
+        logger.debug('No sources to exclude');
       }
 
       // Use blacklist from frontend (user-customizable)
@@ -135,7 +135,7 @@ router.post('/random-working-stream', async (req, res) => {
           return `c.name != $${paramIndex}`;
         }).join(' AND ');
 
-        logger.info(`Blacklisting ${blacklistedChannels.length} channels: ${blacklistedChannels.join(', ')}`);
+        logger.debug(`Blacklisting ${blacklistedChannels.length} channels: ${blacklistedChannels.join(', ')}`);
       }
 
       const channelsResult = await postgresService.query(`
@@ -162,7 +162,7 @@ router.post('/random-working-stream', async (req, res) => {
       let channels = channelsResult.rows || [];
 
       if (channels.length === 0) {
-        logger.info(`No channels found for event ${event.event_id}`);
+        logger.debug(`No channels found for event ${event.event_id}`);
         continue;
       }
 
@@ -228,7 +228,7 @@ router.post('/random-working-stream', async (req, res) => {
 
       for (const channel of channels) {
         try {
-          logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+          logger.debug(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
 
           // Build the actual stream URL based on source type
           let testUrl = channel.url;
@@ -245,7 +245,7 @@ router.post('/random-working-stream', async (req, res) => {
             // Stalker: request fresh link from portal, then validate with ffprobe
             // Stalker URLs are portal.php?action=create_link which returns a token
             if (testUrl.includes('portal.php') && testUrl.includes('action=create_link')) {
-              logger.info(`Requesting fresh Stalker token from portal...`);
+              logger.debug(`Requesting fresh Stalker token from portal...`);
 
               const createLinkResponse = await axios.get(testUrl, {
                 headers: {
@@ -287,7 +287,7 @@ router.post('/random-working-stream', async (req, res) => {
                 if (originalStreamId) {
                   // Check if fresh URL has empty stream parameter
                   if (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/)) {
-                    logger.info(`Portal returned empty stream ID - using original: ${originalStreamId}`);
+                    logger.debug(`Portal returned empty stream ID - using original: ${originalStreamId}`);
                     freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
                   }
                 }
@@ -302,7 +302,7 @@ router.post('/random-working-stream', async (req, res) => {
 
               // Now validate the fresh stream URL with ffprobe
               testUrl = freshUrl;
-              logger.info(`Got fresh Stalker URL with token: ${freshUrl.substring(0, 100)}...`);
+              logger.debug(`Got fresh Stalker URL with token: ${freshUrl.substring(0, 100)}...`);
             }
 
             // Validate Stalker stream with ffprobe now that we have the real URL
@@ -310,8 +310,9 @@ router.post('/random-working-stream', async (req, res) => {
               '-v', 'error',
               '-print_format', 'json',
               '-show_streams',
-              '-read_intervals', '%+#1',
-              '-timeout', '8000000',
+              '-show_packets',
+              '-read_intervals', '%+4',
+              '-rw_timeout', '5000000',
               '-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`,
               testUrl
             ];
@@ -396,7 +397,7 @@ router.post('/random-working-stream', async (req, res) => {
             }
           });
         } catch (testError) {
-          logger.info(`✗ Channel ${channel.name} test failed: ${testError.message}`);
+          logger.debug(`✗ Channel ${channel.name} test failed: ${testError.message}`);
           continue;
         }
       }

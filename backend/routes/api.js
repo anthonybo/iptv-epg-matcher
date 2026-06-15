@@ -164,7 +164,7 @@ router.post('/session/register', (req, res) => {
         return res.status(400).json({ success: false, error: 'Invalid session ID' });
     }
     
-    logger.info(`Registering session: ${sessionId}`);
+    logger.debug(`Registering session: ${sessionId}`);
     
     // Add session to application storage
     const app = req.app;
@@ -182,11 +182,11 @@ router.post('/session/register', (req, res) => {
             channels: [],
             categories: []
         };
-        logger.info(`Created new session: ${sessionId}`);
+        logger.debug(`Created new session: ${sessionId}`);
     } else {
         // Update last accessed time
         app.locals.sessions[sessionId].lastAccessed = new Date();
-        logger.info(`Updated existing session: ${sessionId}`);
+        logger.debug(`Updated existing session: ${sessionId}`);
     }
     
     return res.status(200).json({ 
@@ -203,7 +203,7 @@ router.post('/session/register', (req, res) => {
 router.post('/session/create', (req, res) => {
     // Generate a unique session ID
     const sessionId = 'session_' + Math.random().toString(36).substring(2, 15);
-    logger.info(`Creating new session: ${sessionId}`);
+    logger.debug(`Creating new session: ${sessionId}`);
     
     // Add session to application storage
     const app = req.app;
@@ -234,7 +234,7 @@ router.post('/session/create', (req, res) => {
 router.post('/session/create-and-register', (req, res) => {
     // Generate a unique session ID
     const sessionId = 'session_' + Math.random().toString(36).substring(2, 15);
-    logger.info(`Creating new unified session: ${sessionId}`);
+    logger.debug(`Creating new unified session: ${sessionId}`);
     
     // Add session to application storage
     const app = req.app;
@@ -281,7 +281,7 @@ router.post('/session/create-and-register', (req, res) => {
 // Add a new endpoint for EPG summary statistics
 router.get('/epg-summary', async (req, res) => {
     try {
-        logger.info('API: Request for EPG summary statistics received');
+        logger.debug('API: Request for EPG summary statistics received');
         
         // Get all cached EPG sources
         const epgSources = [];
@@ -337,7 +337,7 @@ router.get('/epg/search', async (req, res) => {
             });
         }
         
-        logger.info(`API: EPG search request received for: "${query}"`, { 
+        logger.debug(`API: EPG search request received for: "${query}"`, { 
             query, requestedLimit: limit 
         });
         
@@ -356,7 +356,7 @@ router.get('/epg/search', async (req, res) => {
             
             if (epgResult && Array.isArray(epgResult) && epgResult.length > 0) {
                 epgSources = epgResult;
-                logger.info(`Loaded ${epgSources.length} EPG sources for search`);
+                logger.debug(`Loaded ${epgSources.length} EPG sources for search`);
             } else {
                 logger.warn(`No EPG sources found for search`);
             }
@@ -397,7 +397,7 @@ router.get('/epg/search', async (req, res) => {
         const term = query; // Match the parameter name used by searchEpg
         const searchResults = await epgService.searchEpg(term, searchableSources, searchOptions);
         
-        logger.info(`API: EPG search for "${query}" completed with ${searchResults.length} results`);
+        logger.debug(`API: EPG search for "${query}" completed with ${searchResults.length} results`);
         
         return res.json({
             query,

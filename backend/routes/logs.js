@@ -29,19 +29,24 @@ router.post('/frontend', authMiddleware, (req, res) => {
       const frontendPrefix = chalk.cyan.bold('[FRONTEND]');
       const logMessage = `${frontendPrefix} [${user}] ${message} | URL: ${url}`;
 
-      // Log at appropriate level
+      // Log at the matching level. We deliberately DON'T forward the
+      // `context` object to the logger: winston serialises it inline, and
+      // frontend error contexts carry full JS stack traces (e.g.
+      // "at async handleRefreshAll (…:477)") that flooded the backend
+      // console during a refresh-all. The formatted message already
+      // carries the user + URL — enough for a relayed frontend line.
       switch (level) {
         case 'error':
-          logger.error(logMessage, context);
+          logger.error(logMessage);
           break;
         case 'warn':
-          logger.warn(logMessage, context);
+          logger.warn(logMessage);
           break;
         case 'performance':
         case 'action':
         case 'info':
         default:
-          logger.info(logMessage, context);
+          logger.info(logMessage);
           break;
       }
     });

@@ -175,8 +175,9 @@ router.post('/auto-fill-streams', async (req, res) => {
           '-v', 'error',
           '-print_format', 'json',
           '-show_streams',
-          '-read_intervals', '%+#1',
-          '-timeout', '8000000',
+          '-show_packets',
+          '-read_intervals', '%+4',
+          '-rw_timeout', '5000000',
           '-headers', `Cookie: mac=${channel.source_mac}; stb_lang=en\r\nUser-Agent: Mozilla/5.0 (QtEmbedded; U; Linux; C)`,
           testUrl
         ];
@@ -205,8 +206,9 @@ router.post('/auto-fill-streams', async (req, res) => {
           '-v', 'error',
           '-print_format', 'json',
           '-show_streams',
-          '-read_intervals', '%+#1',
-          '-timeout', '8000000',
+          '-show_packets',
+          '-read_intervals', '%+4',
+          '-rw_timeout', '5000000',
           testUrl
         ];
 

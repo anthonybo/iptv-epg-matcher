@@ -37,7 +37,7 @@ router.get('/stream', authMiddleware, requireAuth, (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no'); // Prevent Nginx buffering
   res.flushHeaders();
 
-  logger.info(`[Metrics SSE] Client connected from ${req.ip}`);
+  logger.debug(`[Metrics SSE] Client connected from ${req.ip}`);
 
   // Function to send metrics update
   const sendMetrics = () => {
@@ -79,7 +79,7 @@ router.get('/stream', authMiddleware, requireAuth, (req, res) => {
   req.on('close', () => {
     clearInterval(metricsInterval);
     clearInterval(heartbeatInterval);
-    logger.info(`[Metrics SSE] Client disconnected from ${req.ip}`);
+    logger.debug(`[Metrics SSE] Client disconnected from ${req.ip}`);
   });
 
   // Handle errors
@@ -321,7 +321,7 @@ router.post('/page-view', authMiddleware, requireAuth, async (req, res) => {
   try {
     const { sessionId, page } = req.body;
 
-    logger.info(`[Metrics] Page view tracking request: sessionId=${sessionId}, page=${page}, user=${req.user?.username || req.user?.email}`);
+    logger.debug(`[Metrics] Page view tracking request: sessionId=${sessionId}, page=${page}, user=${req.user?.username || req.user?.email}`);
 
     if (!sessionId || !page) {
       logger.warn('[Metrics] Page view request missing sessionId or page');
@@ -339,7 +339,7 @@ router.post('/page-view', authMiddleware, requireAuth, async (req, res) => {
     // Track page view
     await metricsService.trackPageView(sessionId, userId, page);
 
-    logger.info(`[Metrics] Successfully tracked page view: ${page} for user ${userName}`);
+    logger.debug(`[Metrics] Successfully tracked page view: ${page} for user ${userName}`);
 
     res.json({ success: true });
   } catch (error) {

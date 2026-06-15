@@ -291,7 +291,8 @@ router.get('/today', async (req, res) => {
            OR (
              is_live = TRUE
              AND event_end >= NOW() - INTERVAL '30 minutes'
-             AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
+             -- Terminal status varies by sport (FINAL / FULL_TIME / PLAY_COMPLETE / …).
+             AND (status_type IS NULL OR status_type !~ 'FINAL|FULL_TIME|PLAY_COMPLETE|POSTPONED|CANCEL|SUSPEND')
            )
         ORDER BY
           COALESCE(canonical_id, event_id),

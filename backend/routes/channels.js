@@ -25,9 +25,7 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
     const searchTerm = req.query.search || null;
 
     // Log debugging info about the request
-    logger.info(`CHANNEL REQUEST RECEIVED: sessionId=${sessionId}, sourceId=${sourceId}, category=${category}, page=${page}`);
-    console.log('Full request query:', req.query);
-    console.log('URL:', req.originalUrl);
+    logger.debug(`CHANNEL REQUEST RECEIVED: sessionId=${sessionId}, sourceId=${sourceId}, category=${category}, page=${page}`);
 
     // Also check query parameter as a fallback
     if ((!sessionId || sessionId === 'null' || sessionId === 'undefined') && req.query.sessionId) {
@@ -48,7 +46,7 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
     // Try to get channels from IPTV database first
     try {
       const userId = req.user?.id || null;
-      logger.info(`Fetching channels from IPTV database for session ${sessionId}, user ${userId}`);
+      logger.debug(`Fetching channels from IPTV database for session ${sessionId}, user ${userId}`);
       const result = await iptvDatabaseService.getChannelsForSession(sessionId, {
         page,
         limit,
@@ -59,7 +57,7 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
       });
 
       if (result && result.channels) {
-        logger.info(`Found ${result.channels.length} channels from IPTV database`);
+        logger.debug(`Found ${result.channels.length} channels from IPTV database`);
 
         // Transform channels to match expected format
         const transformedChannels = result.channels.map(ch => ({
@@ -75,15 +73,6 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
           categories: ch.categories || []
         }));
 
-        // Debug: Log channel IDs for NHL network searches
-        if (searchTerm && searchTerm.toLowerCase().includes('nhl')) {
-          logger.info(`NHL search results - returning ${transformedChannels.length} channels with IDs: ${JSON.stringify(transformedChannels.map(ch => ({
-            id: ch.id,
-            tvgId: ch.tvgId,
-            name: ch.name,
-            sourceId: ch.sourceId
-          })), null, 2)}`);
-        }
 
         return res.json({
           channels: transformedChannels,
@@ -97,7 +86,7 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
     }
 
     // Fallback to in-memory session storage
-    logger.info(`Falling back to in-memory session storage for session ${sessionId}`);
+    logger.debug(`Falling back to in-memory session storage for session ${sessionId}`);
     const sessionData = sessionStorage.getSession(sessionId);
 
     if (!sessionData) {
@@ -137,7 +126,7 @@ router.get('/:sessionId', authMiddleware, async (req, res) => {
     const totalChannels = filteredChannels.length;
     const totalPages = Math.ceil(totalChannels / limit);
 
-    logger.info(`Returning page ${page}/${totalPages} with ${paginatedChannels.length} channels for session ${sessionId}`);
+    logger.debug(`Returning page ${page}/${totalPages} with ${paginatedChannels.length} channels for session ${sessionId}`);
 
     // Get categories from the session or generate them
     let categories = sessionData.data.categories;
@@ -215,11 +204,11 @@ router.get('/:sessionId/categories', authMiddleware, async (req, res) => {
   try {
     // Try to get categories from IPTV database first
     try {
-      logger.info(`Fetching categories from IPTV database for session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}${userId ? ` (user ${userId})` : ''}`);
+      logger.debug(`Fetching categories from IPTV database for session ${sessionId}${sourceId ? ` filtered by source ${sourceId}` : ''}${userId ? ` (user ${userId})` : ''}`);
       const categories = await iptvDatabaseService.getCategoriesForSession(sessionId, sourceId, userId);
 
       if (categories && categories.length > 0) {
-        logger.info(`Found ${categories.length} categories from IPTV database`);
+        logger.debug(`Found ${categories.length} categories from IPTV database`);
 
         // Transform to expected format
         const formattedCategories = categories.map(cat => ({
@@ -235,14 +224,14 @@ router.get('/:sessionId/categories', authMiddleware, async (req, res) => {
     }
 
     // Fallback to in-memory session storage
-    logger.info(`Falling back to in-memory session storage for categories`);
+    logger.debug(`Falling back to in-memory session storage for categories`);
     const session = sessionStorage.getSession(sessionId);
 
     if (!session || !session.data || !session.data.categories) {
       // Try to synthesize categories from cached channels before failing
       const inferredCategories = generateCategories(session?.data?.channels || []);
       if (inferredCategories.length > 0) {
-        logger.info(`Synthesized ${inferredCategories.length} categories for session ${sessionId} from cached channels`);
+        logger.debug(`Synthesized ${inferredCategories.length} categories for session ${sessionId} from cached channels`);
         sessionStorage.updateSession(sessionId, {
           data: {
             ...(session?.data || {}),
@@ -283,7 +272,7 @@ router.get('/:sessionId/categories', authMiddleware, async (req, res) => {
     // Sort alphabetically
     formattedCategories.sort((a, b) => a.name.localeCompare(b.name));
 
-    logger.info(`Returning ${formattedCategories.length} formatted categories from session data`);
+    logger.debug(`Returning ${formattedCategories.length} formatted categories from session data`);
 
     // Return the formatted categories
     return res.json(formattedCategories);

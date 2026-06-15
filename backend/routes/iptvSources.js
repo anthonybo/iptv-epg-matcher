@@ -291,23 +291,15 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
         const source = userSources.find(s => s.id === sourceId);
 
         if (source) {
-            logger.info(`Source ${sourceId} details:`, {
-                type: source.type,
-                url: source.url,
-                has_mac: !!source.mac_address,
-                has_username: !!source.username
-            });
-
-            // Generate cache key based on source type
+            // Generate cache key based on source type (key contains
+            // credentials, so never log it).
             let cacheKey;
             if (source.type === 'xtream' && source.url && source.username && source.password) {
                 cacheKey = `${source.url}:${source.username}:${source.password}`.replace(/[\/\\:]/g, '_');
-                logger.info(`Generated Xtream cache key: ${cacheKey}`);
             } else if (source.type === 'stalker' && source.url && source.mac_address) {
                 cacheKey = `${source.url}:${source.mac_address}`.replace(/[\/\\:]/g, '_');
-                logger.info(`Generated Stalker cache key: ${cacheKey}`);
             } else {
-                logger.warn(`Could not generate cache key for source ${sourceId} (type: ${source.type})`);
+                logger.debug(`Could not generate cache key for source ${sourceId} (type: ${source.type})`);
             }
 
             // Delete cache file if cacheKey exists
@@ -317,17 +309,13 @@ router.delete('/sources/:sourceId', requireAuth, async (req, res) => {
                 const cacheDir = path.join(process.cwd(), 'cache');
                 const cacheFile = path.join(cacheDir, `${cacheKey}_channels.json`);
 
-                logger.info(`Looking for cache file: ${cacheFile}`);
-
                 if (fs.existsSync(cacheFile)) {
                     try {
                         fs.unlinkSync(cacheFile);
-                        logger.info(`✓ Deleted cache file for source ${sourceId}: ${cacheFile}`);
+                        logger.debug(`Deleted cache file for source ${sourceId}`);
                     } catch (cacheError) {
-                        logger.warn(`✗ Failed to delete cache file: ${cacheError.message}`);
+                        logger.warn(`Failed to delete cache file for source ${sourceId}: ${cacheError.message}`);
                     }
-                } else {
-                    logger.info(`Cache file does not exist: ${cacheFile}`);
                 }
             }
         } else {
@@ -438,9 +426,10 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         const sources = await iptvDatabaseService.getUserIPTVSources(userId);
         const source = sources.find(s => s.id === sourceId);
 
-        logger.info(`[REFRESH DEBUG] Found ${sources.length} sources for user ${userId}`);
-        logger.info(`[REFRESH DEBUG] Looking for source ID ${sourceId}`);
-        logger.info(`[REFRESH DEBUG] Source found: ${JSON.stringify(source, null, 2)}`);
+        // Was 3 INFO lines per refresh, one of which dumped the entire
+        // source row — credentials included — as pretty-printed JSON.
+        // Collapsed to a single debug line (enable LOG_LEVEL=debug to see).
+        logger.debug(`[REFRESH] Source ${sourceId}: lookup ${source ? 'found' : 'NOT FOUND'} among ${sources.length} user sources`);
 
         if (!source) {
             // Source not found - can't update DB status since we don't know if it exists
@@ -461,15 +450,12 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         // cache contents are overwritten on a successful fetch.
 
         // Check source type and validate credentials
-        logger.info(`[REFRESH DEBUG] Source type: ${source.type}`);
-        logger.info(`[REFRESH DEBUG] Source URL: ${source.url}`);
-        logger.info(`[REFRESH DEBUG] Source mac_address: ${source.mac_address}`);
-        logger.info(`[REFRESH DEBUG] Source mac: ${source.mac}`);
+        logger.debug(`[REFRESH] Source ${sourceId}: type=${source.type} url=${source.url}`);
 
         if (source.type === 'xtream') {
             if (!source.url || !source.username || !source.password) {
                 const errorMsg = 'Xtream source missing required credentials';
-                logger.error(`[REFRESH DEBUG] ${errorMsg}`);
+                logger.warn(`[REFRESH] Source ${sourceId}: ${errorMsg}`);
                 await updateRefreshStatusError(sourceId, errorMsg, refreshStartTime);
                 return res.status(400).json({
                     success: false,
@@ -481,7 +467,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             const macAddress = source.mac_address || source.mac;
             if (!source.url || !macAddress) {
                 const errorMsg = 'Stalker source missing required credentials (URL or MAC address)';
-                logger.error(`[REFRESH DEBUG] Stalker source validation failed - url: ${!!source.url}, mac_address: ${!!source.mac_address}, mac: ${!!source.mac}`);
+                logger.warn(`[REFRESH] Source ${sourceId}: ${errorMsg}`);
                 await updateRefreshStatusError(sourceId, errorMsg, refreshStartTime);
                 return res.status(400).json({
                     success: false,
@@ -494,7 +480,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             }
         } else {
             const errorMsg = `Unsupported source type: ${source.type}. Can only refresh Xtream or Stalker sources`;
-            logger.error(`[REFRESH DEBUG] ${errorMsg}`);
+            logger.warn(`[REFRESH] Source ${sourceId}: ${errorMsg}`);
             await updateRefreshStatusError(sourceId, errorMsg, refreshStartTime);
             return res.status(400).json({
                 success: false,
@@ -523,7 +509,13 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 source.password,
                 {
                     onProgress: (progress) => {
-                        if (progress && progress.message) {
+                        // Skip 'error'-stage progress: the SAME failure is
+                        // logged once, authoritatively, in the outer catch.
+                        // Logging it here too double-printed every provider
+                        // error (one INFO line + one ERROR line) — the wall
+                        // of red that made a healthy "refresh all" look like
+                        // a total meltdown.
+                        if (progress && progress.message && progress.stage !== 'error') {
                             logger.info(`[REFRESH] Source ${sourceId}: ${progress.message}`);
                         }
                     },
@@ -589,14 +581,12 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             categories = stalkerResult.categories;
         }
 
-        // Debug logging
-        logger.info(`Received ${channelsResult.channels.length} channels from ${source.type} source`);
+        // Per-source diagnostics at debug level — the headline "fetched N
+        // channels" is already logged above, and dumping a full sample
+        // channel object as pretty JSON spammed the console every refresh.
         if (channelsResult.channels.length > 0) {
-            logger.info(`Sample channel data: ${JSON.stringify(channelsResult.channels[0], null, 2)}`);
-
-            // Count how many channels have groups
             const channelsWithGroups = channelsResult.channels.filter(ch => (ch.group || ch.groupTitle) && (ch.group || ch.groupTitle) !== 'Uncategorized').length;
-            logger.info(`Channels with valid groups: ${channelsWithGroups} / ${channelsResult.channels.length}`);
+            logger.debug(`[REFRESH] Source ${sourceId}: ${channelsResult.channels.length} channels received, ${channelsWithGroups} with groups`);
         }
 
         // 3. Update source with account info (this will also delete old channels)
@@ -657,7 +647,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
         }
 
         await iptvDatabaseService.saveSource(sourceInfo);
-        logger.info(`Updated source ${sourceId} with fresh account info`);
+        logger.debug(`[REFRESH] Source ${sourceId}: updated with fresh account info`);
 
         // 4. Generate categories from channels (if not already provided by Stalker)
         if (!categories) {
@@ -667,7 +657,10 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 return acc;
             }, {});
 
-            logger.info(`Category breakdown: ${JSON.stringify(categoryMap, null, 2)}`);
+            // (Was a full pretty-printed dump of all ~107 category→count
+            // pairs — 100+ console lines per refresh. The count is logged
+            // once below; the full map is debug-only.)
+            logger.debug(`[REFRESH] Source ${sourceId}: category breakdown ${JSON.stringify(categoryMap)}`);
 
             categories = Object.entries(categoryMap)
                 .map(([name, count]) => ({
@@ -678,9 +671,8 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 .sort((a, b) => a.name.localeCompare(b.name));
         }
 
-        logger.info(`Generated ${categories.length} categories`);
         await iptvDatabaseService.saveCategories(sourceId, categories);
-        logger.info(`Saved ${categories.length} categories for source ${sourceId}`);
+        logger.debug(`[REFRESH] Source ${sourceId}: saved ${categories.length} categories`);
 
         // 5. Transform and save channels
         const groupTitle = ch => ch.groupTitle || ch.group || 'Uncategorized';
@@ -765,7 +757,7 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
             }
             return;
         }
-        logger.info(
+        logger.debug(
             `[REFRESH] Source ${sourceId}: saved ${dbChannels.length} channels in ${Date.now() - saveStartedAt}ms`
         );
 
@@ -910,7 +902,13 @@ router.post('/sources/:sourceId/refresh-account-info', requireAuth, async (req, 
                 });
         }
     } catch (error) {
-        logger.error(`Error refreshing source data: ${error.message}`);
+        // An upstream provider failing (timeout, ECONNREFUSED, HTTP 5xx,
+        // HTTP 451 legal block) is the third party's problem, not a server
+        // error — log it ONCE at WARN so a dead provider in a "refresh all"
+        // doesn't fill the console (and error-*.log) with red. The DB row
+        // still records status='error' via updateRefreshStatusError below,
+        // which is what actually drives the UI health dot.
+        logger.warn(`[REFRESH] Source ${sourceId}: refresh failed — ${error.message}`);
 
         // Treat 403/429/Forbidden as a transient upstream rate-limit,
         // NOT a real account/credential failure:
@@ -1064,7 +1062,7 @@ router.post('/sources/refresh-all-bundled-epg', requireAuth, async (req, res) =>
             while (queue.length > 0) {
                 const next = queue.shift();
                 if (!next) break;
-                logger.info(`[bulk-bundled-epg] worker ${workerId} starting source ${next.id} (${completed + 1}/${queued.length})`);
+                logger.debug(`[bulk-bundled-epg] worker ${workerId} starting source ${next.id} (${completed + 1}/${queued.length})`);
                 try {
                     const r = await bundledEpgService.ingestBundledEpgForSource(next.id, { force });
                     completed++;
@@ -1077,7 +1075,7 @@ router.post('/sources/refresh-all-bundled-epg', requireAuth, async (req, res) =>
                     logger.warn(`[bulk-bundled-epg] source ${next.id} threw: ${e.message}`);
                 }
             }
-            logger.info(`[bulk-bundled-epg] worker ${workerId} drained`);
+            logger.debug(`[bulk-bundled-epg] worker ${workerId} drained`);
         };
         const workers = Array.from({ length: CONCURRENCY }, (_, i) => worker(i + 1));
         // Detached — we don't await. The response already went out.
@@ -1497,7 +1495,8 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                     continue;
                 }
 
-                logger.info(`Testing stream: ${testChannel.name} (${testChannel.source_type}) URL: ${streamUrl?.substring(0, 100)}...`);
+                // URL omitted — for xtream it embeds username/password in the path.
+                logger.debug(`Testing stream: ${testChannel.name} (${testChannel.source_type})`);
 
                 // Use ffprobe to validate stream (matching liveEvents.js args)
                 const FFPROBE_TIMEOUT = 5000;
@@ -1542,7 +1541,7 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                     result.status = 'passed';
                     result.resolution = videoStream.height ? `${videoStream.height}p` : 'unknown';
                     streamDiagnostics.passed++;
-                    logger.info(`Stream test PASSED: ${testChannel.name} (${result.resolution})`);
+                    logger.debug(`Stream test PASSED: ${testChannel.name} (${result.resolution})`);
                 } else {
                     result.status = 'failed';
                     result.error = 'No video stream found';
@@ -1595,7 +1594,7 @@ router.post('/sources/:sourceId/test-streams', requireAuth, async (req, res) => 
                 }
 
                 streamDiagnostics.failed++;
-                logger.warn(`Stream test FAILED: ${testChannel.name} - ${result.error}`);
+                logger.debug(`Stream test FAILED: ${testChannel.name} - ${result.error}`);
             }
 
             streamDiagnostics.results.push(result);

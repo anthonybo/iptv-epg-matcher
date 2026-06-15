@@ -34,7 +34,7 @@ const httpsAgent = new https.Agent({
   keepAliveMsecs: 30000
 });
 
-logger.info('[XTREAM] HTTP/HTTPS connection pooling enabled (maxSockets: 10, keepAlive: true)');
+logger.debug('[XTREAM] HTTP/HTTPS connection pooling enabled (maxSockets: 10, keepAlive: true)');
 
 /**
  * Validate credentials and get credential info from database
@@ -190,7 +190,7 @@ router.get('/player_api.php', async (req, res) => {
   if (action === 'get_short_epg' || action === 'get_simple_data_table') {
     // Return EPG data for channels
     const { stream_id, limit } = req.query;
-    logger.info(`EPG request: action=${action}, stream_id=${stream_id || 'all'}, limit=${limit || 100}`);
+    logger.debug(`EPG request: action=${action}, stream_id=${stream_id || 'all'}, limit=${limit || 100}`);
     const db = await iptvDatabaseService.connect();
 
     // Get the channel(s) to fetch EPG for
@@ -297,7 +297,7 @@ router.get('/player_api.php', async (req, res) => {
     // Format EPG data for XTREAM API
     const epgListings = {};
 
-    logger.info(`Found ${programs.length} EPG programs for XTREAM API`);
+    logger.debug(`Found ${programs.length} EPG programs for XTREAM API`);
 
     programs.forEach(prog => {
       if (!epgListings[prog.channel_id]) {
@@ -493,7 +493,7 @@ router.get('/xmltv.php', async (req, res) => {
     // Generate dummy EPG for channels with use_dummy_epg=true
     const dummyChannels = matchedChannels.filter(ch => ch.use_dummy_epg === true);
     if (dummyChannels.length > 0) {
-      logger.info(`Generating dummy EPG for ${dummyChannels.length} channels`);
+      logger.debug(`Generating dummy EPG for ${dummyChannels.length} channels`);
 
       const now = new Date();
       dummyChannels.forEach(channel => {
@@ -537,7 +537,7 @@ router.get('/xmltv.php', async (req, res) => {
         }
       });
 
-      logger.info(`Total programs after adding dummy EPG: ${epgData.length}`);
+      logger.debug(`Total programs after adding dummy EPG: ${epgData.length}`);
     }
 
     if (!epgData || epgData.length === 0) {
@@ -628,13 +628,13 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
       return res.status(400).json({ error: 'No stream URL for this channel' });
     }
 
-    logger.info(`Proxying XTREAM live stream for channel: ${channel.name} from URL: ${channel.url}`);
+    logger.info(`Proxying XTREAM live stream for channel: ${channel.name}`);
 
     // Handle Stalker portal URLs - request FRESH link from portal
     let streamUrl = channel.url;
     if (channel.url.includes('portal.php') && channel.url.includes('action=create_link')) {
       try {
-        logger.info(`Requesting fresh Stalker link from portal...`);
+        logger.debug(`Requesting fresh Stalker link from portal`);
 
         // Make request to create_link to get fresh token
         const createLinkResponse = await fetch(channel.url, {
@@ -649,14 +649,13 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
 
         if (createLinkResponse.ok) {
           const linkData = await createLinkResponse.json();
-          logger.info(`create_link response:`, linkData);
 
           if (linkData && linkData.js && linkData.js.cmd) {
             const freshCmd = linkData.js.cmd;
             const match = freshCmd.match(/ffmpeg\s+(.+)/);
             if (match && match[1]) {
               let freshUrl = match[1];
-              logger.info(`Got FRESH Stalker stream URL: ${freshUrl}`);
+              logger.debug(`Got fresh Stalker stream URL`);
 
               // Extract play_token from fresh URL
               const freshTokenMatch = freshUrl.match(/play_token=([^&]+)/);
@@ -667,16 +666,14 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
               const originalCmdMatch = channel.url.match(/cmd=([^&]+)/);
               if (originalCmdMatch && freshToken) {
                 const originalCmd = decodeURIComponent(originalCmdMatch[1]);
-                logger.info(`Original cmd: ${originalCmd}`);
                 const originalStreamMatch = originalCmd.match(/stream=([^&]+)/);
                 const originalStreamId = originalStreamMatch ? originalStreamMatch[1] : null;
 
                 if (originalStreamId) {
                   // Check if fresh URL has empty stream parameter
                   if (freshUrl.includes('stream=&') || freshUrl.match(/stream=(?:&|$)/)) {
-                    logger.info(`Portal returned empty stream ID - using original stream ID: ${originalStreamId}`);
+                    logger.debug(`Portal returned empty stream ID - using original stream ID`);
                     freshUrl = freshUrl.replace(/stream=(&|$)/, `stream=${originalStreamId}$1`);
-                    logger.info(`Fixed stream URL: ${freshUrl}`);
                   }
                 }
               }
@@ -693,7 +690,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
             const match = cmd.match(/ffmpeg\s+(.+)/);
             if (match && match[1]) {
               streamUrl = match[1];
-              logger.info(`Using stored Stalker stream URL: ${streamUrl}`);
+              logger.debug(`Using stored Stalker stream URL`);
             }
           }
         }
@@ -703,7 +700,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
           const sourceUrl = new URL(channel.url);
           const serverAddress = `${sourceUrl.protocol}//${sourceUrl.host}`;
           streamUrl = streamUrl.replace(/http:\/\/localhost/g, serverAddress);
-          logger.info(`Replaced localhost with server address: ${streamUrl}`);
+          logger.debug(`Replaced localhost with server address`);
         }
       } catch (error) {
         logger.error(`Error getting fresh Stalker link: ${error.message}`);
@@ -789,7 +786,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
     // Handle client disconnect
     req.on('close', () => {
       try {
-        logger.info(`Stream closed for stream ID ${streamId}`);
+        logger.debug(`Stream closed for stream ID ${streamId}`);
         metricsService.trackStreamEnd(streamKey);
         streamResponse.body.destroy();
         passThrough.destroy();
@@ -811,7 +808,7 @@ router.get('/live/:username/:password/:streamFile', async (req, res) => {
 
     // Clear timeout when stream ends or errors
     passThrough.on('end', () => {
-      logger.info(`Stream completed successfully for stream ID ${streamId}`);
+      logger.debug(`Stream completed successfully for stream ID ${streamId}`);
       metricsService.trackStreamEnd(streamKey);
       clearTimeout(streamTimeout);
     });
@@ -841,7 +838,7 @@ router.get('/stream/:channelId', async (req, res) => {
     const { channelId } = req.params;
     const { username, password } = req.query;
 
-    logger.info(`[STREAM] Incoming request for channel: ${channelId}, username: ${username}, has password: ${!!password}`);
+    logger.debug(`[STREAM] Incoming request for channel: ${channelId}`);
 
     if (!username || !password) {
       logger.error('[STREAM] Missing credentials for XTREAM stream');
@@ -851,11 +848,11 @@ router.get('/stream/:channelId', async (req, res) => {
     const credential = await validateCredentials(username, password);
 
     if (!credential) {
-      logger.error(`[STREAM] Invalid credentials for XTREAM stream, username: ${username}`);
+      logger.error(`[STREAM] Invalid credentials for XTREAM stream`);
       return res.status(403).json({ error: 'Invalid credentials' });
     }
 
-    logger.info(`[STREAM] Valid credentials for user ${credential.user_id}, fetching channel ${channelId}`);
+    logger.debug(`[STREAM] Valid credentials for user ${credential.user_id}, fetching channel ${channelId}`);
 
     // Get the channel from the database
     const db = await iptvDatabaseService.connect();

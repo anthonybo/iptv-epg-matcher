@@ -117,7 +117,7 @@ const processWithDetailedUpdates = async (sessionId, options) => {
       sendProgressUpdate(sessionId, 'fetching_channels', 18, 'Fetching channel data from provider');
 
       try {
-        logger.info(`Trying Xtream JSON API: ${jsonApiUrl}`);
+        logger.debug(`Trying Xtream JSON API for server: ${xtreamServer}`);
         const fetch = require('node-fetch');
         const jsonResponse = await fetch(jsonApiUrl, {
           timeout: 60000,
@@ -187,7 +187,7 @@ const processWithDetailedUpdates = async (sessionId, options) => {
       // Fall back to M3U endpoint if JSON API didn't work
       if (!useJsonApi) {
         const xtreamM3uUrl = `${baseUrl}get.php?username=${xtreamUsername}&password=${xtreamPassword}&type=m3u_plus&output=ts`;
-        logger.info(`Falling back to M3U endpoint: ${xtreamM3uUrl}`);
+        logger.info(`Falling back to M3U endpoint for server: ${xtreamServer}`);
 
         sendProgressUpdate(sessionId, 'fetching_m3u', 18, 'Fetching M3U data from provider');
         const buffer = await fetchWithProgressUpdates(xtreamM3uUrl, sessionId);
@@ -310,12 +310,12 @@ async function processChannels(sessionId, channels, userId = null, options = {})
   if (global.gc) {
     try {
       global.gc();
-      logger.info('Performed garbage collection before generating categories');
+      logger.debug('Performed garbage collection before generating categories');
     } catch (err) {
       logger.warn('Failed to perform garbage collection', { error: err.message });
     }
   }
-  
+
   sendProgressUpdate(sessionId, 'generating_categories', 30, 'Generating channel categories');
   const categories = channels.reduce((acc, ch) => {
     const groupTitle = ch.groupTitle || 'Uncategorized';
@@ -368,7 +368,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
           epg: generateTestEpg(channels)
         }
       });
-      logger.info(`Added test EPG data for ${channels.length} channels to session ${sessionId}`);
+      logger.debug(`Added test EPG data for ${channels.length} channels to session ${sessionId}`);
     } else {
       // For large datasets, generate EPG only for the first 1000 channels
       const sampleChannels = channels.slice(0, 1000);
@@ -378,7 +378,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
           partialEpg: true
         }
       });
-      logger.info(`Added partial test EPG data for 1000/${channels.length} channels to session ${sessionId}`);
+      logger.debug(`Added partial test EPG data for 1000/${channels.length} channels to session ${sessionId}`);
     }
   } catch (epgError) {
     logger.error(`Error updating session with EPG data: ${epgError.message}`);
@@ -391,7 +391,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
   if (global.gc) {
     try {
       global.gc();
-      logger.info('Performed garbage collection before completion');
+      logger.debug('Performed garbage collection before completion');
     } catch (err) {
       logger.warn('Failed to perform garbage collection', { error: err.message });
     }
@@ -413,11 +413,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
     
     // Get the final session state
     const finalSession = sessionStorage.getSession(sessionId);
-    logger.info(`Final session state for ${sessionId}:`, {
-      status: finalSession.status,
-      channelCount: finalSession.data?.channels?.length,
-      categoriesCount: finalSession.data?.categories?.length
-    });
+    logger.debug(`Final session state for ${sessionId}: status=${finalSession.status}, channels=${finalSession.data?.channels?.length}, categories=${finalSession.data?.categories?.length}`);
   } catch (finalizeError) {
     logger.error(`Error finalizing session: ${finalizeError.message}`);
   }
@@ -430,8 +426,8 @@ async function processChannels(sessionId, channels, userId = null, options = {})
       // Get credentials from options parameter FIRST (passed from load request),
       // then fallback to session data if not in options
       const session = sessionStorage.getSession(sessionId);
-      logger.info(`Session data keys: ${Object.keys(session?.data || {}).join(', ')}`);
-      logger.info(`Options keys: ${Object.keys(options || {}).join(', ')}`);
+      logger.debug(`Session data keys: ${Object.keys(session?.data || {}).join(', ')}`);
+      logger.debug(`Options keys: ${Object.keys(options || {}).join(', ')}`);
 
       const sessionData = session?.data || {};
       const xtreamServer = options.xtreamServer || sessionData.xtreamServer || sessionData.options?.xtreamServer;
@@ -441,7 +437,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
       const portalUrl = options.portalUrl || sessionData.portalUrl || sessionData.options?.portalUrl;
       const macAddress = options.macAddress || sessionData.macAddress || sessionData.options?.macAddress;
 
-      logger.info(`Source info from options/session: xtreamServer=${xtreamServer}, xtreamUsername=${xtreamUsername}, portalUrl=${portalUrl}, macAddress=${macAddress}, m3uUrl=${m3uUrl}, sessionId=${sessionId}`);
+      logger.debug(`Source info from options/session: type=${xtreamServer ? 'xtream' : portalUrl ? 'stalker' : m3uUrl ? 'm3u' : 'unknown'}, hasXtreamServer=${!!xtreamServer}, hasPortal=${!!portalUrl}, hasM3u=${!!m3uUrl}, sessionId=${sessionId}`);
 
       // Create source info
       const sourceInfo = {
@@ -456,7 +452,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
 
       // Fetch account info from Xtream API if this is an Xtream source
       if (xtreamServer && xtreamUsername && xtreamPassword) {
-        logger.info('Fetching account info from Xtream API...');
+        logger.debug('Fetching account info from Xtream API');
         try {
           const accountInfo = await epgService.fetchXtreamAccountInfo(
             xtreamServer,
@@ -466,7 +462,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
 
           // Add account info to sourceInfo
           Object.assign(sourceInfo, accountInfo);
-          logger.info('Account info fetched successfully:', accountInfo);
+          logger.debug('Account info fetched successfully');
         } catch (accountError) {
           logger.warn(`Could not fetch account info: ${accountError.message}`);
         }
@@ -474,14 +470,14 @@ async function processChannels(sessionId, channels, userId = null, options = {})
 
       // Fetch account info from Stalker portal if this is a Stalker source
       if (portalUrl && macAddress && options.stalkerAccountInfo) {
-        logger.info('Using Stalker account info from portal response');
+        logger.debug('Using Stalker account info from portal response');
         Object.assign(sourceInfo, options.stalkerAccountInfo);
       }
 
       // Save source
       const savedSource = await iptvDatabaseService.saveSource(sourceInfo);
       const sourceId = savedSource.id || savedSource; // Handle both object and ID return types
-      logger.info(`Source saved with ID: ${sourceId}`, { savedSource });
+      logger.info(`Source saved with ID: ${sourceId}`);
 
       // Transform and save channels with source metadata
       const dbChannels = channels.map(ch => ({
@@ -527,7 +523,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
 
       // Associate session with source
       await iptvDatabaseService.associateSourceWithSession(sessionId, sourceId);
-      logger.info(`Associated session ${sessionId} with source ${sourceId}`);
+      logger.debug(`Associated session ${sessionId} with source ${sourceId}`);
 
       // If user is authenticated, create user preference for this source
       if (userId) {
@@ -536,7 +532,7 @@ async function processChannels(sessionId, channels, userId = null, options = {})
             nickname: sourceInfo.name,
             isActive: true
           });
-          logger.info(`Created user preference for user ${userId}, source ${sourceId}`);
+          logger.debug(`Created user preference for user ${userId}, source ${sourceId}`);
         } catch (prefError) {
           // Don't fail the whole operation if preference creation fails
           logger.warn(`Failed to create user preference: ${prefError.message}`);

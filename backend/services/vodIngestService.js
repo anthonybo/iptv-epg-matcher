@@ -348,7 +348,7 @@ async function ingestVodForSource(source, opts = {}) {
   const _vodWaitStart = Date.now();
   await _acquireVodSlot();
   if (Date.now() - _vodWaitStart > 100) {
-    logger.info(`[vodIngest] Source ${sourceId}: waited ${Date.now() - _vodWaitStart}ms for ingest slot (active=${_activeVod}, max=${MAX_CONCURRENT_VOD})`);
+    logger.debug(`[vodIngest] Source ${sourceId}: waited ${Date.now() - _vodWaitStart}ms for ingest slot (active=${_activeVod}, max=${MAX_CONCURRENT_VOD})`);
   }
   // Pause the TMDB enrichment worker for the duration of the
   // ingest. Both touch movie_streams; the enrichment's seqscan

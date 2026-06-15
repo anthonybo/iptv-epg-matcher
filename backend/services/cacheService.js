@@ -28,16 +28,7 @@ function isCacheValid(cacheFilePath, ttlHours = 24) {
     if (isValid) {
       const remainingValidTime = ttlMs - fileAge;
       const remainingHours = Math.round(remainingValidTime / (60 * 60 * 1000) * 10) / 10;
-      logger.info(`Cache hit: ${cacheFilePath} (valid for ${remainingHours} more hours, TTL: ${ttlHours}h)`);
-      
-      // Try to read file size for better logging
-      try {
-        const fileSizeBytes = stats.size;
-        const fileSizeMB = Math.round(fileSizeBytes / (1024 * 1024) * 100) / 100;
-        logger.debug(`Cache file size: ${fileSizeMB} MB`);
-      } catch (err) {
-        // Ignore file size errors
-      }
+      logger.debug(`Cache hit: ${cacheFilePath} (valid for ${remainingHours} more hours, TTL: ${ttlHours}h)`);
     } else {
       logger.debug(`Cache expired: ${cacheFilePath} (TTL: ${ttlHours}h, age: ${Math.round(fileAge / (60 * 60 * 1000) * 10) / 10}h)`);
     }
@@ -84,7 +75,7 @@ function sanitizeFilename(filename) {
  */
 function writeChunkedCache(source, sourceKey, chunkDir) {
     try {
-        logger.info(`Using chunked storage for large source: ${sourceKey}`);
+        logger.debug(`Using chunked storage for large source: ${sourceKey}`);
         const safeName = sanitizeFilename(sourceKey);
         const metadata = {
             isChunked: true,
@@ -111,7 +102,6 @@ function writeChunkedCache(source, sourceKey, chunkDir) {
                 type: 'channels',
                 path: path.relative(CACHE_DIR, channelsChunkPath)
             });
-            logger.debug(`Wrote ${source.channels.length} channels to chunk ${channelsChunkPath}`);
         }
 
         // Write channelMap chunk
@@ -125,7 +115,6 @@ function writeChunkedCache(source, sourceKey, chunkDir) {
                 type: 'channelMap',
                 path: path.relative(CACHE_DIR, channelMapChunkPath)
             });
-            logger.debug(`Wrote channel map with ${Object.keys(source.channelMap).length} entries to chunk ${channelMapChunkPath}`);
         }
 
         // Write programMap chunk
@@ -139,7 +128,6 @@ function writeChunkedCache(source, sourceKey, chunkDir) {
                 type: 'programMap',
                 path: path.relative(CACHE_DIR, programMapChunkPath)
             });
-            logger.debug(`Wrote program map with ${Object.keys(source.programMap).length} entries to chunk ${programMapChunkPath}`);
         }
 
         // Write programs in multiple chunks if needed
@@ -170,8 +158,6 @@ function writeChunkedCache(source, sourceKey, chunkDir) {
                     count: programsChunk.length,
                     path: path.relative(CACHE_DIR, programsChunkPath)
                 });
-
-                logger.debug(`Wrote programs chunk ${i + 1}/${chunks} with ${programsChunk.length} programs to ${programsChunkPath}`);
             }
         }
 
@@ -199,8 +185,8 @@ function writeChunkedCache(source, sourceKey, chunkDir) {
  */
 function readChunkedCache(metadata, chunkDir) {
     try {
-      logger.info(`Reading chunked source: ${metadata.sourceKey}`);
-      
+      logger.debug(`Reading chunked source: ${metadata.sourceKey}`);
+
       // Initialize the reconstructed source
       const source = {
         channels: [],
@@ -225,27 +211,23 @@ function readChunkedCache(metadata, chunkDir) {
           switch (chunk.type) {
             case 'channels':
               source.channels = chunkData.data || [];
-              logger.debug(`Loaded ${source.channels.length} channels from chunk`);
               break;
-            
+
             case 'channelMap':
               source.channelMap = chunkData.data || {};
-              logger.debug(`Loaded channel map with ${Object.keys(source.channelMap).length} entries from chunk`);
               break;
-            
+
             case 'programMap':
               source.programMap = chunkData.data || {};
-              logger.debug(`Loaded program map with ${Object.keys(source.programMap).length} entries from chunk`);
               break;
-            
+
             case 'programs':
               // Add programs to the array
               if (chunkData.data && Array.isArray(chunkData.data)) {
                 source.programs.push(...chunkData.data);
-                logger.debug(`Loaded ${chunkData.data.length} programs from chunk ${chunk.chunkIndex + 1}/${chunk.totalChunks || 1}`);
               }
               break;
-            
+
             default:
               logger.warn(`Unknown chunk type: ${chunk.type}`);
           }
@@ -254,7 +236,7 @@ function readChunkedCache(metadata, chunkDir) {
         }
       }
       
-      logger.info(`Successfully reconstructed chunked source ${metadata.sourceKey}: ${source.channels.length} channels, ${source.programs.length} programs`);
+      logger.debug(`Reconstructed chunked source ${metadata.sourceKey}: ${source.channels.length} channels, ${source.programs.length} programs`);
       return source;
     } catch (e) {
       logger.error(`Failed to read chunked cache: ${e.message}`, { error: e.message, stack: e.stack });
@@ -314,14 +296,13 @@ function writeCache(filePath, data) {
 
                     if (isLargeSource) {
                         // Use chunked approach for large sources
-                        logger.info(`Source ${sourceKey} is very large, using chunked storage`);
+                        logger.debug(`Source ${sourceKey} is very large, using chunked storage`);
                         const metadata = writeChunkedCache(source, sourceKey, chunkDir);
 
                         if (metadata) {
                             // Update the index with chunked metadata
                             sourceIndex[sourceKey].isChunked = true;
                             sourceIndex[sourceKey].chunksMetadataPath = path.relative(CACHE_DIR, path.join(chunkDir, `${sanitizeFilename(sourceKey)}_metadata.json`));
-                            logger.info(`Added chunked source ${sourceKey} to index`);
                         } else {
                             // Mark as uncacheable but available
                             sourceIndex[sourceKey].uncacheable = true;
@@ -335,11 +316,7 @@ function writeCache(filePath, data) {
 
                         // Write the source data to its own file
                         fs.writeFileSync(chunkPath, JSON.stringify(source));
-                        logger.info(`Cached EPG source to ${chunkPath}`, {
-                            sourceKey,
-                            channelCount,
-                            programCount
-                        });
+                        logger.debug(`Cached EPG source ${sourceKey} (${channelCount} channels, ${programCount} programs)`);
                     }
                 } catch (err) {
                     logger.warn(`Skipped caching source ${sourceKey}: ${err.message}`);
@@ -364,11 +341,7 @@ function writeCache(filePath, data) {
                 sources: sourceIndex
             }));
 
-            logger.info(`Cached EPG source index to ${filePath}`, {
-                sourceCount: Object.keys(sourceIndex).length,
-                totalChannels,
-                totalPrograms
-            });
+            logger.info(`Cached EPG source index: ${Object.keys(sourceIndex).length} sources, ${totalChannels} channels, ${totalPrograms} programs`);
             return true;
         } else {
             // Standard caching for other types of data
@@ -437,7 +410,7 @@ function readEpgSourcesCache(filePath) {
 
                 // Handle uncacheable sources - they will be reloaded but not treated as missing
                 if (sourceInfo.uncacheable) {
-                    logger.info(`Source ${sourceKey} was marked as uncacheable but available in memory`);
+                    logger.debug(`Source ${sourceKey} was marked as uncacheable but available in memory`);
                     sourceResults.uncacheable++;
                     continue;
                 }
@@ -459,7 +432,7 @@ function readEpgSourcesCache(filePath) {
                         if (chunkedSource && chunkedSource.channels && chunkedSource.channels.length > 0) {
                             sources[sourceKey] = chunkedSource;
                             sourceResults.success++;
-                            logger.info(`Successfully loaded chunked source ${sourceKey}`);
+                            logger.debug(`Loaded chunked source ${sourceKey}`);
                         } else {
                             logger.warn(`Failed to load chunked source ${sourceKey}`);
                             sourceResults.failed++;
@@ -498,13 +471,6 @@ function readEpgSourcesCache(filePath) {
                     sourceResults.failed++;
                     continue;
                 }
-
-                logger.debug(`Loaded EPG source from ${chunkPath}`, {
-                    sourceKey,
-                    channelCount: sources[sourceKey].channels.length,
-                    channelMapSize: sources[sourceKey].channelMap ? Object.keys(sources[sourceKey].channelMap).length : 0,
-                    programCount: sources[sourceKey].programs ? sources[sourceKey].programs.length : 0
-                });
 
                 sourceResults.success++;
             } catch (err) {

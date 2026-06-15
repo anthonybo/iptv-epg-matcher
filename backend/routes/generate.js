@@ -18,7 +18,7 @@ const { generateXmltvFromDatabase } = require('../utils/xmltvGenerator');
 
 // Module loaded timestamp - this executes IMMEDIATELY when module is required
 const MODULE_LOAD_TIME = new Date().toISOString();
-logger.info(`!!! GENERATE.JS MODULE LOADED AT ${MODULE_LOAD_TIME} !!!`);
+logger.debug(`generate.js module loaded at ${MODULE_LOAD_TIME}`);
 
 /**
  * Get the local network IP address of the server
@@ -238,12 +238,6 @@ router.post('/', async (req, res) => {
 
     const matchedChannels = result.rows;
 
-    // DEBUG: Check what type use_dummy_epg actually is from PostgreSQL
-    const nhlCh = matchedChannels.find(ch => ch.name && ch.name.includes('NHL 11'));
-    if (nhlCh) {
-      logger.info(`[PG TYPE DEBUG] NHL 11: use_dummy_epg=${nhlCh.use_dummy_epg}, type=${typeof nhlCh.use_dummy_epg}, strict===1: ${nhlCh.use_dummy_epg === 1}, loose==1: ${nhlCh.use_dummy_epg == 1}`);
-    }
-
     if (!matchedChannels || matchedChannels.length === 0) {
       logger.warn(`No matched channels found for user ${userId}`);
       return res.status(400).json({
@@ -438,7 +432,6 @@ router.post('/', async (req, res) => {
     // Generate dummy EPG programs for channels with use_dummy_epg=1
     // Note: PostgreSQL CASE returns integer, but pg library might convert to string
     const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg == 1 || ch.use_dummy_epg === true);
-    logger.info(`[DEBUG] Channels with use_dummy_epg === 1: ${dummyEpgChannels.length}`);
 
     if (dummyEpgChannels.length > 0) {
       logger.info(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
@@ -496,7 +489,7 @@ router.post('/', async (req, res) => {
           }
         }
       });
-      logger.info(`Added ${epgPrograms.length} total programs (real + dummy)`);
+      logger.debug(`Added dummy EPG: ${epgPrograms.length} total programs (real + dummy)`);
     }
 
     // Save M3U file only (XMLTV is now generated dynamically from database)
@@ -520,7 +513,7 @@ router.post('/', async (req, res) => {
     const dbCredentialId = credentialResult.rows[0].id;
 
     // Publish EPG data to database (replaces static XMLTV file for dynamic serving)
-    logger.info(`Publishing EPG to database for credential ${dbCredentialId}`);
+    logger.debug(`Publishing EPG to database for credential ${dbCredentialId}`);
     try {
       // Transform epgPrograms to include channel metadata for published_epg table
       const epgProgramsWithMetadata = epgPrograms.map(prog => {
@@ -547,7 +540,7 @@ router.post('/', async (req, res) => {
       );
       logger.info(`Successfully published ${epgProgramsWithMetadata.length} EPG programs to database`);
     } catch (publishError) {
-      logger.error(`Error publishing EPG to database: ${publishError.message}`);
+      logger.warn(`Error publishing EPG to database, falling back to XMLTV file: ${publishError.message}`);
       // Continue anyway - XMLTV file is still written as fallback
     }
 
@@ -558,8 +551,8 @@ router.post('/', async (req, res) => {
     const m3uUrl = `${baseUrl}/api/xtream/get.php?username=${username}&password=${password}&type=m3u_plus&output=ts`;
     const epgUrl = `${baseUrl}/api/xtream/xmltv.php?username=${username}&password=${password}`;
 
-    logger.info(`Using base URL: ${baseUrl} (server IP: ${serverIp})`);
-    logger.info(`Generated XTREAM credentials for user ${userId}: ${matchedChannels.length} channels, username=${username}`);
+    logger.debug(`Using base URL: ${baseUrl} (server IP: ${serverIp})`);
+    logger.info(`Generated XTREAM credentials for user ${userId}: ${matchedChannels.length} channels`);
 
     res.json({
       xtreamUrl: xtreamServerUrl,      // Base XTREAM server URL
@@ -583,7 +576,6 @@ router.post('/', async (req, res) => {
  */
 router.post('/update-all', async (req, res) => {
   try {
-    logger.info('=== UPDATE-ALL ENDPOINT HIT - NEW CODE LOADED ===');
     const userId = req.user?.id;
 
     if (!userId) {
@@ -785,7 +777,7 @@ router.post('/update-all', async (req, res) => {
     const updateErrors = [];
     for (const cred of existingCredentials) {
       try {
-        logger.info(`Attempting to update credential ${cred.credential_id}...`);
+        logger.debug(`Attempting to update credential ${cred.credential_id}...`);
         // Generate M3U content
         const m3uLines = ['#EXTM3U'];
         matchedChannels.forEach(channel => {
@@ -830,10 +822,9 @@ router.post('/update-all', async (req, res) => {
         // Generate dummy EPG programs for channels with use_dummy_epg=1
         // Note: PostgreSQL CASE returns integer, but pg library might convert to string
         const dummyEpgChannels = matchedChannels.filter(ch => ch.use_dummy_epg == 1 || ch.use_dummy_epg === true);
-        logger.info(`[DEBUG UPDATE-ALL] Channels with use_dummy_epg === 1: ${dummyEpgChannels.length}`);
 
         if (dummyEpgChannels.length > 0) {
-          logger.info(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
+          logger.debug(`Generating dummy EPG for ${dummyEpgChannels.length} channels`);
 
           const now = new Date();
           dummyEpgChannels.forEach(channel => {
@@ -887,14 +878,14 @@ router.post('/update-all', async (req, res) => {
               }
             }
           });
-          logger.info(`Added ${epgPrograms.length} total programs (real + dummy)`);
+          logger.debug(`Added dummy EPG: ${epgPrograms.length} total programs (real + dummy)`);
         }
 
         // Update M3U file only (XMLTV is now generated dynamically from database)
         fs.writeFileSync(cred.m3u_file, m3uContent);
 
         // Publish EPG data to database (replaces static XMLTV file for dynamic serving)
-        logger.info(`Publishing EPG to database for credential ${cred.id}`);
+        logger.debug(`Publishing EPG to database for credential ${cred.id}`);
         try {
           // Transform epgPrograms to include channel metadata for published_epg table
           const epgProgramsWithMetadata = epgPrograms.map(prog => {

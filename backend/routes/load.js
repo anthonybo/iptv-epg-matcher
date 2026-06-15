@@ -111,9 +111,7 @@ async function saveChannelsToDatabase(sessionId, channels, sourceInfo, userId = 
  * Debug helper to log status in a highly visible way
  */
 function debugLog(message, data = null) {
-    const stars = '*'.repeat(20);
-    console.log(`\n${stars}\n${message}\n${stars}`);
-    logger.info(`DEBUG: ${message}`, data || {});
+    logger.debug(message, data || {});
 }
 
 // Format file size for display
@@ -609,7 +607,7 @@ async function loadEpgSourcesWithProgress(sourcesFile, progressCallback) {
 
             // Handle uncacheable sources - they will be reloaded but not treated as missing
             if (sourceInfo.uncacheable) {
-                logger.info(`Source ${sourceKey} was marked as uncacheable but available in memory`);
+                logger.debug(`Source ${sourceKey} was marked as uncacheable but available in memory`);
                 sourceResults.uncacheable++;
                 continue;
             }
@@ -631,7 +629,7 @@ async function loadEpgSourcesWithProgress(sourcesFile, progressCallback) {
                     if (chunkedSource && chunkedSource.channels && chunkedSource.channels.length > 0) {
                         sources[sourceKey] = chunkedSource;
                         sourceResults.success++;
-                        logger.info(`Successfully loaded chunked source ${sourceKey}`);
+                        logger.debug(`Successfully loaded chunked source ${sourceKey}`);
                     } else {
                         logger.warn(`Failed to load chunked source ${sourceKey}`);
                         sourceResults.failed++;
@@ -844,7 +842,7 @@ async function processDataWithProgressUpdates(sessionId, options) {
                     const jsonApiUrl = `${baseUrl}player_api.php?username=${xtreamUsername}&password=${xtreamPassword}&action=get_live_streams`;
 
                     try {
-                        logger.info(`Trying Xtream JSON API: ${jsonApiUrl}`);
+                        logger.info(`Trying Xtream JSON API for live streams`);
                         const jsonResponse = await fetch(jsonApiUrl, {
                             timeout: 60000,
                             headers: {
@@ -908,7 +906,7 @@ async function processDataWithProgressUpdates(sessionId, options) {
                     // Fall back to M3U endpoint if JSON API didn't work
                     if (!useJsonApi) {
                         const xtreamM3uUrl = `${baseUrl}get.php?username=${xtreamUsername}&password=${xtreamPassword}&type=m3u_plus&output=ts`;
-                        logger.info(`Falling back to M3U endpoint: ${xtreamM3uUrl}`);
+                        logger.info(`Falling back to M3U endpoint`);
 
                         // Fetch the M3U content
                         m3uContent = await fetch(xtreamM3uUrl, {
@@ -929,7 +927,6 @@ async function processDataWithProgressUpdates(sessionId, options) {
                         }
 
                         logger.info(`Successfully fetched M3U content: ${m3uContent.length} bytes`);
-                        logger.debug(`M3U first 200 chars: ${m3uContent.substring(0, 200)}`);
 
                         // Parse the M3U content
                         const m3uParser = require('../epgUtils');
@@ -954,20 +951,19 @@ async function processDataWithProgressUpdates(sessionId, options) {
                             xtreamServer
                         });
                         logger.info(`Created new session with ID: ${sessionId}`);
-                        
+
                         // Save to cache for future use
                         try {
                             if (channels && channels.length > 0) {
-                                logger.info(`Saving ${channels.length} channels to cache for 24h`);
                                 // Make directory if it doesn't exist
                                 if (!fs.existsSync(path.dirname(cacheChannelsFile))) {
                                     fs.mkdirSync(path.dirname(cacheChannelsFile), { recursive: true });
                                 }
                                 writeCache(cacheChannelsFile, channels);
-                                logger.info(`Successfully saved channels to ${cacheChannelsFile}`);
+                                logger.info(`Saved ${channels.length} channels to cache (24h TTL)`);
                             }
                         } catch (cacheErr) {
-                            logger.error(`Error saving channels to cache: ${cacheErr.message}`, { error: cacheErr });
+                            logger.error(`Error saving channels to cache: ${cacheErr.message}`);
                         }
                     } else {
                         // Update existing session
@@ -978,20 +974,19 @@ async function processDataWithProgressUpdates(sessionId, options) {
                             xtreamServer
                         });
                         logger.info(`Updated existing session with ID: ${sessionId}`);
-                        
+
                         // Save to cache for future use
                         try {
                             if (channels && channels.length > 0) {
-                                logger.info(`Saving ${channels.length} channels to cache for 24h`);
                                 // Make directory if it doesn't exist
                                 if (!fs.existsSync(path.dirname(cacheChannelsFile))) {
                                     fs.mkdirSync(path.dirname(cacheChannelsFile), { recursive: true });
                                 }
                                 writeCache(cacheChannelsFile, channels);
-                                logger.info(`Successfully saved channels to ${cacheChannelsFile}`);
+                                logger.info(`Saved ${channels.length} channels to cache (24h TTL)`);
                             }
                         } catch (cacheErr) {
-                            logger.error(`Error saving channels to cache: ${cacheErr.message}`, { error: cacheErr });
+                            logger.error(`Error saving channels to cache: ${cacheErr.message}`);
                         }
                     }
 
@@ -1201,7 +1196,7 @@ async function processDataWithProgressUpdates(sessionId, options) {
                                                     
                                                     // Write back to file
                                                     fs.writeFileSync(cacheEpgSourcesFile, JSON.stringify(epgSourcesCache));
-                                                    logger.info(`Saved EPG source ${sourceKey} to cache file`);
+                                                    logger.debug(`Saved EPG source ${sourceKey} to cache file`);
                                                 } catch (cacheErr) {
                                                     logger.error(`Error saving EPG source to cache: ${cacheErr.message}`);
                                                 }
@@ -1210,7 +1205,6 @@ async function processDataWithProgressUpdates(sessionId, options) {
                                             // Force garbage collection after each source
                                             if (global.gc) {
                                                 global.gc();
-                                                logger.info(`Performed garbage collection after loading source ${sourceKey}`);
                                             }
                                         }
                                     } catch (err) {
@@ -1371,9 +1365,9 @@ async function processDataWithProgressUpdates(sessionId, options) {
  */
 router.get('/debug-progress/:sessionId', (req, res) => {
   const { sessionId } = req.params;
-  
-  logger.info(`Sending debug progress sequence to session ${sessionId}`);
-  
+
+  logger.debug(`Sending debug progress sequence to session ${sessionId}`);
+
   // Send a sequence of progress events with a small delay
   let progress = 0;
   const stages = [
@@ -1406,7 +1400,7 @@ router.get('/debug-progress/:sessionId', (req, res) => {
       detail: `This is a test progress event for stage ${stages[i]}`
     }, sessionId);
     
-    logger.info(`Sent debug progress for stage ${stages[i]}: ${progress}%`);
+    logger.debug(`Sent debug progress for stage ${stages[i]}: ${progress}%`);
     i++;
     
     // Send completion event at the end
@@ -1417,7 +1411,7 @@ router.get('/debug-progress/:sessionId', (req, res) => {
           message: 'Debug sequence complete',
           progress: 100
         }, sessionId);
-        logger.info(`Sent debug completion event for session ${sessionId}`);
+        logger.debug(`Sent debug completion event for session ${sessionId}`);
       }, 1000);
     }
   }, 1500); // 1.5 second between events

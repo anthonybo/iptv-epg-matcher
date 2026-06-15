@@ -42,6 +42,7 @@ router.post('/channel-candidates', async (req, res) => {
     query,
     excludeSourceIds = [],
     excludeChannelIds = [],
+    excludeChannels = [],
     limit: rawLimit = 25
   } = req.body;
 
@@ -159,14 +160,33 @@ router.post('/channel-candidates', async (req, res) => {
     const tsqueryString = tsqueryParts.join(' | ');
     const tsqueryPh = placeholder(tsqueryString);
 
+    // Substring fallback so the picker also surfaces names the word-prefix
+    // tsquery misses — mid-word matches ("Superjail" for "jail") and partial
+    // fragments. Unindexed, but scoped to one user's rows and bounded by the
+    // 8s statement_timeout below. Escape LIKE wildcards in the user's input.
+    const ilikeArg = `%${searchQuery.replace(/[\\%_]/g, '\\$&')}%`;
+    const ilikePh = placeholder(ilikeArg);
+
     let sourceExclusion = '';
     if (excludeSourceIds.length > 0) {
       const ph = excludeSourceIds.map((id) => placeholder(id)).join(', ');
       sourceExclusion = `AND s.id NOT IN (${ph})`;
     }
 
+    // Exclude tiles already on screen. Prefer composite (source_id, channel_id)
+    // pairs — a channel_id alone is NOT unique across accounts/providers
+    // (xtream stream ids collide), so `channel_id NOT IN (...)` would hide
+    // EVERY account's copy of a channel the user is currently watching. That
+    // was the bug: one playing "24/7 Jackass" tile (xtream_526396) hid all 18
+    // of its accounts, dropping the result from 22 to 4. Legacy channel_id
+    // list kept as a fallback for any older caller.
     let channelExclusion = '';
-    if (excludeChannelIds.length > 0) {
+    if (Array.isArray(excludeChannels) && excludeChannels.length > 0) {
+      const conds = excludeChannels
+        .filter((c) => c && c.channelId != null)
+        .map((c) => `(cs.source_id = ${placeholder(c.sourceId)} AND cs.channel_id = ${placeholder(String(c.channelId))})`);
+      if (conds.length > 0) channelExclusion = `AND NOT (${conds.join(' OR ')})`;
+    } else if (excludeChannelIds.length > 0) {
       const ph = excludeChannelIds.map((id) => placeholder(id)).join(', ');
       channelExclusion = `AND cs.channel_id NOT IN (${ph})`;
     }
@@ -192,7 +212,10 @@ router.post('/channel-candidates', async (req, res) => {
       FROM iptv_channels_search cs
       JOIN iptv_sources s ON cs.source_id = s.id
       WHERE cs.user_id = $1
-        AND cs.name_tsv @@ to_tsquery('simple', ${tsqueryPh})
+        AND (
+          cs.name_tsv @@ to_tsquery('simple', ${tsqueryPh})
+          OR cs.name ILIKE ${ilikePh} ESCAPE '\\'
+        )
         ${sourceExclusion}
         ${channelExclusion}
       ORDER BY cs.name
@@ -318,7 +341,7 @@ router.post('/channel-candidates', async (req, res) => {
 
     logger.info(
       `[Channel Candidates] query="${searchQuery}" → ${candidates.length} candidates ` +
-      `(matched=${rows.length}, deduped=${deduped.length}, excludedSources=${excludeSourceIds.length}, excludedChannels=${excludeChannelIds.length})`
+      `(matched=${rows.length}, deduped=${deduped.length}, excludedSources=${excludeSourceIds.length}, excludedTiles=${(excludeChannels && excludeChannels.length) || excludeChannelIds.length})`
     );
 
     return res.json({

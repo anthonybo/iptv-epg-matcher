@@ -164,7 +164,7 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
       }
     } else {
       // Broadcast to all connected clients in both systems
-      logger.info(`[SSE Broadcast] Broadcasting to all sessions...`);
+      logger.debug(`[SSE Broadcast] Broadcasting to all sessions...`);
       let clientCount = 0;
       
       // First try the new app.locals.sessions system
@@ -211,7 +211,7 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
         });
       }
       
-      logger.info(`[SSE Broadcast] Broadcasted to ${clientCount} clients via app.locals.sessions`);
+      logger.debug(`[SSE Broadcast] Broadcasted to ${clientCount} clients via app.locals.sessions`);
 
       // Also try the legacy sseClients map
       sseClients.forEach((clients, sessionId) => {
@@ -228,7 +228,7 @@ function broadcastSSEUpdate(data, specificSessionId = null) {
         });
       });
 
-      logger.info(`[SSE Broadcast] Broadcast SSE update to ${clientCount} total clients`);
+      logger.debug(`[SSE Broadcast] Broadcast SSE update to ${clientCount} total clients`);
     }
   } catch (error) {
     logger.error('Error broadcasting SSE update:', error);

@@ -17,11 +17,15 @@ module.exports = {
     // External EPG sources
     EXTERNAL_EPG_URLS: [
         // 'https://strongepg.ip-ddns.com/8k-epg.xml.gz',
-        'https://strongepg.ip-ddns.com/epg/w-8k-epg.xml.gz',
+        // DEAD (disabled 2026-06-12): TLS cert is for cloudns.org (mismatch)
+        // and the path 404s — every startup load logged a TLS error for it.
+        // 'https://strongepg.ip-ddns.com/epg/w-8k-epg.xml.gz',
         'https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz',
         // 'https://epgshare01.online/epgshare01/epg_ripper_US1.xml.gz',
         'https://epg.pw/xmltv/epg_US.xml',
-        'https://www.open-epg.com/files/unitedstates1.xml.gz',
+        // DEAD (disabled 2026-06-12): 302-redirects to an HTML page and
+        // serves a 0-byte body — parsed to 0 channels on every refresh.
+        // 'https://www.open-epg.com/files/unitedstates1.xml.gz',
         'https://open-epg.com/files/sports1.xml',
         'https://epg.starlite.best/utc.xml.gz',
         'https://raw.githubusercontent.com/acidjesuz/epgtalk/master/guide.xml',
@@ -44,7 +48,7 @@ module.exports = {
 
     MAX_EPG_SOURCES: 8, // Maximum number of sources to load
     PRIORITY_EPG_SOURCES: [
-        'https://strongepg.ip-ddns.com/epg/w-8k-epg.xml.gz',
+        // strongepg removed 2026-06-12 (dead — see EXTERNAL_EPG_URLS note)
         'https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz'
     ],
     

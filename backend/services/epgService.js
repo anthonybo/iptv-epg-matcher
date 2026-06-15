@@ -116,15 +116,6 @@ function parseEPG(epgContent) {
 
             logger.info(`Parsed EPG: ${channels.length} channels, ${programs.length} programs`);
 
-            // Log some sample data to help with debugging
-            if (channels.length > 0) {
-                logger.debug(`First channel sample: ${JSON.stringify(channels[0]).substring(0, 500)}`);
-            }
-
-            if (programs.length > 0) {
-                logger.debug(`First program sample: ${JSON.stringify(programs[0]).substring(0, 500)}`);
-            }
-
             // Build the channel map for faster lookups
             const channelMap = {};
 
@@ -293,7 +284,7 @@ function searchChannelsAcrossSources(epgSources, searchTerm) {
 
     // Create search tokens from the term (handle partial matching better)
     const searchTokens = createSearchTokens(term);
-    logger.info(`Created search tokens: ${searchTokens.join(', ')}`);
+    logger.debug(`Created search tokens: ${searchTokens.join(', ')}`);
 
     // Search in each EPG source
     Object.keys(epgSources).forEach(sourceKey => {
@@ -304,9 +295,6 @@ function searchChannelsAcrossSources(epgSources, searchTerm) {
             return; // Skip this source
         }
 
-        // Debug log to track which sources are being processed
-        logger.debug(`Searching in source: ${sourceKey}`);
-
         const matches = [];
 
         // Create a set for unique channel IDs to avoid duplicates
@@ -314,9 +302,6 @@ function searchChannelsAcrossSources(epgSources, searchTerm) {
 
         // First, search in all channels if available
         if (source.channels && Array.isArray(source.channels)) {
-            // Debug log to confirm we're searching through channels
-            logger.debug(`Source ${sourceKey} has ${source.channels.length} channels to search`);
-
             source.channels.forEach(channel => {
                 if (!channel.$ || !channel.$.id) return;
                 if (processedChannelIds.has(channel.$.id)) return;
@@ -453,13 +438,8 @@ function searchChannelsAcrossSources(epgSources, searchTerm) {
                         sourceType: 'channel-element',
                         score: matchScore  // Store relevance score
                     });
-
-                    logger.info(`Found match in ${sourceKey}: ${channel.$.id} (score: ${matchScore.toFixed(2)}, types: ${matchType.join(', ')})`);
                 }
             });
-        } else {
-            // Log when a source has no channels to search
-            logger.debug(`Source ${sourceKey} has no channels array or it's empty`);
         }
 
         // Add to results if we found matches
@@ -476,9 +456,6 @@ function searchChannelsAcrossSources(epgSources, searchTerm) {
                 matchCount: matches.length,
                 matches: matches
             };
-        } else {
-            // Log when no matches were found in a source
-            logger.debug(`No matches found in source ${sourceKey} for term "${term}"`);
         }
     });
 
@@ -503,7 +480,7 @@ function searchForMlbTeam(epgSources, teamName) {
         sources: {}
     };
 
-    logger.info(`MLB team specialized search for: ${teamName}`);
+    logger.debug(`MLB team specialized search for: ${teamName}`);
 
     // Generate team variations
     let teamTokens = [];
@@ -543,7 +520,7 @@ function searchForMlbTeam(epgSources, teamName) {
         }
     }
 
-    logger.info(`MLB team tokens: ${teamTokens.join(', ')}`);
+    logger.debug(`MLB team tokens: ${teamTokens.join(', ')}`);
 
     // Search in each EPG source with very lenient matching
     Object.keys(epgSources).forEach(sourceKey => {
@@ -659,8 +636,6 @@ function searchForMlbTeam(epgSources, teamName) {
                         icon,
                         score: matchScore
                     });
-
-                    logger.info(`MLB search found match in ${sourceKey}: ${channel.$.id} (score: ${matchScore.toFixed(2)}, reasons: ${matchReason.join(', ')})`);
                 }
             });
         }
@@ -793,7 +768,7 @@ function findProgramsForSpecificChannel(source, channelId) {
     const now = new Date();
     let currentProgram = null;
 
-    logger.info(`Finding programs for specific channel ${channelId}`);
+    logger.debug(`Finding programs for specific channel ${channelId}`);
 
     // Try to find channel info
     let channelInfo = null;
@@ -843,13 +818,13 @@ function findProgramsForSpecificChannel(source, channelId) {
 
     // Get programs from program map if available
     if (source.programMap && source.programMap[channelId]) {
-        logger.info(`Found ${source.programMap[channelId].length} programs in program map for channel ${channelId}`);
+        logger.debug(`Found ${source.programMap[channelId].length} programs in program map for channel ${channelId}`);
         processPrograms(source.programMap[channelId], programs, now);
     }
     // Otherwise search in all programs
     else if (source.programs && Array.isArray(source.programs)) {
         const channelPrograms = source.programs.filter(p => p.$ && p.$.channel === channelId);
-        logger.info(`Found ${channelPrograms.length} programs by searching for channel ${channelId}`);
+        logger.debug(`Found ${channelPrograms.length} programs by searching for channel ${channelId}`);
         processPrograms(channelPrograms, programs, now);
     }
 
@@ -1006,7 +981,7 @@ function findProgramsForChannel(epgSources, channelId) {
     }
 
     // Log details about the call
-    logger.info(`Looking for exact channel ID: ${channelId}`);
+    logger.debug(`Looking for exact channel ID: ${channelId}`);
 
     // Check if we're dealing with an exact ID that might be in format source.channelId
     const exactSourceMatch = channelId.match(/^([a-zA-Z0-9]+)\.(.+)$/);
@@ -1037,7 +1012,7 @@ function findProgramsForChannel(epgSources, channelId) {
                     );
 
                     if (channel) {
-                        logger.info(`Found exact match for ${channelId} in source matching prefix ${sourcePrefix}`);
+                        logger.debug(`Found exact match for ${channelId} in source matching prefix ${sourcePrefix}`);
                         exactMatch = {
                             sourceKey,
                             channelId: channel.$.id
@@ -1058,7 +1033,7 @@ function findProgramsForChannel(epgSources, channelId) {
 
                 // Check channel map for direct matches first (most efficient)
                 if (source.channelMap && source.channelMap[channelId]) {
-                    logger.info(`Found exact match for ${channelId} in channel map of ${sourceKey}`);
+                    logger.debug(`Found exact match for ${channelId} in channel map of ${sourceKey}`);
                     exactMatch = {
                         sourceKey,
                         channelId: source.channelMap[channelId].$.id
@@ -1071,7 +1046,7 @@ function findProgramsForChannel(epgSources, channelId) {
                     );
 
                     if (channel) {
-                        logger.info(`Found exact match for ${channelId} in channels of ${sourceKey}`);
+                        logger.debug(`Found exact match for ${channelId} in channels of ${sourceKey}`);
                         exactMatch = {
                             sourceKey,
                             channelId: channel.$.id
@@ -1095,7 +1070,7 @@ function findProgramsForChannel(epgSources, channelId) {
     // Check if this is a direct search or looking for a known ID
     if (channelId.includes(' ') || channelId.includes('.')) {
         // This is likely a search term rather than a direct ID
-        logger.info(`Treating '${channelId}' as a search term`);
+        logger.debug(`Treating '${channelId}' as a search term`);
 
         // Get search results
         const searchResults = searchChannelsAcrossSources(epgSources, channelId);
@@ -1136,7 +1111,7 @@ function findProgramsForChannel(epgSources, channelId) {
 
         // Take the best match
         const bestMatch = allMatches[0];
-        logger.info(`Using best match: ${bestMatch.displayName} (${bestMatch.channelId}) from source ${bestMatch.sourceKey} with score ${bestMatch.score}`);
+        logger.debug(`Using best match: ${bestMatch.displayName} (${bestMatch.channelId}) from source ${bestMatch.sourceKey} with score ${bestMatch.score}`);
 
         // Get programs for the best match
         const programData = findProgramsForSpecificChannel(
@@ -1811,10 +1786,14 @@ async function loadXtreamEPG(baseUrl, username, password, options = {}) {
         let channelsData = null;
         let jsonFailureReason = null;
         try {
+            // 45s (was 30s): get_live_streams returns the provider's FULL
+            // channel list — 30k+ entries for large panels like proxpanel —
+            // and 30s occasionally timed out on a slow-but-alive provider,
+            // forcing a needless M3U fallback (or a false failure).
             const response = await fetch(apiUrl, {
                 method: 'GET',
                 headers: XTREAM_API_HEADERS,
-                timeout: 30000
+                timeout: 45000
             });
 
             if (!response.ok) {

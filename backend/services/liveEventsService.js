@@ -161,7 +161,13 @@ async function getCurrentlyLiveEvents() {
             SELECT * FROM live_events
             WHERE ((event_start <= $1 AND event_end >= $2)
                 OR (is_live = TRUE AND event_end >= $3))
-              AND (status_type IS NULL OR status_type NOT LIKE '%FINAL%')
+              -- Terminal-status guard. "Finished" varies by sport: soccer
+              -- STATUS_FULL_TIME, golf STATUS_PLAY_COMPLETE, others
+              -- STATUS_FINAL — the old %FINAL%-only check let finished
+              -- soccer/golf keep showing live until their scheduled
+              -- event_end. Match every terminal family.
+              AND (status_type IS NULL OR status_type !~ 'FINAL|FULL_TIME|PLAY_COMPLETE|POSTPONED|CANCEL|SUSPEND')
+              AND (game_status IS NULL OR game_status NOT IN ('Final','Full Time','FT','Completed','Postponed','Canceled','Cancelled','Suspended'))
             ORDER BY event_start
         `, [now, now, halfHourAgo]);
 

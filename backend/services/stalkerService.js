@@ -19,7 +19,7 @@ async function authenticateStalker(portalUrl, macAddress) {
   // Normalize MAC address format
   const normalizedMac = normalizeMacAddress(macAddress);
 
-  logger.info(`Authenticating Stalker portal: ${baseUrl} with MAC: ${normalizedMac}`);
+  logger.info(`Authenticating Stalker portal: ${baseUrl}`);
 
   // First request: Handshake to get token
   // Try portal.php endpoint first (newer Stalker portals), fallback to server/load.php
@@ -32,7 +32,7 @@ async function authenticateStalker(portalUrl, macAddress) {
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      logger.info(`Fetching Stalker handshake (attempt ${attempt}/${maxRetries}): ${handshakeUrl}`);
+      logger.debug(`Fetching Stalker handshake (attempt ${attempt}/${maxRetries}): ${handshakeUrl}`);
 
       const handshakeResponse = await fetch(handshakeUrl, {
         method: 'GET',
@@ -63,13 +63,12 @@ async function authenticateStalker(portalUrl, macAddress) {
       let handshakeData;
       try {
         const responseText = await handshakeResponse.text();
-        logger.info(`Stalker handshake raw response (${responseText.length} chars): ${responseText.substring(0, 500)}`);
+        logger.debug(`Stalker handshake raw response (${responseText.length} chars): ${responseText.substring(0, 500)}`);
         handshakeData = JSON.parse(responseText);
       } catch (jsonError) {
         logger.error(`Failed to parse Stalker handshake response as JSON: ${jsonError.message}`);
         throw new Error(`Invalid JSON response from Stalker portal`);
       }
-      logger.debug('Stalker handshake response:', handshakeData);
 
       if (!handshakeData || !handshakeData.js) {
         throw new Error('Invalid Stalker handshake response');
@@ -83,7 +82,7 @@ async function authenticateStalker(portalUrl, macAddress) {
         throw new Error('Failed to obtain Stalker authentication token');
       }
 
-      logger.info(`Stalker authentication successful. Token: ${token.substring(0, 10)}...`);
+      logger.info('Stalker authentication successful');
 
       return { token, profileId, baseUrl };
 

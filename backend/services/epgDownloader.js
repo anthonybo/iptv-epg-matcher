@@ -11,7 +11,6 @@ const logger = require('../config/logger');
 const { CACHE_DIR } = require('../config/constants');
 
 const CACHE_TTL_HOURS = 24;
-const DOWNLOAD_CHUNK_SIZE = 1024 * 1024; // 1MB chunks
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 EPGParser/1.0';
 
 /**
@@ -113,7 +112,9 @@ async function downloadFile(url, destPath, onProgress = null) {
     // Get content length for progress tracking
     const totalSize = parseInt(response.headers.get('content-length') || '0', 10);
     let downloaded = 0;
-    let lastProgress = 0;
+    let lastProgress = 0;      // last logged percent (Content-Length path)
+    let lastLoggedBytes = 0;   // bytes downloaded at last log (no-Content-Length path)
+    const PROGRESS_STEP_BYTES = 25 * 1024 * 1024; // log once per 25 MB
 
     // Create write stream
     const fileStream = fs.createWriteStream(destPath);
@@ -135,8 +136,12 @@ async function downloadFile(url, destPath, onProgress = null) {
             lastProgress = percent;
           }
         } else {
-          // For streams without Content-Length, report every 10MB
-          if (downloaded % (10 * 1024 * 1024) < DOWNLOAD_CHUNK_SIZE) {
+          // No Content-Length: log once per 25 MB. The old modulo check
+          // (`downloaded % 10MB < 1MB`) stayed true for a full 1MB window
+          // after every boundary, so it fired on dozens of consecutive
+          // ~16KB chunks — flooding the log. Track bytes since last log.
+          if (downloaded - lastLoggedBytes >= PROGRESS_STEP_BYTES) {
+            lastLoggedBytes = downloaded;
             const downloadedMB = (downloaded / (1024 * 1024)).toFixed(2);
             const progressMsg = `Downloaded ${downloadedMB} MB...`;
             logger.info(`[EPG Downloader] ${progressMsg}`);

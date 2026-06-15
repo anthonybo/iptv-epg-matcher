@@ -570,13 +570,23 @@ router.post('/search-channel', async (req, res) => {
           }
         }
 
-        // Validate with ffprobe
+        // Validate with ffprobe — SUSTAINED-delivery probe.
+        // The old args (`-read_intervals %+#1` + header-only -show_streams)
+        // returned the instant ffprobe demuxed the FIRST packet, so a
+        // provider that serves one chunk then stalls (the exact
+        // proxpanel.cc "first chunk received → Operation timed out" pattern
+        // in the logs) passed as "working" and got handed to the player,
+        // which then froze. We now force reading ~4s of real packets
+        // (-show_packets + -read_intervals '%+4'); a mid-stream stall trips
+        // -rw_timeout (5s socket-idle) → ffprobe exits non-zero → the catch
+        // below marks it failed instead of returning a dead stream.
         const ffprobeArgs = [
           '-v', 'error',
           '-print_format', 'json',
           '-show_streams',
-          '-read_intervals', '%+#1',
-          '-timeout', '5000000'
+          '-show_packets',
+          '-read_intervals', '%+4',
+          '-rw_timeout', '5000000'
         ];
 
         if (channel.source_type === 'stalker') {
@@ -586,7 +596,7 @@ router.post('/search-channel', async (req, res) => {
         ffprobeArgs.push(testUrl);
 
         const { stdout } = await execFileAsync('ffprobe', ffprobeArgs, {
-          timeout: 5000,
+          timeout: 12000, // headroom for the ~4s sustained read + connect (was 5000)
           maxBuffer: 1024 * 1024,
           // Cancel-from-modal: abortCtl is wired to req 'close' above.
           // When triggered, Node sends SIGTERM to the ffprobe child and
@@ -600,10 +610,22 @@ router.post('/search-channel', async (req, res) => {
         const probeData = JSON.parse(stdout);
         const videoStream = probeData.streams && probeData.streams.find(s => s.codec_type === 'video');
         const hasAudio = probeData.streams && probeData.streams.some(s => s.codec_type === 'audio');
+        // Sustained-delivery floor: count video packets actually demuxed in
+        // the ~4s window. A healthy live stream yields 60-200+; a stream
+        // that connected but then stalled yields a handful (or trips
+        // -rw_timeout above and never reaches here). Require a floor so
+        // "first chunk then dead" no longer counts as working.
+        const MIN_VIDEO_PACKETS = 15;
+        const videoPackets = Array.isArray(probeData.packets)
+          ? probeData.packets.filter(p => p.codec_type === 'video').length
+          : 0;
 
-        if (videoStream) {
+        if (videoStream && videoPackets >= MIN_VIDEO_PACKETS) {
           const streamHeight = videoStream.height || 0;
           return { success: true, height: streamHeight, hasAudio, channel, index };
+        }
+        if (videoStream) {
+          return { success: false, reason: `Stream stalled — only ${videoPackets} video packets in 4s`, index };
         }
 
         return { success: false, reason: hasAudio ? 'Audio-only stream (no video)' : 'No video stream', index };
@@ -707,7 +729,7 @@ router.post('/search-channel', async (req, res) => {
           const chunk = epgCandidates.slice(i, i + PARALLEL_TESTS);
           const results = await Promise.all(chunk.map((channel, chunkIndex) => {
             const globalIndex = i + chunkIndex;
-            logger.info(`Testing EPG-confirmed: ${channel.name} (currently airing "${channel._epgProgram?.substring(0, 80)}")`);
+            logger.debug(`Testing EPG-confirmed: ${channel.name} (currently airing "${channel._epgProgram?.substring(0, 80)}")`);
             return testSingleChannel(channel, globalIndex);
           }));
 
@@ -811,7 +833,7 @@ router.post('/search-channel', async (req, res) => {
           s.username as source_username,
           s.password as source_password,
           s.mac_address as source_mac
-        FROM iptv_channels c
+        FROM iptv_channels_search c
         JOIN iptv_sources s ON c.source_id = s.id
         WHERE s.user_id = $1
           AND (${channelConditions})
@@ -1052,7 +1074,7 @@ router.post('/search-channel', async (req, res) => {
             .sort((a, b) => b.score - a.score)
             .slice(0, 3)
             .map(c => `${c.name.substring(0, 40)}:${c.score}`);
-          logger.info(
+          logger.debug(
             `[Batch ${batchNum + 1}] Filtered ${beforeFilter - channels.length} low-relevance channels (minScore: ${minScore})` +
             (droppedSample.length ? ` | top dropped: ${droppedSample.join(' | ')}` : '')
           );
@@ -1130,7 +1152,7 @@ router.post('/search-channel', async (req, res) => {
         const chunk = channels.slice(i, i + PARALLEL_TESTS);
         const results = await Promise.all(chunk.map((channel, chunkIndex) => {
           const globalIndex = i + chunkIndex;
-          logger.info(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
+          logger.debug(`Testing channel: ${channel.name} from source ${channel.source_id} (${channel.source_type})`);
           return testSingleChannel(channel, globalIndex);
         }));
 
@@ -1155,7 +1177,7 @@ router.post('/search-channel', async (req, res) => {
 
           // Check quality requirement
           if (minHeight > 0 && streamHeight < minHeight) {
-            logger.info(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
+            logger.debug(`✗ Channel ${channel.name} quality too low: ${streamHeight}p < ${minHeight}p`);
             lowQualitySkipped++;
             continue;
           }
@@ -1203,7 +1225,7 @@ router.post('/search-channel', async (req, res) => {
           if (!result.success) {
             const channel = channels[result.index];
             if (channel) {
-              logger.info(`✗ Channel ${channel.name} failed: ${result.reason}`);
+              logger.debug(`✗ Channel ${channel.name} failed: ${result.reason}`);
             }
           }
         }

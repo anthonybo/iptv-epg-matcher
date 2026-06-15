@@ -608,11 +608,7 @@ router.get('/published-channels-with-programs', async (req, res) => {
 
     let epgData = epgResult.rows || [];
 
-    logger.info(`[DEBUG] Published channels query returned ${epgData.length} programs for user ${userId}`);
-    const fxPrograms = epgData.filter(p => p.channel_name && p.channel_name.includes('FX'));
-    if (fxPrograms.length > 0) {
-      logger.info(`[DEBUG] FX programs found: ${JSON.stringify(fxPrograms.slice(0, 3))}`);
-    }
+    logger.debug(`Published channels query returned ${epgData.length} programs for user ${userId}`);
 
     // Load live events for LIVE prefix detection
     const liveEventsService = require('../services/liveEventsService');
@@ -689,7 +685,7 @@ router.get('/published-channels-with-programs', async (req, res) => {
         }
       });
 
-      logger.info(`Total programs after adding dummy EPG: ${epgData.length}`);
+      logger.debug(`Total programs after adding dummy EPG: ${epgData.length}`);
     }
 
     if (!epgData || epgData.length === 0) {
@@ -776,7 +772,7 @@ router.get('/:sessionId', async (req, res) => {
       });
     }
 
-    logger.info(`Getting EPG data for channel: ${channelId}`);
+    logger.debug(`Getting EPG data for channel: ${channelId}`);
 
     try {
       const userId = req.user?.id;
@@ -812,7 +808,7 @@ router.get('/:sessionId', async (req, res) => {
       if (explicitRes.rows[0]) {
         epgChannelId = explicitRes.rows[0].epg_channel_id;
         matchSource = 'explicit';
-        logger.info(`[epg-precedence] ${channelId} → ${epgChannelId} (explicit)`);
+        logger.debug(`[epg-precedence] ${channelId} → ${epgChannelId} (explicit)`);
       }
 
       // Tiers 2 + 3: tvg_id-driven lookup. Skip when an explicit
@@ -835,7 +831,7 @@ router.get('/:sessionId', async (req, res) => {
           if (bundledRes.rows[0]) {
             epgChannelId = bundledRes.rows[0].id;
             matchSource = 'bundled';
-            logger.info(`[epg-precedence] ${channelId} → ${epgChannelId} (bundled, source ${iptvSrcId})`);
+            logger.debug(`[epg-precedence] ${channelId} → ${epgChannelId} (bundled, source ${iptvSrcId})`);
           }
         }
 
@@ -849,20 +845,20 @@ router.get('/:sessionId', async (req, res) => {
           if (publicRes.rows[0]) {
             epgChannelId = publicRes.rows[0].id;
             matchSource = 'public';
-            logger.info(`[epg-precedence] ${channelId} → ${epgChannelId} (public, source ${publicRes.rows[0].source_id})`);
+            logger.debug(`[epg-precedence] ${channelId} → ${epgChannelId} (public, source ${publicRes.rows[0].source_id})`);
           }
         }
       }
 
       if (!epgChannelId) {
-        logger.info(`[epg-precedence] no match found for ${channelId} (no explicit / no bundled / no public via tvg_id)`);
+        logger.debug(`[epg-precedence] no match found for ${channelId} (no explicit / no bundled / no public via tvg_id)`);
       }
 
       // Get channel info using the EPG channel ID
       const channelInfo = epgChannelId ? await epgQueryService.getChannelById(epgChannelId) : null;
 
       if (!channelInfo) {
-        logger.info(`No EPG channel data found for ${channelId}, returning empty EPG data`);
+        logger.debug(`No EPG channel data found for ${channelId}, returning empty EPG data`);
         return res.json({
           success: true,
           channelId,
@@ -876,7 +872,7 @@ router.get('/:sessionId', async (req, res) => {
       const now = new Date();
       const endDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-      logger.info(`Searching for programs between ${now.toISOString()} and ${endDate.toISOString()} (7-day window)`);
+      logger.debug(`Searching for programs between ${now.toISOString()} and ${endDate.toISOString()} (7-day window)`);
 
       // Get programs for this channel
       const epgDatabaseService = require('../services/epgDatabaseService');

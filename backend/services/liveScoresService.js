@@ -223,9 +223,9 @@ async function updateAllScores() {
               NOW() >= le.event_start
               AND NOW() <= le.event_end
               AND COALESCE(le.status_type, '') NOT IN
-                  ('STATUS_FINAL','STATUS_POSTPONED','STATUS_CANCELED','STATUS_SUSPENDED')
+                  ('STATUS_FINAL','STATUS_FULL_TIME','STATUS_PLAY_COMPLETE','STATUS_POSTPONED','STATUS_CANCELED','STATUS_SUSPENDED')
               AND COALESCE(le.game_status, '') NOT IN
-                  ('Final','Postponed','Canceled','Cancelled','Suspended','Completed')
+                  ('Final','Full Time','Postponed','Canceled','Cancelled','Suspended','Completed')
               -- Don't window-mark a row live if a canonical sibling
               -- (the same game ingested from another source, e.g. an
               -- ESPN row next to a stale MLB-Stats row) already knows
@@ -239,9 +239,9 @@ async function updateAllScores() {
                   AND sib.event_id <> le.event_id
                   AND (
                     COALESCE(sib.status_type, '') IN
-                      ('STATUS_FINAL','STATUS_POSTPONED','STATUS_CANCELED','STATUS_SUSPENDED')
+                      ('STATUS_FINAL','STATUS_FULL_TIME','STATUS_PLAY_COMPLETE','STATUS_POSTPONED','STATUS_CANCELED','STATUS_SUSPENDED')
                     OR COALESCE(sib.game_status, '') IN
-                      ('Final','Postponed','Canceled','Cancelled','Suspended','Completed')
+                      ('Final','Full Time','Postponed','Canceled','Cancelled','Suspended','Completed')
                   )
               )
             )

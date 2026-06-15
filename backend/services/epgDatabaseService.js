@@ -615,13 +615,8 @@ const epgDatabaseService = {
         LIMIT 100
       `;
 
-      logger.info(`[EPG DB] getProgramsByChannelId called for ${channelId}`);
-      logger.info(`[EPG DB] Querying PostgreSQL epg_programs table, time range: ${now.toISOString()} to ${tomorrow.toISOString()}`);
       const result = await pool.query(query, [channelId, now, tomorrow]);
-      logger.info(`[EPG DB] PostgreSQL returned ${result.rows.length} programs for ${channelId}`);
-      if (channelId.includes('FX') && result.rows.length > 0) {
-        logger.info(`[EPG DB] FX programs from PostgreSQL: first=${result.rows[0]?.title} (${result.rows[0]?.start_time}), last=${result.rows[result.rows.length-1]?.title}`);
-      }
+      logger.debug(`[EPG DB] getProgramsByChannelId ${channelId}: ${result.rows.length} programs (${now.toISOString()}..${tomorrow.toISOString()})`);
 
       return result.rows.map(program => ({
         id: program.id,
