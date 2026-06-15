@@ -135,6 +135,101 @@ async function close() {
 }
 
 // ============================================================================
+// Startup resilience: readiness gate + cache prewarm
+// ============================================================================
+
+// Memoized so multiple boot-time callers share one probe.
+let _readyPromise = null;
+
+/**
+ * Resolve once Postgres accepts connections.
+ *
+ * Polls `SELECT 1` directly on the pool — NOT queryWithRetry: that has its own
+ * short 3-attempt loop and emits "Query failed, retrying..." + slow-query
+ * warnings, which would double-log and fight this loop's cadence. Here any
+ * thrown error simply means "not ready yet" (ECONNREFUSED, 57P03 'the database
+ * system is starting up', connect timeout, ...), so we keep polling until
+ * `timeoutMs` elapses. Memoized so concurrent awaiters share one in-flight
+ * probe. Intended for a one-time startup gate — never the request hot path.
+ */
+function waitForReady(timeoutMs = 120000) {
+    if (_readyPromise) return _readyPromise;
+    _readyPromise = (async () => {
+        const start = Date.now();
+        let attempt = 0;
+        let lastErr = null;
+        let lastLogged = 0;
+        logger.info(`[startup] Waiting for PostgreSQL to accept connections (timeout ${Math.round(timeoutMs / 1000)}s)...`);
+        while (Date.now() - start < timeoutMs) {
+            attempt += 1;
+            try {
+                await pool.query('SELECT 1');
+                logger.info(`[startup] PostgreSQL ready after ${((Date.now() - start) / 1000).toFixed(1)}s (${attempt} attempt${attempt === 1 ? '' : 's'})`);
+                return;
+            } catch (err) {
+                lastErr = err;
+                // Sparse: at most one line every ~10s while waiting.
+                if (Date.now() - lastLogged > 10000) {
+                    lastLogged = Date.now();
+                    logger.warn(`[startup] PostgreSQL not ready yet (code=${err.code || 'n/a'}): ${err.message}`);
+                }
+                await new Promise((r) => setTimeout(r, 1500));
+            }
+        }
+        _readyPromise = null; // let a later caller retry if the deadline lapsed
+        throw new Error(`PostgreSQL not ready after ${(timeoutMs / 1000).toFixed(0)}s: ${lastErr ? lastErr.message : 'unknown'}`);
+    })();
+    return _readyPromise;
+}
+
+/**
+ * Warm the buffer / OS cache for the channel-search hot path.
+ *
+ * A Postgres restart flushes its cache, so the first interactive search after a
+ * restart is a slow cold read (hundreds of scattered heap reads) that can blow
+ * past the search endpoint's statement_timeout and return empty. This pulls the
+ * search table + its indexes back into cache. Best-effort: never throws, each
+ * relation independent, indexes first (small, most impactful) and the search
+ * heap last. Deliberately EXCLUDES the large movie_streams heap.
+ */
+async function prewarmHotTables() {
+    const RELS = [
+        'idx_movie_streams_unenriched',        // tiny partial — stops enrich cold-thrash
+        'iptv_channels_search_user_id_idx',
+        'iptv_channels_search_source_id_idx',  // drives the JOIN iptv_sources
+        'idx_iptv_channels_search_name_trgm',  // trgm GIN — interactive ILIKE search
+        'iptv_channels_search_name_tsv_idx',   // tsv GIN — to_tsquery path
+        'iptv_channels_search'                 // heap — the rows returned/sorted
+    ];
+    let client;
+    try {
+        client = await pool.connect();
+        try {
+            await client.query('CREATE EXTENSION IF NOT EXISTS pg_prewarm');
+        } catch (e) {
+            logger.warn(`[prewarm] pg_prewarm unavailable, skipping: ${e.message}`);
+            return;
+        }
+        await client.query('SET statement_timeout = 0'); // a full prewarm can exceed the 30s default
+        const t0 = Date.now();
+        const done = [];
+        for (const rel of RELS) {
+            try {
+                const r = await client.query('SELECT pg_prewarm($1) AS pages', [rel]);
+                done.push(`${rel}(${r.rows[0].pages})`);
+            } catch (e) {
+                logger.debug(`[prewarm] skip ${rel}: ${e.message}`);
+            }
+        }
+        logger.info(`[prewarm] warmed ${done.length}/${RELS.length} relations in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    } catch (e) {
+        logger.warn(`[prewarm] failed: ${e.message}`);
+    } finally {
+        if (client) client.release();
+    }
+}
+
+// ============================================================================
 // User Operations
 // ============================================================================
 
@@ -986,6 +1081,8 @@ module.exports = {
     transaction,
     healthCheck,
     close,
+    waitForReady,
+    prewarmHotTables,
 
     // Users
     createUser,

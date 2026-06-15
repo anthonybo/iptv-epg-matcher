@@ -46,7 +46,7 @@ if (storage) {
     sessionStorage.clearSession(key);
   });
 } else {
-  console.log('[info]: No session storage to clear.');
+  logger.debug('No session storage to clear.');
 }
 
 // Configure heap size limits more conservatively
@@ -58,16 +58,11 @@ logger.info(`Node.js heap size limit: ${heapSizeMB} MB`);
 // Add periodic memory usage logging
 setInterval(() => {
   const memStats = process.memoryUsage();
-  const stats = {
-    rss: `${Math.round(memStats.rss / 1024 / 1024)} MB`,
-    heapTotal: `${Math.round(memStats.heapTotal / 1024 / 1024)} MB`,
-    heapUsed: `${Math.round(memStats.heapUsed / 1024 / 1024)} MB`,
-    external: `${Math.round(memStats.external / 1024 / 1024)} MB`,
-    percentUsed: `${Math.round((memStats.heapUsed / heapSizeLimit) * 100)}%`
-  };
-  
-  logger.info('Memory usage stats before cleanup', stats);
-  
+  const heapUsedMB = Math.round(memStats.heapUsed / 1024 / 1024);
+  const percentUsed = Math.round((memStats.heapUsed / heapSizeLimit) * 100);
+
+  logger.debug(`Memory usage: heapUsed=${heapUsedMB}MB (${percentUsed}%), rss=${Math.round(memStats.rss / 1024 / 1024)}MB`);
+
   // Force garbage collection if we're using too much memory (more than 75%)
   if (global.gc && (memStats.heapUsed / heapSizeLimit) > 0.75) {
     logger.info('Memory usage high, forcing garbage collection');
@@ -303,7 +298,7 @@ setTimeout(async () => {
       
       logger.info(`Successfully loaded ${successCount} EPG sources with ${totalChannels} channels in the background`);
     } else {
-      logger.warn('Unexpected result from loadAllExternalEPGs:', result);
+      logger.warn(`Unexpected result from loadAllExternalEPGs (type: ${typeof result})`);
     }
   } catch (error) {
     logger.error('Failed to load EPG data in the background', { error: error.message, stack: error.stack });
@@ -355,8 +350,8 @@ app.use(['/api/channels/:sessionId', '/api/channels/:sessionId/categories'], (re
       // Continue now that we've created the session
       return next();
     } catch (error) {
-      logger.error(`Failed to auto-create session ${sessionId}:`, error);
-      return res.status(404).json({ 
+      logger.error(`Failed to auto-create session ${sessionId}: ${error.message}`);
+      return res.status(404).json({
         error: 'Session not found', 
         message: 'The requested session does not exist and could not be created',
         code: 'SESSION_NOT_FOUND'
@@ -470,6 +465,7 @@ app.use('/api/live-events', liveEventsRoutes); // Live sports events management
 app.use('/api/multiview', multiviewRoutes); // Multiview streams management
 app.use('/api/favorites', favoritesRoutes); // Per-user channel favorites for fast multi-view tile fill
 app.use('/api/commercial-profile', commercialProfileRoutes); // Per-user, per-channel commercial detection profile + FP learning
+app.use('/api/commercial', require('./routes/commercial')); // Server-side ad detector control (start/stop per channel) — audio-fingerprint matching over SSE
 app.use('/api/vod', vodRoutes); // VOD browse: /movies, /series, /series/:id/episodes (lazy)
 app.use('/api/vod-stream', vodStreamRoutes); // VOD playback proxy: /movie/:id and /episode/:id with byte-range
 app.use('/api/metrics', metricsRoutes); // Real-time metrics and monitoring
@@ -535,7 +531,7 @@ app.get('/api/network-info', (req, res) => {
       hostname: os.hostname()
     });
   } catch (error) {
-    logger.error('Error getting network info:', error);
+    logger.error(`Error getting network info: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
 });
@@ -589,6 +585,7 @@ const sessions = sessionStorage.getAllSessions();
 
 // Initialize app.locals.sessions and copy existing sessions from sessionStorage
 app.locals.sessions = app.locals.sessions || {};
+let migratedSessionCount = 0;
 Object.keys(sessions).forEach(sessionId => {
   const session = sessions[sessionId];
   if (!app.locals.sessions[sessionId]) {
@@ -600,9 +597,12 @@ Object.keys(sessions).forEach(sessionId => {
       channels: session.channels || [],
       categories: session.categories || []
     };
-    logger.info(`Migrated session from sessionStorage: ${sessionId}`);
+    migratedSessionCount++;
   }
 });
+if (migratedSessionCount > 0) {
+  logger.info(`Migrated ${migratedSessionCount} session(s) from sessionStorage`);
+}
 
 // Add this code right before setting up the sseService routes
 // Special CORS handling for SSE connections
@@ -659,14 +659,14 @@ async function syncSessionSystems() {
           });
           logger.debug(`Migrated session from app.locals to sessionStorage: ${sessionId}`);
         } catch (err) {
-          logger.error(`Failed to migrate session ${sessionId}:`, err);
+          logger.error(`Failed to migrate session ${sessionId}: ${err.message}`);
         }
       }
     }
 
     logger.debug('Session synchronization complete');
   } catch (error) {
-    logger.error('Error synchronizing session systems:', error);
+    logger.error(`Error synchronizing session systems: ${error.message}`);
   }
 }
 
@@ -740,14 +740,13 @@ app.get('/api/events/:sessionId', (req, res) => {
     send: (type, data) => {
       if (!res.writableEnded) {
         try {
-          logger.info(`[SSE SEND] Sending to client ${clientId}: type=${type}, data.type=${data.type}`);
+          logger.debug(`[SSE SEND] client ${clientId}: type=${type}, data.type=${data.type}`);
           res.write(`data: ${JSON.stringify(data)}\n\n`);
-          logger.info(`[SSE SEND] Write successful for client ${clientId}`);
         } catch (error) {
-          logger.error(`Error sending event to client ${clientId}:`, error);
+          logger.error(`Error sending event to client ${clientId}: ${error.message}`);
         }
       } else {
-        logger.warn(`[SSE SEND] Cannot send to client ${clientId} - connection ended`);
+        logger.debug(`[SSE SEND] Cannot send to client ${clientId} - connection ended`);
       }
     },
     res
@@ -827,6 +826,17 @@ if (global.gc) {
   }, 10 * 60 * 1000); // Every 10 minutes
 }
 
+// Single shared "Postgres is ready" gate. On a cold boot the DB process and
+// this server start together; without this, DB-dependent startup tasks fire
+// while Postgres is still "starting up" and fail (leaving inits half-done and
+// flooding the log). Each DB-gated task below awaits this one memoized probe.
+// app.listen stays UNGATED so /api/health serves during recovery. Resolves
+// even on timeout (via .catch) so a never-up DB degrades rather than hangs.
+const postgresService = require('./services/postgresService');
+const dbReady = postgresService.waitForReady()
+  .then(() => logger.info('[startup] DB ready — releasing DB-gated startup tasks'))
+  .catch((e) => logger.error(`[startup] DB readiness wait failed: ${e.message}`));
+
 // Reconcile bundled-EPG ingest state that a previous crash may have
 // left dangling. The ingest pipeline writes status='pending' at the
 // start and 'ok'/'failed' at the end; if the process died between
@@ -836,6 +846,7 @@ if (global.gc) {
 // any 'pending' row found here is by definition orphaned.
 (async () => {
   try {
+    await dbReady;
     const { pool } = require('./services/postgresService');
     const { rowCount } = await pool.query(`
       UPDATE iptv_sources
@@ -858,6 +869,14 @@ app.listen(PORT, () => logger.info(`Backend running on http://localhost:${PORT}`
 // Keep the breaking-events channel-match index warm so the first Breaking
 // tab load doesn't eat the ~40s cold-cache hit on the 874k-row search table.
 try { require('./services/breakingEvents').startMatchWarmer(); } catch (e) { logger.warn(`[Boot] breaking warmer not started: ${e.message}`); }
+
+// After Postgres is ready, warm the channel-search table + indexes into cache.
+// A Postgres restart flushes its cache, so without this the first interactive
+// search after a restart is a slow cold read that times out and returns empty.
+// Deferred a couple seconds so it doesn't fight the very first request burst,
+// but kept short to minimize the cold-search window right after a restart;
+// the prewarm itself is ~1s and holds one of 50 pool connections. Fire-and-forget.
+dbReady.then(() => setTimeout(() => postgresService.prewarmHotTables(), 2000));
 
 // Handle process termination gracefully
 process.on('SIGTERM', async () => {
@@ -912,7 +931,7 @@ global.makeEpgDataAccessible = () => {
     
     // Check if this object directly has channels
     if (obj.channels && Array.isArray(obj.channels) && obj.channels.length > 0) {
-      logger.info(`Found EPG channels at ${path}: ${obj.channels.length} channels`);
+      logger.debug(`Found EPG channels at ${path}: ${obj.channels.length} channels`);
       return { type: 'direct', source: obj, path };
     }
     
@@ -955,7 +974,7 @@ global.makeEpgDataAccessible = () => {
       
       // If we found multiple sources, this might be a sources container
       if (sourceCount > 1) {
-        logger.info(`Found potential EPG sources container at ${path}: ${sourceCount} sources with ${totalChannels} channels`);
+        logger.debug(`Found potential EPG sources container at ${path}: ${sourceCount} sources with ${totalChannels} channels`);
         return { type: 'container', source: obj, path, sourceCount, totalChannels };
       }
     }
@@ -1024,7 +1043,7 @@ global.makeEpgDataAccessible = () => {
       sources: {},
       addSource: function(url, source) {
         this.sources[url] = source;
-        logger.info(`Added EPG source to central store: ${url}`);
+        logger.debug(`Added EPG source to central store: ${url}`);
       }
     };
   }
@@ -1059,6 +1078,7 @@ epgFinder.findAndExposeEpgData();
 // Initialize database on startup
 (async () => {
   try {
+    await dbReady; // don't query while Postgres is still recovering
     // Initialize PostgreSQL EPG database service
     const epgDatabaseService = require('./services/epgDatabaseService');
     const epgQueryService = require('./services/epgQueryService');
@@ -1088,7 +1108,7 @@ epgFinder.findAndExposeEpgData();
             
             // Parse each EPG URL
             for (const url of settings.epgUrls) {
-              logger.info(`Parsing EPG from URL: ${url}`);
+              logger.debug(`Parsing EPG from URL: ${url}`);
               epgParser.parseEpgFromUrl(url)
                 .then(result => {
                   logger.info(`Parsed EPG from ${url}: ${result.channelCount} channels, ${result.programCount} programs in ${result.parseTimeSec}s`);
@@ -1115,7 +1135,7 @@ epgFinder.findAndExposeEpgData();
           // Parse each EPG file
           for (const file of xmlFiles) {
             const filePath = path.join(epgDirectory, file);
-            logger.info(`Parsing EPG from file: ${filePath}`);
+            logger.debug(`Parsing EPG from file: ${filePath}`);
             epgParser.parseEpgFromFile(filePath)
               .then(result => {
                 logger.info(`Parsed EPG from ${file}: ${result.channelCount} channels, ${result.programCount} programs in ${result.parseTimeSec}s`);
@@ -1189,16 +1209,17 @@ const runLiveEventsRefresh = async (trigger = 'scheduled') => {
 
 cron.schedule('0 */3 * * *', () => runLiveEventsRefresh('cron'));
 
-// Fire once at startup, after a short delay so the DB pool + other
-// services are ready. setTimeout instead of awaiting at module load so
-// the HTTP server can come up immediately.
-setTimeout(() => runLiveEventsRefresh('startup'), 5000);
+// Fire once at startup, after Postgres is ready (+ a short delay so other
+// services settle). Gating on dbReady avoids the upsert error flood when the
+// DB is still recovering; the HTTP server still came up immediately above.
+dbReady.then(() => setTimeout(() => runLiveEventsRefresh('startup'), 5000));
 
 logger.info('Automatic live events refresh schedule configured successfully');
 
-// Start live scores background updates (every 30 seconds)
+// Start live scores background updates (every 30 seconds), once the DB is up
+// so the first reconciliation pass doesn't flood the log with upsert failures.
 const liveScoresService = require('./services/liveScoresService');
-liveScoresService.startBackgroundUpdates(30000); // 30 seconds
+dbReady.then(() => liveScoresService.startBackgroundUpdates(30000)); // 30 seconds
 
 // Start TMDB VOD enrichment worker. No-ops if TMDB_API_KEY isn't
 // set in env; otherwise polls unenriched movie_streams + series_sources
@@ -1208,10 +1229,15 @@ const tmdbEnrichmentService = require('./services/tmdbEnrichmentService');
 tmdbEnrichmentService.start();
 logger.info('Live scores background updates started (30s interval)');
 
+// Load the shared commercial ad-creative catalog into memory so live
+// fingerprint matching works immediately (and cold-start shrinks across
+// restarts). Safe no-op if migration 053 hasn't been applied.
+dbReady.then(() => require('./services/commercialFingerprintService').loadCatalog());
+
 // Team-alias registry: create the table if missing. Seeding from
 // ESPN is a separate script (backend/scripts/seedTeamAliases.js).
 const teamAliasesService = require('./services/teamAliasesService');
-teamAliasesService.initialize()
+dbReady.then(() => teamAliasesService.initialize())
     .then(async () => {
         // Seed (or refresh) the alias table once at boot when it looks
         // empty. This is cheap — 15 ESPN requests, ~500 rows upserted —

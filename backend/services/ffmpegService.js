@@ -131,7 +131,9 @@ async function ensureProbeCacheTable() {
     logger.error(`[ffmpegService] ensureProbeCacheTable failed: ${e.message}`);
   }
 }
-ensureProbeCacheTable();
+// Runs at require-time, before server.js's dbReady gate exists — so wait on the
+// memoized readiness probe directly to avoid failing during PG cold-boot.
+postgresService.waitForReady().then(ensureProbeCacheTable).catch(() => ensureProbeCacheTable());
 
 function hashUrl(url) {
   return crypto.createHash('sha1').update(String(url || '')).digest('hex');
