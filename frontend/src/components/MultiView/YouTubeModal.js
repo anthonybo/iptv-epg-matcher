@@ -101,26 +101,6 @@ const YouTubeModal = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, resolving, resolvedChannel?.channelId, resolveError, searching, searchResults.length, searchError, favs.loading, favs.favorites.length]);
 
-  /* ────────── Resolve a URL / handle ────────── */
-
-  const handleResolve = useCallback(async (raw) => {
-    const input = (raw ?? urlInput).trim();
-    if (!input) return;
-    setResolving(true);
-    setResolveError(null);
-    setResolvedChannel(null);
-    try {
-      const r = await apiClient.post('/youtube/resolve', { input });
-      const ch = r.data?.channel;
-      if (!ch) throw new Error('No channel data returned.');
-      setResolvedChannel(ch);
-    } catch (e) {
-      setResolveError(e.response?.data?.error || e.message);
-    } finally {
-      setResolving(false);
-    }
-  }, [urlInput]);
-
   /* ────────── Search ────────── */
 
   const handleSearch = useCallback(async (raw) => {
@@ -139,6 +119,42 @@ const YouTubeModal = ({
       setSearching(false);
     }
   }, [searchInput]);
+
+  /* ────────── Resolve a URL / handle ────────── */
+
+  // The resolve endpoint only accepts a URL, @handle, or UC… channel id, so a
+  // bare name like "dads gone" is rejected. But users type channel NAMES into
+  // this box expecting it to find the channel, so when the input isn't a
+  // resolvable target, route it to Search instead of erroring out.
+  const looksLikeYouTubeTarget = (s) =>
+    /youtu\.?be|youtube\.com/i.test(s) ||
+    /^https?:\/\//i.test(s) ||
+    /^@[\w.-]+$/.test(s) ||
+    /^UC[\w-]{20,}$/.test(s);
+
+  const handleResolve = useCallback(async (raw) => {
+    const input = (raw ?? urlInput).trim();
+    if (!input) return;
+    if (!looksLikeYouTubeTarget(input)) {
+      setActiveTab('search');
+      setSearchInput(input);
+      handleSearch(input);
+      return;
+    }
+    setResolving(true);
+    setResolveError(null);
+    setResolvedChannel(null);
+    try {
+      const r = await apiClient.post('/youtube/resolve', { input });
+      const ch = r.data?.channel;
+      if (!ch) throw new Error('No channel data returned.');
+      setResolvedChannel(ch);
+    } catch (e) {
+      setResolveError(e.response?.data?.error || e.message);
+    } finally {
+      setResolving(false);
+    }
+  }, [urlInput, handleSearch]);
 
   /* ────────── Convert channel info → multi-view stream payload ────────── */
 
