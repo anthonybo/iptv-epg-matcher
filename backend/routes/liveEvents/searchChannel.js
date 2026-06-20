@@ -494,6 +494,12 @@ router.post('/search-channel', async (req, res) => {
     const escapeLike = (s) => String(s).replace(/[\\%_]/g, '\\$&');
     const orderTerms = [];
     const orderParams = [];
+    // Dead channels advertise "(OFFLINE)" in the name (there is no health
+    // column), so demote them to the LAST batches — otherwise FS1/FS2 sit
+    // behind hundreds of offline affiliates and never get probed in time.
+    // Leading ASC sort key: 0 (live) before 1 (offline).
+    orderParams.push('%OFFLINE%');
+    const offlineDemotion = `(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN 1 ELSE 0 END) ASC`;
     if (homeTeam) {
       orderParams.push(`%${escapeLike(homeTeam)}%`);
       orderTerms.push(`(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN 30 ELSE 0 END)`);
@@ -504,16 +510,19 @@ router.post('/search-channel', async (req, res) => {
     }
     // One CASE per broadcaster alias so each contributes independently
     // (a channel like "Sportsnet 360 HD" can satisfy both SPORTSNET and
-    // SN360 and pile up the score). Cap the contribution at 60 so a
-    // channel with five aliases doesn't outrank a dual-team match.
+    // SN360 and pile up the score). When ESPN authoritatively named the
+    // carrier (eventConfirmed), the broadcaster IS the live feed — weight it
+    // ABOVE a lone team-name hit (40 > 30) so FS1/FS2 are FETCHED in the first
+    // batch rather than behind ~600 country-name ("Mexico") news/affiliate
+    // channels. Free-form / non-confirmed searches keep the gentler 20.
+    const bcastWeight = espnEventId ? 40 : 20;
     for (const term of broadcasterTerms) {
       if (!term || String(term).length < 3) continue;
       orderParams.push(`%${escapeLike(String(term))}%`);
-      orderTerms.push(`(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN 20 ELSE 0 END)`);
+      orderTerms.push(`(CASE WHEN c.name ILIKE $${baseQueryParams.length + orderParams.length} THEN ${bcastWeight} ELSE 0 END)`);
     }
-    const orderClause = orderTerms.length > 0
-      ? `(${orderTerms.join(' + ')}) DESC, c.name`
-      : 'c.name';
+    const scoreSort = orderTerms.length > 0 ? `(${orderTerms.join(' + ')}) DESC, ` : '';
+    const orderClause = `${offlineDemotion}, ${scoreSort}c.name`;
     baseQueryParams.push(...orderParams);
 
     // Helper function to test a single channel

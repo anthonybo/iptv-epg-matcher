@@ -41,6 +41,9 @@ const BROADCASTER_ALIASES = {
   'CBS': ['CBS'],
   'NBC': ['NBC'],
   'FOX': ['FOX SPORTS', 'FS1', 'FS2', 'FOXSPORTS'],
+  // FOX's streaming bundle (FIFA World Cup events list it alongside FOX/FS1).
+  // Without this key it fell through as a verbatim "%FOX One%" no-op term.
+  'FOX One': ['FOX ONE', 'FOX SPORTS', 'FS1', 'FS2', 'FOXSPORTS'],
   'FS1': ['FS1', 'FOX SPORTS 1'],
   'FS2': ['FS2', 'FOX SPORTS 2'],
   'ABC': ['ABC'],

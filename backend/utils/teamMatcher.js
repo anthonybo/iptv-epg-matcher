@@ -167,6 +167,19 @@ const TIER_SCORE = {
 // Higher-confidence tiers first so the first hit wins.
 const TIER_ORDER = ['full', 'mascot', 'abbr', 'manual', 'short', 'city'];
 
+// League-wide streaming catch-alls. A generic IPTV "MLB TV NN" / "NBA LEAGUE
+// PASS NN" channel is an unreliable proxy for a SPECIFIC live game — it's
+// usually a dead or rotating feed, not the actual broadcast. So when ESPN also
+// names a real RSN/network (e.g. NBC Sports California, Angels.TV), a match on
+// one of THESE terms must rank BELOW the specific broadcaster, not above it.
+// (Real case: 345 dead "MLB TV" channels were out-ranking the working A's RSN
+// and burning the whole ffprobe budget before it was ever reached.)
+const GENERIC_NATIONAL_BROADCASTERS = new Set([
+  'MLB.TV', 'MLBTV', 'MLB TV',
+  'NBA LEAGUE PASS', 'LEAGUE PASS',
+  'NHL.TV', 'NHLTV'
+]);
+
 /**
  * Stage-cascade score for one team's tiered alias bundle against a
  * scrubbed target text. Takes an object with per-tier alias lists
@@ -589,7 +602,13 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
         }
       }
 
-      broadcasterBonus = context.eventConfirmed ? 250 : 120;
+      // Generic national streaming (MLB.TV etc.) is a weak, often-dead proxy
+      // for a specific game — score it below a real RSN/network match so the
+      // RSN gets probed first.
+      const isGenericNational = GENERIC_NATIONAL_BROADCASTERS.has(upperTerm);
+      broadcasterBonus = context.eventConfirmed
+        ? (isGenericNational ? 150 : 250)
+        : (isGenericNational ? 80 : 120);
       broadcasterMatched = upperTerm;
       break;
     }
@@ -624,10 +643,35 @@ function matchChannel(channel, homeAliases, awayAliases, context = {}) {
     }
   }
 
+  // Dead channels advertise their state in the NAME ("(OFFLINE) …") — there
+  // is no health column anywhere. They must never win or be probed first, so
+  // floor their score below any live candidate.
+  const OFFLINE_RE = /\b(offline|off[\s-]?air|no[\s-]?signal)\b/i;
+  const offlinePenalty = (channel.name && OFFLINE_RE.test(channel.name)) ? -10000 : 0;
+
+  // Lone team-name hit + a confirmed broadcaster is almost always a
+  // geographic / vanity collision: for a national-team game like
+  // "Mexico vs South Korea" on Telemundo, "(OFFLINE) TELEMUNDO MEXICO" earns
+  // team 150 (the country word "Mexico") + broadcaster 250 = 400 and beats the
+  // real feed FS1/FS2 (which carries no team word, so only 250). When ESPN
+  // authoritatively named the carrier (eventConfirmed) AND a broadcaster
+  // matched AND only ONE of the two teams appears in the name, drop the lone
+  // team-name bonus so it can't out-stack the pure broadcaster. Both-team
+  // matches and league context are preserved; team bonuses are untouched when
+  // no broadcaster matched (so team RSNs still work).
+  let nameScore = nameResult.score;
+  const oneTeamOnly = Boolean(nameResult.homeMatch) !== Boolean(nameResult.awayMatch);
+  const loneTeamSuppressed = context.eventConfirmed && broadcasterBonus > 0 && oneTeamOnly;
+  if (loneTeamSuppressed) {
+    nameScore = nameResult.leagueBonus; // strip the lone team-name contribution, keep league context
+  }
+
   return {
-    score: nameResult.score + programBonus + broadcasterBonus,
+    score: nameScore + programBonus + broadcasterBonus + offlinePenalty,
     details: {
-      nameScore: nameResult.score,
+      nameScore,
+      offlinePenalty,
+      loneTeamSuppressed,
       programBonus,
       broadcasterBonus,
       broadcasterMatched,
