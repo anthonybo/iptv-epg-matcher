@@ -96,13 +96,22 @@ const STYLES = `
   }
 `;
 
+// Key under which we remember the last-used username/email. We store ONLY
+// the username here — never the password. The password belongs in the
+// browser's password manager, not in localStorage (which any script/XSS
+// on the page could read).
+const REMEMBER_KEY = 'iptv_remember_username';
+
 const Login = ({ onSwitchToRegister, sessionId }) => {
   const { login } = useAuth();
-  const [usernameOrEmail, setUsernameOrEmail] = useState('');
+  const [usernameOrEmail, setUsernameOrEmail] = useState(() => {
+    try { return localStorage.getItem(REMEMBER_KEY) || ''; } catch (_) { return ''; }
+  });
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [rememberMe, setRememberMe] = useState(true);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -112,6 +121,13 @@ const Login = ({ onSwitchToRegister, sessionId }) => {
       setError('Please enter both username/email and password');
       return;
     }
+
+    // Persist (or clear) the remembered username so it prefills next time.
+    // Never the password — that's the browser password manager's job.
+    try {
+      if (rememberMe) localStorage.setItem(REMEMBER_KEY, usernameOrEmail);
+      else localStorage.removeItem(REMEMBER_KEY);
+    } catch (_) { /* storage unavailable (private mode / quota) — non-fatal */ }
 
     setLoading(true);
     try {
@@ -295,6 +311,7 @@ const Login = ({ onSwitchToRegister, sessionId }) => {
                   </span>
                   <input
                     id="usernameOrEmail"
+                    name="username"
                     type="text"
                     value={usernameOrEmail}
                     onChange={(e) => setUsernameOrEmail(e.target.value)}
@@ -324,6 +341,7 @@ const Login = ({ onSwitchToRegister, sessionId }) => {
                   </span>
                   <input
                     id="password"
+                    name="password"
                     type={showPassword ? 'text' : 'password'}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -353,6 +371,21 @@ const Login = ({ onSwitchToRegister, sessionId }) => {
                   </button>
                 </div>
               </div>
+
+              {/* Remember me — stores ONLY the username/email on this device
+                  so it prefills next time. The password stays in the browser's
+                  password manager, never in localStorage. */}
+              <label className="flex cursor-pointer select-none items-center gap-2.5">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  disabled={loading}
+                  className="h-4 w-4 rounded border-slate-600 bg-slate-900/60"
+                  style={{ accentColor: '#22d3ee' }}
+                />
+                <span className="text-xs text-slate-400">Remember my username on this device</span>
+              </label>
 
               {/* Submit */}
               <button
