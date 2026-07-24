@@ -1,27 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * useCommercialOrchestrator — drives auto-mute from the SERVER-SIDE ad
- * detector (commercialFingerprintService).
+ * useCommercialOrchestrator — drives ad-aware muting in MultiView from the
+ * SERVER-SIDE detector(s) (commercialBoundaryService = immediate black+silence;
+ * commercialFingerprintService = high-confidence catalog match), delivered over
+ * SSE as `commercial-break` events.
  *
- * The previous client-side detector (useCommercialDetector: Web-Audio
- * analyser + logo CV) was dead-on-arrival and damaged playback, so it has
- * been retired. Detection now happens server-side: the backend decodes each
- * channel's audio, computes Shazam-style landmark fingerprints, learns
- * repeated ad creatives by cross-channel/cross-time repetition, and emits a
- * high-precision `commercial-break` start/end over SSE when a channel's audio
- * matches a CONFIRMED ad. This hook:
+ * Two behaviours, gated by props:
  *
- *   1. While enabled, starts/stops server analysis for the visible IPTV tiles
- *      (POST /api/commercial/analyze[/stop], keyed by sourceId+channelId).
- *   2. Subscribes to the global SSE channel and, on a `commercial-break`
- *      start, mutes the matching tile (via toggleMute) and flags it with the
- *      AD chip; on end, restores the tile's prior audio state.
- *   3. Exposes Undo: treat a flagged tile as a false positive — restore audio
- *      and stop reacting to that channel for a short window.
+ *   Per-tile auto-mute (default): on a break, mute that tile (confidence-gated:
+ *   black+silence / fingerprint mute; weak scene-burst only flags) and show the
+ *   AD chip; unmute on break-end. We only ever unmute what WE muted.
  *
- * Only tiles we muted are restored, and only if the user hadn't already muted
- * them — we never override a user's explicit mute.
+ *   Audio-follow (opt-in, `audioFollow`): keep audio on exactly ONE ad-free
+ *   stream. When the audible stream enters an ad, mute it and move audio to a
+ *   stream that isn't in an ad (sticky — stays put until its own ad). If EVERY
+ *   active stream is in an ad, stay silent (unmute none). When a stream's ad
+ *   ends, audio is available to move back to it only if the current one ads.
  */
 
 const UNDO_IGNORE_MS = 60_000;
@@ -33,10 +28,9 @@ const getToken = () =>
 
 // IMPORTANT: these commercial calls use raw fetch, NOT the shared apiClient.
 // apiClient's 401 handler triggers redirectToLogin() (clears the token), so a
-// 401 on these fire-and-forget background calls — fired for every tile when
-// detection is on — would log the user out (and a multi-tile refresh storm
-// would loop it). A background feature must never be able to end the session,
-// so we send the token manually and swallow any failure (incl. 401) silently.
+// 401 on these fire-and-forget background calls would log the user out (and a
+// multi-tile refresh storm would loop it). Send the token manually and swallow
+// any failure (incl. 401) silently so a background call can never end the session.
 const authHeaders = () => {
   const token = getToken();
   return token
@@ -62,30 +56,38 @@ const stableKeyForStream = (s) => `${s.sourceId}_${s.id}`;
 
 export function useCommercialOrchestrator({
   enabled = false,
+  audioFollow = false,
   streams = [],
   mutedStreams,
   toggleMute
 }) {
-  // Live mirrors so SSE/timer callbacks always see current values without
-  // re-subscribing.
+  // Live mirrors so SSE/timer callbacks always see current values.
   const streamsRef = useRef(streams);
   streamsRef.current = streams;
   const mutedRef = useRef(mutedStreams);
   mutedRef.current = mutedStreams;
   const toggleMuteRef = useRef(toggleMute);
   toggleMuteRef.current = toggleMute;
+  const audioFollowRef = useRef(audioFollow);
+  audioFollowRef.current = audioFollow;
 
-  // Tiles WE auto-muted: streamKey → { mutedAt, channelId, sourceId, wasUserMuted, creativeId }
+  // Tiles currently flagged as in-ad (drives the chip): streamKey → info.
   const autoMutedRef = useRef(new Map());
   const [autoMutedKeys, setAutoMutedKeys] = useState(new Set());
   const [tileStates, setTileStates] = useState({});
   // stableKey → timestamp until which we ignore detections (after an Undo)
   const ignoreUntilRef = useRef(new Map());
 
+  // Audio-follow bookkeeping.
+  const followAudibleRef = useRef(null);          // stableKey currently carrying audio
+  const followMutedRef = useRef(new Set());        // fullKeys WE muted via follow reconcile
+
   const sync = useCallback(() => {
     setAutoMutedKeys(new Set(autoMutedRef.current.keys()));
     const ts = {};
-    for (const k of autoMutedRef.current.keys()) ts[k] = { signals: ['ad detected'], state: 'in_break' };
+    for (const [k, info] of autoMutedRef.current) {
+      ts[k] = { signals: info.signals || ['ad break'], confidence: info.confidence, state: 'in_break' };
+    }
     setTileStates(ts);
   }, []);
 
@@ -97,8 +99,64 @@ export function useCommercialOrchestrator({
       (x) => String(x.id) === String(channelId) && String(x.sourceId) === String(sourceId)
     );
 
+  // Set of stableKeys currently in an ad (derived from the flagged map).
+  const adStableKeys = () => {
+    const s = new Set();
+    for (const info of autoMutedRef.current.values()) s.add(`${info.sourceId}_${info.channelId}`);
+    return s;
+  };
+
+  // ─── Audio-follow: keep exactly one ad-free stream audible ───────
+  // Idempotent: re-running it before React re-renders (so mutedRef is stale)
+  // must NOT double-toggle. We guard mutes with followMutedRef (what WE muted)
+  // and the target-takeover with the previously-audible key.
+  const reconcileFollowAudio = useCallback(() => {
+    if (!audioFollowRef.current) return;
+    const active = streamsRef.current.filter((s) => s && s.id != null);
+    if (active.length === 0) return;
+    const ad = adStableKeys();
+    const inAd = (s) => ad.has(stableKeyForStream(s));
+
+    // Sticky: keep the current audible stream if it's still ad-free; otherwise
+    // move to the first ad-free stream; if EVERY stream is in an ad, target is
+    // null → everything stays muted (silence).
+    const wasAudible = followAudibleRef.current;
+    const curStream = active.find((s) => stableKeyForStream(s) === wasAudible);
+    const target = (curStream && !inAd(curStream))
+      ? curStream
+      : (active.find((s) => !inAd(s)) || null);
+    const targetKey = target ? keyForStream(target) : null;
+    const targetStable = target ? stableKeyForStream(target) : null;
+
+    for (const s of active) {
+      const k = keyForStream(s);
+      if (k === targetKey) {
+        // Make the target audible.
+        if (followMutedRef.current.has(k)) {
+          unmuteTile(k);
+          followMutedRef.current.delete(k);
+        } else if (mutedRef.current?.has?.(k) && targetStable !== wasAudible) {
+          // Newly taking over a tile the user had muted.
+          toggleMuteRef.current?.(k);
+        }
+      } else if (!followMutedRef.current.has(k) && !mutedRef.current?.has?.(k)) {
+        // Mute non-target tiles — but only once (followMutedRef guards reruns).
+        toggleMuteRef.current?.(k);
+        followMutedRef.current.add(k);
+      }
+    }
+    followAudibleRef.current = targetStable;
+  }, []);
+
+  const restoreFollowMuted = useCallback(() => {
+    for (const k of followMutedRef.current) unmuteTile(k);
+    followMutedRef.current.clear();
+    followAudibleRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ─── SSE handlers ───────────────────────────────────────────────
-  const onAdStart = useCallback((sourceId, channelId, creativeId) => {
+  const onAdStart = useCallback((sourceId, channelId, meta = {}) => {
     const stableKey = `${sourceId}_${channelId}`;
     const until = ignoreUntilRef.current.get(stableKey);
     if (until && Date.now() < until) return; // user recently said "not an ad"
@@ -108,22 +166,43 @@ export function useCommercialOrchestrator({
     const key = keyForStream(stream);
     if (autoMutedRef.current.has(key)) return;
 
+    const confidence = meta.confidence || 'low';
     const wasUserMuted = Boolean(mutedRef.current?.has?.(key));
-    autoMutedRef.current.set(key, { mutedAt: Date.now(), channelId, sourceId, wasUserMuted, creativeId });
-    if (!wasUserMuted) muteTile(key);
+    // Record the in-ad flag (drives the chip) regardless of mode.
+    const info = {
+      mutedAt: Date.now(), channelId, sourceId, wasUserMuted, muted: false,
+      creativeId: meta.creativeId || null,
+      confidence,
+      source: meta.source || null,
+      signals: meta.signals && meta.signals.length
+        ? meta.signals
+        : (meta.source === 'fingerprint' ? ['matched ad'] : ['ad break'])
+    };
+    autoMutedRef.current.set(key, info);
+
+    if (audioFollowRef.current) {
+      // Audio-follow owns the muting: move audio off this tile to an ad-free one.
+      reconcileFollowAudio();
+    } else {
+      // Per-tile: confidence-gated mute (black+silence/fingerprint mute; weak
+      // scene-burst only flags). Below mute-grade precision → don't yank audio.
+      const muted = confidence !== 'low' && !wasUserMuted;
+      if (muted) { muteTile(key); info.muted = true; }
+    }
     sync();
-  }, [sync]);
+  }, [sync, reconcileFollowAudio]);
 
   const onAdEnd = useCallback((sourceId, channelId) => {
-    // Match by source+channel (the full key can change if the tile refreshed).
     for (const [key, info] of autoMutedRef.current) {
       if (String(info.sourceId) === String(sourceId) && String(info.channelId) === String(channelId)) {
-        if (!info.wasUserMuted) unmuteTile(key);
+        if (!audioFollowRef.current && info.muted) unmuteTile(key); // per-tile restore
         autoMutedRef.current.delete(key);
       }
     }
+    // In follow-mode, re-route audio now that this tile is ad-free again.
+    if (audioFollowRef.current) reconcileFollowAudio();
     sync();
-  }, [sync]);
+  }, [sync, reconcileFollowAudio]);
 
   // ─── SSE subscription (only while enabled) ──────────────────────
   useEffect(() => {
@@ -138,8 +217,12 @@ export function useCommercialOrchestrator({
     es.onmessage = (e) => {
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
-      if (!msg || msg.type !== 'commercial-break' || msg.source !== 'fingerprint') return;
-      if (msg.breakType === 'start') onAdStart(msg.sourceId, msg.channelId, msg.creativeId);
+      if (!msg || msg.type !== 'commercial-break') return;
+      // Accept both detectors: 'boundary' (immediate black+silence, lower
+      // confidence) and 'fingerprint' (catalog match, high confidence).
+      if (msg.source !== 'fingerprint' && msg.source !== 'boundary') return;
+      const meta = { creativeId: msg.creativeId, confidence: msg.confidence, source: msg.source, signals: msg.signals };
+      if (msg.breakType === 'start') onAdStart(msg.sourceId, msg.channelId, meta);
       else if (msg.breakType === 'end') onAdEnd(msg.sourceId, msg.channelId);
     };
     es.onerror = () => { /* EventSource auto-reconnects */ };
@@ -160,12 +243,13 @@ export function useCommercialOrchestrator({
 
   const restoreAll = useCallback(() => {
     for (const [key, info] of autoMutedRef.current) {
-      if (!info.wasUserMuted) unmuteTile(key);
+      if (info.muted) unmuteTile(key);
     }
     autoMutedRef.current.clear();
+    restoreFollowMuted();
     sync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync]);
+  }, [sync, restoreFollowMuted]);
 
   useEffect(() => {
     if (!enabled) {
@@ -195,11 +279,32 @@ export function useCommercialOrchestrator({
       if (!present.has(sk)) {
         analyzingRef.current.delete(sk);
         stopAnalysis(info.sourceId, info.channelId);
-        onAdEnd(info.sourceId, info.channelId); // clear any lingering auto-mute/chip
+        onAdEnd(info.sourceId, info.channelId); // clear any lingering flag/chip
       }
     }
+    // Keep audio-follow consistent as tiles are added/removed.
+    if (audioFollowRef.current) reconcileFollowAudio();
     return undefined;
-  }, [enabled, streams, stopAnalysis, restoreAll, onAdEnd]);
+  }, [enabled, streams, stopAnalysis, restoreAll, onAdEnd, reconcileFollowAudio]);
+
+  // React to the audio-follow toggle flipping while detection is on.
+  const prevFollowRef = useRef(audioFollow);
+  useEffect(() => {
+    const was = prevFollowRef.current;
+    prevFollowRef.current = audioFollow;
+    if (!enabled) return;
+    if (audioFollow && !was) {
+      // Just enabled → anchor audio to the current audible tile (or the first),
+      // then enforce the single-ad-free-audible policy.
+      const active = streamsRef.current.filter((s) => s && s.id != null);
+      const current = active.find((s) => !mutedRef.current?.has?.(keyForStream(s))) || active[0];
+      followAudibleRef.current = current ? stableKeyForStream(current) : null;
+      reconcileFollowAudio();
+    } else if (!audioFollow && was) {
+      // Just disabled → unmute everything follow had muted.
+      restoreFollowMuted();
+    }
+  }, [audioFollow, enabled, reconcileFollowAudio, restoreFollowMuted]);
 
   // Stop everything on unmount.
   useEffect(() => () => {
@@ -212,11 +317,12 @@ export function useCommercialOrchestrator({
     const info = autoMutedRef.current.get(key);
     if (!info) return;
     ignoreUntilRef.current.set(`${info.sourceId}_${info.channelId}`, Date.now() + UNDO_IGNORE_MS);
-    if (!info.wasUserMuted) unmuteTile(key);
+    if (!audioFollowRef.current && info.muted) unmuteTile(key);
     autoMutedRef.current.delete(key);
+    if (audioFollowRef.current) reconcileFollowAudio(); // this tile no longer counts as in-ad
     sync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync]);
+  }, [sync, reconcileFollowAudio]);
 
   return {
     autoMutedKeys,

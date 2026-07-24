@@ -24,31 +24,50 @@
 const { spawn } = require('child_process');
 const logger = require('../config/logger');
 const { broadcastSSEUpdate } = require('../utils/sseUtils');
+const featureFlags = require('./featureFlags');
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 
+// Deep signal logging — every black/silence/scene detection + every evaluate
+// decision. Off by default (it's chatty); flip the 'commercial_debug' feature
+// flag at runtime (hot-reloaded, no restart) to diagnose detection. Always
+// available via COMMERCIAL_DEBUG=1 too.
+const dbg = (msg) => {
+  if (process.env.COMMERCIAL_DEBUG === '1' || featureFlags.isEnabled('commercial_debug', false)) {
+    logger.info(`[CommercialBoundary] ${msg}`);
+  }
+};
+
 // ── Detection thresholds (tunable) ──────────────────────────────────
-const SILENCE_DB = -30;          // silencedetect noise floor (dBFS)
-const SILENCE_MIN_S = 0.6;       // min silence duration to count
-const BLACK_MIN_S = 0.10;        // min black duration
-const BLACK_PIX_TH = 0.10;       // blackdetect pixel threshold
-const SCENE_TH = 10;             // scdet score threshold for a cut
+// Empirically measured on the actual live restreams (see the accuracy
+// investigation): real inter-segment silence sits at ~-20..-25 dBFS for
+// ~0.3-0.6s (so -30dB/0.6s fired ~never), the only black frames produced are
+// ~0.2s (so 0.25s missed 100%), and pic_th's 0.98 default lets a small logo /
+// score-bug defeat black detection entirely.
+const SILENCE_DB = -24;          // silencedetect noise floor (dBFS) — matches measured gaps
+const SILENCE_MIN_S = 0.4;       // min silence duration (real gaps are 0.3-0.6s)
+const BLACK_MIN_S = 0.12;        // min black duration (measured ad-boundary black ≈ 0.2s)
+const BLACK_PIX_TH = 0.10;       // per-pixel luma threshold for "black"
+const BLACK_PIC_TH = 0.90;       // fraction of pixels that must be black (was ffmpeg's
+                                 // 0.98 default → a ~2% logo/bug blocked all detection)
+const SCENE_TH = 10;             // scdet score threshold (kept for logging, NOT a trigger)
 // Fusion
-const COOCCUR_MS = 2500;         // black & silence within this = a hard boundary (ad insertion marker)
-const SCENE_BURST_N = 4;         // this many scene cuts ...
-const SCENE_BURST_MS = 6000;     // ... within this window = fast-cut ad burst
+const COOCCUR_MS = 2500;         // black & silence within this = a hard ad-insertion boundary
 const BREAK_QUIET_MS = 35000;    // no boundary for this long → content resumed
 const MAX_BREAK_MS = 8 * 60 * 1000; // safety: auto-end a break after this
 const RESTART_DELAY_MS = 5000;   // re-spawn analyzer after an unexpected exit
 
-// channelId → analyzer
+// `${sourceId}_${channelId}` → analyzer (channel_id isn't unique across sources)
 const analyzers = new Map();
 
-function startAnalysis(channelId, streamUrl, opts = {}) {
+function startAnalysis(sourceId, channelId, streamUrl, opts = {}) {
   if (!channelId || !streamUrl) return false;
-  let a = analyzers.get(channelId);
+  const key = `${sourceId}_${channelId}`;
+  let a = analyzers.get(key);
   if (a) { a.refs += 1; return true; }
   a = {
+    key,
+    sourceId,
     channelId,
     streamUrl,
     headers: opts.headers || null,
@@ -64,29 +83,43 @@ function startAnalysis(channelId, streamUrl, opts = {}) {
     proc: null,
     stopped: false
   };
-  analyzers.set(channelId, a);
+  analyzers.set(key, a);
   spawnAnalyzer(a);
   return true;
 }
 
-function stopAnalysis(channelId) {
-  const a = analyzers.get(channelId);
+function stopAnalysis(sourceId, channelId) {
+  const key = `${sourceId}_${channelId}`;
+  const a = analyzers.get(key);
   if (!a) return;
   a.refs -= 1;
   if (a.refs > 0) return;
   teardown(a);
-  analyzers.delete(channelId);
+  analyzers.delete(key);
 }
 
 function spawnAnalyzer(a) {
   if (a.stopped) return;
-  const args = ['-hide_banner', '-nostats', '-loglevel', 'info'];
+  // Reconnect flags keep ffmpeg attached to these flaky HTTP live streams —
+  // many restream providers close the connection / signal EOF every few
+  // seconds, which without these makes ffmpeg exit (code 0) and forces a
+  // costly re-spawn gap, losing detection continuity. (Same fix as the
+  // fingerprint analyzer.)
+  const args = [
+    '-hide_banner', '-nostats', '-loglevel', 'info',
+    '-reconnect', '1', '-reconnect_at_eof', '1',
+    '-reconnect_streamed', '1', '-reconnect_delay_max', '2'
+  ];
   if (a.headers) args.push('-headers', a.headers);
   args.push(
     '-i', a.streamUrl,
-    // Video: downscale + decimate so the detect filters are cheap, then
-    // black + scene-cut detection. Audio: silence detection.
-    '-filter:v', `scale=160:90,fps=5,blackdetect=d=${BLACK_MIN_S}:pix_th=${BLACK_PIX_TH},scdet=threshold=${SCENE_TH}`,
+    // Explicit stream selection — make audio mapping intent clear (it was
+    // already auto-mapped, but be explicit).
+    '-map', '0:v:0', '-map', '0:a:0',
+    // Video: downscale + sample at 8fps (catches ~0.12s black frames) then
+    // black + scene-cut detection. pic_th below ffmpeg's 0.98 default so a
+    // small logo/score-bug doesn't block a near-black ad-boundary frame.
+    '-filter:v', `scale=160:90,fps=8,blackdetect=d=${BLACK_MIN_S}:pix_th=${BLACK_PIX_TH}:pic_th=${BLACK_PIC_TH},scdet=threshold=${SCENE_TH}`,
     '-filter:a', `silencedetect=noise=${SILENCE_DB}dB:d=${SILENCE_MIN_S}`,
     '-f', 'null', '-'
   );
@@ -121,36 +154,54 @@ function parseLine(a, line) {
   const now = Date.now();
   if (line.includes('silence_start')) {
     a.lastSilenceAt = now;
+    a.silenceCount = (a.silenceCount || 0) + 1;
+    dbg(`${a.channelId}: silence_start (#${a.silenceCount})`);
     evaluate(a, now);
+  } else if (line.includes('silence_end')) {
+    const d = line.match(/silence_duration:\s*([\d.]+)/);
+    dbg(`${a.channelId}: silence_end dur=${d ? d[1] : '?'}s`);
   } else if (line.includes('black_start')) {
     a.lastBlackAt = now;
+    a.blackCount = (a.blackCount || 0) + 1;
+    dbg(`${a.channelId}: black_start (#${a.blackCount})`);
     evaluate(a, now);
-  } else if (line.includes('lavfi.scd.score')) {
-    a.sceneCuts.push(now);
-    a.sceneCuts = a.sceneCuts.filter((t) => now - t < SCENE_BURST_MS);
-    evaluate(a, now);
+  } else if (line.includes('black_end') || line.includes('black_duration')) {
+    const d = line.match(/black_duration:\s*([\d.]+)/);
+    dbg(`${a.channelId}: black_end dur=${d ? d[1] : '?'}s`);
+  } else if (line.includes('lavfi.scd.score') || line.includes('scd.score')) {
+    // Scene cuts are logged for diagnostics only — they no longer trigger a
+    // break (the old scene-burst path was almost all false positives on
+    // fast-cut content). Only black+silence co-occurrence triggers now.
+    a.sceneCount = (a.sceneCount || 0) + 1;
+    const sc = line.match(/scd\.score[^\d]*([\d.]+)/);
+    dbg(`${a.channelId}: scene_cut score=${sc ? sc[1] : '?'} (#${a.sceneCount})`);
   }
 }
 
-// A "hard boundary" is the strongest blind ad-insertion marker we can
-// get: a black frame co-occurring with audio silence, OR a burst of
-// scene cuts paired with a recent silence (covers hard-cut ad pods).
+// The ad-insertion boundary marker: a black frame co-occurring with audio
+// silence. (The old scene-cut-burst fallback was dropped — it fired on any
+// fast-cut content and was the source of the false "ad break" chips that never
+// muted.) Co-occurrence of black AND silence is specific enough that on 120s of
+// live sport it produced zero false boundaries, so it's trusted to mute.
 function evaluate(a, now) {
   const blackSilence =
     a.lastBlackAt > 0 && a.lastSilenceAt > 0 &&
     Math.abs(a.lastBlackAt - a.lastSilenceAt) < COOCCUR_MS &&
     now - Math.max(a.lastBlackAt, a.lastSilenceAt) < COOCCUR_MS;
-  const sceneBurst =
-    a.sceneCuts.length >= SCENE_BURST_N &&
-    a.lastSilenceAt > 0 && now - a.lastSilenceAt < SCENE_BURST_MS;
 
-  if (!blackSilence && !sceneBurst) return;
+  // Visibility into WHY a boundary did/didn't fire — the key diagnostic.
+  dbg(`${a.channelId}: evaluate blackSilence=${blackSilence} ` +
+      `| Δblack-silence=${a.lastBlackAt && a.lastSilenceAt ? Math.abs(a.lastBlackAt - a.lastSilenceAt) : 'n/a'}ms ` +
+      `ageBlack=${a.lastBlackAt ? now - a.lastBlackAt : 'never'}ms ageSilence=${a.lastSilenceAt ? now - a.lastSilenceAt : 'never'}ms state=${a.state}`);
+
+  if (!blackSilence) return;
 
   a.breakUntil = now + BREAK_QUIET_MS;
   if (a.state === 'content') {
     a.state = 'in_break';
     a.breakStartedAt = now;
-    emit(a, 'start', blackSilence ? ['black+silence'] : ['scene-burst+silence']);
+    a.confidence = 'medium'; // black+silence → trusted enough to mute
+    emit(a, 'start', ['black+silence']);
     scheduleQuietCheck(a);
   }
 }
@@ -176,7 +227,10 @@ function emit(a, type, signals) {
     broadcastSSEUpdate({
       type: 'commercial-break',
       channelId: a.channelId,
-      breakType: type,            // 'start' | 'end'
+      sourceId: a.sourceId,
+      breakType: type,                  // 'start' | 'end'
+      source: 'boundary',               // vs 'fingerprint' (high-confidence)
+      confidence: a.confidence || 'low',
       signals,
       timestamp: new Date().toISOString()
     }, null);
@@ -198,6 +252,7 @@ function teardown(a) {
 
 function getStatus() {
   return Array.from(analyzers.values()).map((a) => ({
+    sourceId: a.sourceId,
     channelId: a.channelId,
     refs: a.refs,
     state: a.state,

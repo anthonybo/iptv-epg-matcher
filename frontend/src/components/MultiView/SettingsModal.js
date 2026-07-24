@@ -442,27 +442,35 @@ const SettingsModal = ({
                 hint="Scrolling sports ticker at the bottom of the screen"
               />
 
-              {/* Commercial auto-skip — server-side audio-fingerprint
-                  detection. The backend learns repeated ad creatives by
-                  cross-channel/cross-time repetition and mutes a tile when
-                  its audio matches a confirmed ad. High precision: it only
-                  mutes ads it has already learned, so detection improves the
-                  more you watch. */}
+              {/* Commercial auto-skip — server-side ad-break detection.
+                  Each visible IPTV tile is analyzed upstream (ffmpeg
+                  black-frame + audio-silence) and a tile is muted/flagged
+                  with the AD chip when a break is detected. Best-effort on
+                  live streams (multi-second latency, occasional misses) — the
+                  chip's Undo is the escape hatch. */}
               <Toggle
                 active={Boolean(autoFillSettings.commercialAutoSkip)}
                 onToggle={() =>
                   setSetting({ commercialAutoSkip: !autoFillSettings.commercialAutoSkip })
                 }
                 label="Commercial auto-skip"
-                hint="Server-side audio-fingerprint detection. Mutes a tile when its audio matches a learned ad; the AD chip's Undo restores it. Learns ads by repetition, so it gets better over time."
+                hint="Detect ad breaks on each tile (black-frame + audio-silence) and mute/flag the tile. Best-effort on live streams; the AD chip's Undo restores audio."
               />
               {autoFillSettings.commercialAutoSkip && (
-                <div className="ml-4 pl-3 border-l border-slate-800/80">
+                <div className="ml-4 pl-3 border-l border-slate-800/80 space-y-3">
+                  <Toggle
+                    active={Boolean(autoFillSettings.commercialAudioFollow)}
+                    onToggle={() =>
+                      setSetting({ commercialAudioFollow: !autoFillSettings.commercialAudioFollow })
+                    }
+                    label="Follow audio to an ad-free stream"
+                    hint="When the stream you're hearing hits an ad, move audio to a stream that isn't in an ad. If every stream is in an ad, stay silent until one is clear."
+                  />
                   <p className="text-[11px] leading-relaxed text-slate-500">
-                    Each visible IPTV tile is analyzed upstream (one extra
-                    connection per channel). A brand-new ad isn't muted on its
-                    first airing — it's catalogued once it repeats, then muted
-                    on later airings. Shared across all your channels.
+                    Each tile is analyzed upstream (one extra connection per
+                    channel). Detection is best-effort — black/silence breaks
+                    only — so it can miss soft transitions or briefly trip on
+                    dark, quiet scenes.
                   </p>
                 </div>
               )}

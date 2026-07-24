@@ -1,19 +1,29 @@
 /**
  * Commercial detection control — start/stop the server-side ad detector
- * for a channel. The analyzer (commercialFingerprintService) decodes the
- * upstream audio, computes Shazam-style landmark fingerprints, learns
- * repeated ad creatives by cross-channel/cross-time repetition, and
- * broadcasts a high-precision commercial-break start/end over SSE when a
- * channel's audio matches a confirmed ad. The multiview client consumes
- * those events to mute/flag the tile. Analyzers are ref-counted per
- * channel, so N viewers of the same channel share one upstream connection.
+ * for a channel. The analyzer (commercialBoundaryService) runs ffmpeg
+ * black-frame + audio-silence (+ scene-cut) detection on the upstream and
+ * broadcasts a commercial-break start/end over SSE when it sees a hard
+ * ad-insertion boundary (black co-occurring with silence). The multiview
+ * client consumes those events to flag/mute the tile. This is a best-effort
+ * LIVE signal — no mainstream tool does reliable real-time ad detection on
+ * arbitrary live streams (Comskip/Plex/Emby all post-process recordings;
+ * SCTE-35 markers are stripped by these restreams) — so it's opt-in and the
+ * UI surfaces it with an Undo escape hatch. Analyzers are ref-counted per
+ * (source, channel), so N viewers of the same channel share one upstream
+ * connection.
  */
 const express = require('express');
 const router = express.Router();
 const logger = require('../config/logger');
-const { requireAuth } = require('../middleware/authMiddleware');
+const { authMiddleware, requireAuth } = require('../middleware/authMiddleware');
 const postgresService = require('../services/postgresService');
-const detector = require('../services/commercialFingerprintService');
+const detector = require('../services/commercialBoundaryService');
+
+// Populate req.user from the JWT for every route here. Without this the
+// per-route requireAuth gate (which only CHECKS req.user) always 401'd,
+// because authMiddleware isn't applied globally — that was why analysis
+// never started.
+router.use(authMiddleware);
 
 // POST /api/commercial/analyze  { channelId, sourceId }
 router.post('/analyze', requireAuth, async (req, res) => {
@@ -58,7 +68,7 @@ router.post('/analyze/stop', requireAuth, (req, res) => {
 
 // GET /api/commercial/analyze/status
 router.get('/analyze/status', requireAuth, (req, res) => {
-  res.json({ success: true, ...detector.getStatus() });
+  res.json({ success: true, analyzers: detector.getStatus() });
 });
 
 module.exports = router;

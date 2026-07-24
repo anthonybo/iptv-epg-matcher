@@ -5,20 +5,22 @@ import { createPortal } from 'react-dom';
  * OPLiveFeedPanel — a realtime X/Twitter hashtag feed that opens BESIDE
  * the multiview video grid (not as an overlay), so you can watch a show
  * and read the live chatter at the same time. Built for following
- * #OPLive (On Patrol: Live) but the tag is editable.
+ * #OPLive (On Patrol: Live) but the tags are editable, and MULTIPLE tags
+ * can be followed at once — the feed blends them, newest-first, deduped.
  *
  * Unlike the DrawerShell panels (absolutely positioned overlays), this
  * renders as a real flex sibling of the content column in MultiViewPage,
  * so opening it shrinks the grid instead of covering the videos.
  *
- * Data comes from GET /api/social-feed?tag=… which the backend fetches
- * via a cookie-authenticated scraper and dedupes into Postgres. The
- * panel polls every POLL_MS while open. When the backend reports
- * configured=false (no X_COOKIES), we show a "connect X" hint.
+ * Data comes from GET /api/social-feed?tag=a,b,c (comma-delimited) which
+ * the backend fetches per tag via a cookie-authenticated scraper and
+ * dedupes into Postgres. The panel polls every POLL_MS while open. When
+ * the backend reports configured=false (no X_COOKIES), we show a
+ * "connect X" hint.
  *
  * Props:
- *   tag          current hashtag (no '#'), owned + persisted by parent
- *   onChangeTag  (tag) => void  — commit an edited tag
+ *   tags         current hashtags (array, no '#'), owned + persisted by parent
+ *   onChangeTags (tags[]) => void — commit the edited tag set
  *   width        current panel width in px (owned + persisted by parent)
  *   onResize     (width) => void — commit a dragged width
  *   onClose      () => void
@@ -188,7 +190,7 @@ function MediaItem({ m, postUrl, onExpandImage }) {
   );
 }
 
-function PostCard({ post, onExpandImage }) {
+function PostCard({ post, showTag = false, onExpandImage }) {
   const handle = post.author_handle || 'unknown';
   const media = Array.isArray(post.media) ? post.media.filter((m) => m && (m.url || m.thumb)) : [];
   const postUrl = post.url || `https://x.com/${handle}`;
@@ -205,6 +207,11 @@ function PostCard({ post, onExpandImage }) {
           <div className="flex items-center gap-1.5 text-[12px] leading-tight">
             <span className="font-semibold text-slate-200 truncate">{post.author_name || handle}</span>
             <span className="text-slate-500 truncate">@{handle}</span>
+            {showTag && post.tag && (
+              <span className="flex-shrink-0 rounded-full bg-cyan-500/10 border border-cyan-500/30 px-1.5 text-[9px] font-mono text-cyan-300/90">
+                #{post.tag}
+              </span>
+            )}
             <a href={postUrl} target="_blank" rel="noopener noreferrer" title="Open on X"
                className="ml-auto flex-shrink-0 inline-flex items-center gap-0.5 text-slate-600 hover:text-cyan-400">
               {timeAgo(post.posted_at)}
@@ -238,22 +245,26 @@ function PostCard({ post, onExpandImage }) {
   );
 }
 
-const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap = 0 }) => {
+const MAX_TAGS = 6;
+const cleanOne = (s) => String(s).trim().replace(/^#+/, '').replace(/[^a-zA-Z0-9_]/g, '');
+
+const OPLiveFeedPanel = ({ tags = ['OPLive'], onChangeTags, width, onResize, onClose, bottomGap = 0 }) => {
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [configured, setConfigured] = useState(true);
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [tagInput, setTagInput] = useState(tag);
-  const [lightbox, setLightbox] = useState(null); // image url shown fullscreen
+  const [draft, setDraft] = useState('');          // the "add a hashtag" field
+  const [lightbox, setLightbox] = useState(null);  // image url shown fullscreen
 
   const [w, setW] = useState(width);
   const dragRef = useRef(null);
 
-  // Keep the editable tag input and the drag width in sync if the parent
-  // changes them externally.
-  useEffect(() => { setTagInput(tag); }, [tag]);
+  // Stable primitive for effect deps (array identity changes every render).
+  const tagsKey = tags.join(',');
+  const multi = tags.length > 1;
+
   useEffect(() => { setW(width); }, [width]);
 
   const fetchFeed = useCallback(async (force = false) => {
@@ -261,7 +272,7 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
     if (!token) { setError('Not signed in'); setLoading(false); return; }
     if (force) setRefreshing(true);
     try {
-      const qs = new URLSearchParams({ tag: tag || 'OPLive' });
+      const qs = new URLSearchParams({ tag: tagsKey || 'OPLive' });
       if (force) qs.set('force', '1');
       const res = await fetch(`/api/social-feed?${qs.toString()}`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -278,9 +289,9 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
       setLoading(false);
       setRefreshing(false);
     }
-  }, [tag]);
+  }, [tagsKey]);
 
-  // Initial fetch + 30s poll, re-armed whenever the tag changes.
+  // Initial fetch + 30s poll, re-armed whenever the tag set changes.
   useEffect(() => {
     setLoading(true);
     fetchFeed(false);
@@ -288,10 +299,35 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
     return () => clearInterval(id);
   }, [fetchFeed]);
 
-  const commitTag = () => {
-    const next = tagInput.trim().replace(/^#+/, '');
-    if (next && next !== tag) onChangeTag?.(next);
-    else setTagInput(tag);
+  // ── Tag editing (multi-hashtag) ──
+  // Add one or many tags (the draft can be comma/space-delimited). Dedupes
+  // case-insensitively and caps the set. Commits up to the parent.
+  const addTags = (raw) => {
+    const incoming = String(raw).split(/[,\s]+/).map(cleanOne).filter(Boolean);
+    if (incoming.length === 0) { setDraft(''); return; }
+    const lower = new Set(tags.map((t) => t.toLowerCase()));
+    const merged = [...tags];
+    for (const t of incoming) {
+      if (merged.length >= MAX_TAGS) break;
+      if (!lower.has(t.toLowerCase())) { merged.push(t); lower.add(t.toLowerCase()); }
+    }
+    if (merged.length !== tags.length) onChangeTags?.(merged);
+    setDraft('');
+  };
+
+  const removeTag = (t) => {
+    const next = tags.filter((x) => x !== t);
+    onChangeTags?.(next.length ? next : ['OPLive']); // never go empty
+  };
+
+  const onDraftKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      addTags(draft);
+    } else if (e.key === 'Backspace' && draft === '' && tags.length > 0) {
+      // Backspace on an empty field removes the last chip.
+      removeTag(tags[tags.length - 1]);
+    }
   };
 
   // ── Drag-to-resize from the left edge. Width is live-bound to the
@@ -338,22 +374,9 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
           <span className={`absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75 ${refreshing ? 'animate-ping' : ''}`} />
           <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500" />
         </span>
-        <span className="font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-slate-300 flex-shrink-0">
+        <span className="font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-slate-300 flex-1 min-w-0">
           Live chatter
         </span>
-        <div className="flex items-center min-w-0 flex-1 rounded bg-slate-900/80 border border-slate-800 px-1.5 ml-1">
-          <span className="text-slate-500 text-[12px]">#</span>
-          <input
-            value={tagInput}
-            onChange={(e) => setTagInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-            onBlur={commitTag}
-            spellCheck={false}
-            aria-label="Hashtag to follow"
-            className="w-full bg-transparent text-[12px] text-cyan-300 placeholder-slate-600 px-1 py-1 outline-none"
-            placeholder="OPLive"
-          />
-        </div>
         <button
           type="button"
           onClick={() => fetchFeed(true)}
@@ -377,6 +400,44 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
         </button>
       </div>
 
+      {/* Hashtag chips — follow multiple tags at once; the feed blends them.
+          Type a tag and press Enter or comma to add; × or Backspace removes. */}
+      <div className="flex flex-wrap items-center gap-1.5 px-2.5 py-2 border-b border-slate-800/80 flex-shrink-0">
+        {tags.map((t) => (
+          <span
+            key={t}
+            className="inline-flex items-center gap-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 pl-2 pr-1 py-0.5 text-[11px] text-cyan-300"
+          >
+            #{t}
+            <button
+              type="button"
+              onClick={() => removeTag(t)}
+              aria-label={`Remove #${t}`}
+              className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-cyan-400/70 hover:text-rose-300 hover:bg-rose-500/20 transition"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-2.5 h-2.5">
+                <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </span>
+        ))}
+        {tags.length < MAX_TAGS && (
+          <span className="inline-flex items-center rounded bg-slate-900/80 border border-slate-800 px-1.5 min-w-0 flex-1">
+            <span className="text-slate-500 text-[12px]">#</span>
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={onDraftKeyDown}
+              onBlur={() => draft && addTags(draft)}
+              spellCheck={false}
+              aria-label="Add a hashtag"
+              className="w-full min-w-[60px] bg-transparent text-[12px] text-cyan-300 placeholder-slate-600 px-1 py-0.5 outline-none"
+              placeholder={tags.length ? 'add tag…' : 'OPLive'}
+            />
+          </span>
+        )}
+      </div>
+
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-2.5 py-2.5 min-h-0">
         {!configured ? (
@@ -394,7 +455,7 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
-            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-500">Loading #{tag}…</span>
+            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-500">Loading {tags.map((t) => `#${t}`).join(' ')}…</span>
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center gap-2 py-10 px-3 text-center">
@@ -403,11 +464,11 @@ const OPLiveFeedPanel = ({ tag, onChangeTag, width, onResize, onClose, bottomGap
           </div>
         ) : posts.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-10 px-3 text-center">
-            <p className="text-[12px] text-slate-500">No posts for <span className="text-cyan-400">#{tag}</span> yet.</p>
+            <p className="text-[12px] text-slate-500">No posts for <span className="text-cyan-400">{tags.map((t) => `#${t}`).join(', ')}</span> yet.</p>
             <p className="text-[11px] text-slate-600">New posts appear here automatically while the show is live.</p>
           </div>
         ) : (
-          posts.map((p) => <PostCard key={p.post_id} post={p} onExpandImage={setLightbox} />)
+          posts.map((p) => <PostCard key={p.post_id} post={p} showTag={multi} onExpandImage={setLightbox} />)
         )}
       </div>
 

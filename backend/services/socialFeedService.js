@@ -20,6 +20,7 @@ const FRESH_TTL_MS = 30 * 1000;        // refetch a tag at most this often
 const FETCH_COUNT = 40;                // posts pulled per upstream fetch
 const DEFAULT_LIMIT = 60;              // posts returned to the panel
 const MAX_LIMIT = 100;
+const MAX_TAGS = 6;                    // max hashtags blended into one feed
 const RETENTION_DAYS = 7;              // drop posts older than this
 const PURGE_INTERVAL_MS = 60 * 60_000; // purge at most hourly
 
@@ -29,15 +30,34 @@ const lastFetchAt = new Map();   // tag -> epoch ms
 const inFlight = new Map();      // tag -> Promise
 let lastPurgeAt = 0;
 
-/** Normalize a user-supplied tag to the stored form: no '#', lower-case,
- *  alphanumerics + underscore only. Falls back to 'oplive'. */
-function normalizeTag(raw) {
-  const t = String(raw || '')
+/** Clean a single tag to the stored form (no '#', lower-case, alnum +
+ *  underscore). Returns '' for empty/garbage — caller decides the fallback. */
+function cleanTag(raw) {
+  return String(raw || '')
     .trim()
     .replace(/^#+/, '')
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, '');
-  return t || 'oplive';
+}
+
+/** Normalize a single user-supplied tag; falls back to 'oplive'. */
+function normalizeTag(raw) {
+  return cleanTag(raw) || 'oplive';
+}
+
+/** Parse a comma/space-delimited tag string (or array) into a deduped, capped
+ *  list of normalized tags. Falls back to ['oplive'] when nothing is valid.
+ *  This is what powers the multi-hashtag blended feed. */
+function normalizeTags(raw) {
+  const parts = Array.isArray(raw) ? raw : String(raw || '').split(/[,\s]+/);
+  const out = [];
+  const seen = new Set();
+  for (const p of parts) {
+    const t = cleanTag(p);
+    if (t && !seen.has(t)) { seen.add(t); out.push(t); }
+    if (out.length >= MAX_TAGS) break;
+  }
+  return out.length ? out : ['oplive'];
 }
 
 /** Highest-bitrate progressive MP4 from a video_info.variants array. */
@@ -167,61 +187,75 @@ async function maybePurge() {
   }
 }
 
-/** Read the latest stored posts for a tag. */
-async function readPosts(tag, limit) {
+/** Read the latest stored posts across one or more tags, newest-first.
+ *  Posts are keyed by post_id (PK), so a post that matched several of the
+ *  requested tags appears once — the blended feed is naturally deduped. */
+async function readPosts(tags, limit) {
   const result = await pg.query(
     `SELECT post_id, platform, tag, author_handle, author_name, text, media, url,
             likes, retweets, replies, posted_at
        FROM social_feed_posts
-      WHERE tag = $1
+      WHERE tag = ANY($1)
       ORDER BY posted_at DESC NULLS LAST, ingested_at DESC
       LIMIT $2`,
-    [tag, limit]
+    [tags, limit]
   );
   return result.rows;
 }
 
+/** Refresh one tag from X if it's stale (or forced). Per-tag coalescing so
+ *  concurrent polls/viewers share a single upstream call. Never throws. */
+async function refreshTag(tag, force) {
+  const stale = force || (Date.now() - (lastFetchAt.get(tag) || 0)) > FRESH_TTL_MS;
+  if (!stale) return;
+  let pending = inFlight.get(tag);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const n = await fetchUpstream(tag);
+        lastFetchAt.set(tag, Date.now());
+        return n;
+      } finally {
+        inFlight.delete(tag);
+      }
+    })();
+    inFlight.set(tag, pending);
+  }
+  try { await pending; } catch (_) { /* served from DB regardless */ }
+}
+
 /**
- * Public entry point. Returns { configured, tag, posts, fetchedUpstream }.
- * Refreshes from X when the tag is stale (or force=true), then serves the
- * newest stored posts. Never throws on upstream failure — it falls back
- * to whatever is already persisted.
+ * Public entry point. Accepts one tag or a comma/space-delimited list and
+ * returns a blended, newest-first feed across all of them:
+ *   { configured, tags, tag, posts, fetchedUpstream, cachedAt }
+ * Refreshes each stale tag from X (in parallel, coalesced per tag), then
+ * serves the newest stored posts. Never throws on upstream failure — falls
+ * back to whatever is already persisted. `tag` (comma-joined) is kept for
+ * back-compat with any older caller.
  */
 async function getFeed(tagRaw, { limit = DEFAULT_LIMIT, force = false } = {}) {
-  const tag = normalizeTag(tagRaw);
+  const tags = normalizeTags(tagRaw);
   const cap = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
   const configured = isConfigured();
 
   if (configured) {
-    const stale = force || (Date.now() - (lastFetchAt.get(tag) || 0)) > FRESH_TTL_MS;
-    if (stale) {
-      // Coalesce concurrent refreshes for the same tag.
-      let pending = inFlight.get(tag);
-      if (!pending) {
-        pending = (async () => {
-          try {
-            const n = await fetchUpstream(tag);
-            lastFetchAt.set(tag, Date.now());
-            await maybePurge();
-            return n;
-          } finally {
-            inFlight.delete(tag);
-          }
-        })();
-        inFlight.set(tag, pending);
-      }
-      try { await pending; } catch (_) { /* served from DB below */ }
-    }
+    await Promise.all(tags.map((t) => refreshTag(t, force)));
+    await maybePurge();
   }
 
-  const posts = await readPosts(tag, cap);
+  const posts = await readPosts(tags, cap);
+  const cachedAt = tags.reduce((min, t) => {
+    const ts = lastFetchAt.get(t);
+    return ts && (min == null || ts < min) ? ts : min;
+  }, null);
   return {
     configured,
-    tag,
+    tags,
+    tag: tags.join(','),
     posts,
     fetchedUpstream: configured,
-    cachedAt: lastFetchAt.get(tag) || null
+    cachedAt
   };
 }
 
-module.exports = { getFeed, normalizeTag };
+module.exports = { getFeed, normalizeTag, normalizeTags };

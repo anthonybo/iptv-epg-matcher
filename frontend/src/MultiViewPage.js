@@ -77,6 +77,9 @@ const MultiViewPage = ({ sessionId }) => {
       // Commercial auto-skip — off by default. When enabled, both
       // audio and logo detection run unless individually disabled.
       commercialAutoSkip: false,
+      // Audio-follow: when a break hits the audible stream, move audio to an
+      // ad-free one (silent if all are in ads). Opt-in.
+      commercialAudioFollow: false,
       commercialDetectAudio: true,
       commercialDetectLogo: true
     };
@@ -97,16 +100,25 @@ const MultiViewPage = ({ sessionId }) => {
   // visible. open/width/tag persist so it comes back the way you left it.
   const [feedPanel, setFeedPanel] = useState(() => {
     const saved = localStorage.getItem('multiview_social_feed');
-    const defaults = { open: false, width: 380, tag: 'OPLive' };
+    const defaults = { open: false, width: 380, tags: ['OPLive'] };
     if (saved) {
-      try { return { ...defaults, ...JSON.parse(saved) }; } catch { return defaults; }
+      try {
+        const parsed = JSON.parse(saved);
+        // Migrate the old single-tag shape ({ tag: 'OPLive' }) to tags[].
+        const tags = Array.isArray(parsed.tags)
+          ? parsed.tags
+          : (parsed.tag ? [parsed.tag] : defaults.tags);
+        return { ...defaults, ...parsed, tags: tags.length ? tags : defaults.tags };
+      } catch { return defaults; }
     }
     return defaults;
   });
   // Functional updates so these stay referentially stable (no feedPanel dep).
   const toggleFeedPanel = useCallback(() => setFeedPanel((p) => ({ ...p, open: !p.open })), []);
   const closeFeedPanel = useCallback(() => setFeedPanel((p) => ({ ...p, open: false })), []);
-  const setFeedTag = useCallback((tag) => setFeedPanel((p) => ({ ...p, tag })), []);
+  const setFeedTags = useCallback((tags) => setFeedPanel((p) => ({
+    ...p, tags: (Array.isArray(tags) && tags.length) ? tags : ['OPLive']
+  })), []);
   const setFeedWidth = useCallback((width) => setFeedPanel((p) => ({ ...p, width })), []);
   // Minimize-to-tray: streams "parked" in the bottom shelf — still playing,
   // shrunk, out of the way (e.g. park a stream when an ad comes up, watch
@@ -300,6 +312,7 @@ const MultiViewPage = ({ sessionId }) => {
   // or include logo detection (cable).
   const commercial = useCommercialOrchestrator({
     enabled: Boolean(autoFillSettings.commercialAutoSkip),
+    audioFollow: Boolean(autoFillSettings.commercialAudioFollow),
     audioEnabled: autoFillSettings.commercialDetectAudio !== false,
     logoEnabled: autoFillSettings.commercialDetectLogo !== false,
     streams,
@@ -1362,8 +1375,8 @@ const MultiViewPage = ({ sessionId }) => {
           this multiview display; hidden in theatre mode. */}
       {!isTheatreMode && feedPanel.open && (
         <OPLiveFeedPanel
-          tag={feedPanel.tag}
-          onChangeTag={setFeedTag}
+          tags={feedPanel.tags}
+          onChangeTags={setFeedTags}
           width={feedPanel.width}
           onResize={setFeedWidth}
           onClose={closeFeedPanel}
