@@ -113,18 +113,136 @@ async function authenticateStalker(portalUrl, macAddress) {
 }
 
 /**
- * Get account information from Stalker portal
+ * Register the STB profile with the portal.
+ *
+ * This is a REQUIRED step that sits between the handshake and any content
+ * request: many portals (Stalker/Ministra) hand back an EMPTY channel list
+ * until the session has been "activated" by a get_profile call. Skipping it
+ * is silent — the portal returns HTTP 200 with a zero-byte body, which then
+ * surfaces downstream as "No channels found from Stalker portal".
+ *
+ * The params below mirror what a MAG250 emulator sends. device_id/signature
+ * are left blank (most portals don't validate them); the ones that matter for
+ * activation are stb_type + the auth'd token.
+ *
+ * @param {string} baseUrl - Base portal URL (already trailing-slashed)
+ * @param {string} macAddress - MAC address
+ * @param {string} token - Authentication token from the handshake
+ * @returns {Promise<Object|null>} Parsed profile object, or null on failure
+ */
+async function getStalkerProfile(baseUrl, macAddress, token) {
+  try {
+    const normalizedMac = normalizeMacAddress(macAddress);
+    const params = new URLSearchParams({
+      type: 'stb',
+      action: 'get_profile',
+      hd: '1',
+      ver: 'ImageDescription: 0.2.18-r23-250; ImageDate: Wed Aug 28 2019; PORTAL version: 5.6.2; API Version: JS API version: 343',
+      num_banks: '2',
+      sn: normalizedMac.replace(/:/g, '').slice(0, 13),
+      stb_type: 'MAG250',
+      client_type: 'STB',
+      image_version: '218',
+      video_out: 'hdmi',
+      device_id: '',
+      device_id2: '',
+      signature: '',
+      auth_second_step: '0',
+      hw_version: '1.7-BD-00',
+      not_valid_token: '0',
+      JsHttpRequest: '1-xml'
+    });
+    const url = `${baseUrl}portal.php?${params.toString()}`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+        'X-User-Agent': 'Model: MAG250; Link: WiFi',
+        'Cookie': `mac=${normalizedMac}; stb_lang=en; timezone=America/New_York`,
+        'Authorization': `Bearer ${token}`
+      },
+      timeout: 15000
+    });
+
+    if (!response.ok) {
+      logger.warn(`Stalker get_profile returned ${response.status} — continuing anyway`);
+      return null;
+    }
+
+    const data = await response.json().catch(() => null);
+    if (!data || !data.js) {
+      logger.warn('Stalker get_profile returned no profile data — continuing anyway');
+      return null;
+    }
+    logger.info(`Stalker profile registered (id=${data.js.id || '?'})`);
+    return data.js;
+  } catch (error) {
+    // Best-effort: don't fail the whole load if profile registration errors —
+    // portals that don't require it will still return channels.
+    logger.warn(`Stalker get_profile failed (${error.message}) — continuing anyway`);
+    return null;
+  }
+}
+
+/**
+ * Parse a Stalker expiry value into a Unix timestamp in SECONDS — the same
+ * format the rest of the app stores in iptv_sources.exp_date (Xtream uses
+ * seconds-since-epoch too, and the frontend renders it via `new Date(s*1000)`).
+ *
+ * Handles the conventions seen in the wild:
+ *   - a human date string: "April 10, 2027, 12:00 am", "2027-04-10 00:00:00"
+ *   - a numeric unix timestamp in seconds (10 digits) or milliseconds (13)
+ *
+ * Returns null for empty/zero/unparseable values, and — importantly — for
+ * anything that resolves outside a sane year range, so a real phone number
+ * sitting in the `phone` field isn't mistaken for a date (e.g. "5551234567"
+ * would otherwise read as the year 2145).
+ */
+function parseExpiryToSeconds(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s || s === '0' || /^0000-00-00/.test(s)) return null;
+
+  let secs;
+  if (/^\d{13}$/.test(s)) {
+    secs = Math.floor(parseInt(s, 10) / 1000);            // milliseconds → seconds
+  } else if (/^\d{9,11}$/.test(s)) {
+    secs = parseInt(s, 10);                                // already seconds
+  } else {
+    // Human date. JS is inconsistent parsing a lowercase "12:00 am" suffix,
+    // so if the whole string won't parse, retry with the trailing time removed.
+    let d = new Date(s);
+    if (isNaN(d.getTime())) d = new Date(s.replace(/,?\s*\d{1,2}:\d{2}\s*[ap]m.*$/i, ''));
+    if (isNaN(d.getTime())) return null;
+    secs = Math.floor(d.getTime() / 1000);
+  }
+
+  const year = new Date(secs * 1000).getFullYear();
+  if (year < 2020 || year > 2060) return null;             // reject phone numbers / epoch-0 / junk
+  return secs;
+}
+
+/**
+ * Get account information (expiry/status) from a Stalker portal.
+ *
+ * Stalker nests the payload under `js` (NOT `account_info` — the old code read
+ * `data.account_info.end_date`, which is always undefined, so expiry never
+ * populated). Different panels expose the subscription end date in different
+ * fields; the widespread convention is to stuff it into `phone`. We check the
+ * explicit date fields first, then fall back to `phone`.
+ *
  * @param {string} portalUrl - Portal URL
  * @param {string} macAddress - MAC address
  * @param {string} token - Authentication token
- * @returns {Promise<Object>} Account info
+ * @returns {Promise<{exp_date: string|null, account_status: string, is_trial: boolean}>}
  */
 async function getStalkerAccountInfo(portalUrl, macAddress, token) {
   try {
     const baseUrl = portalUrl.endsWith('/') ? portalUrl : `${portalUrl}/`;
     const normalizedMac = normalizeMacAddress(macAddress);
 
-    const url = `${baseUrl}portal.php?type=account_info&action=get_main_info`;
+    const url = `${baseUrl}portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml`;
 
     const response = await fetch(url, {
       method: 'GET',
@@ -138,29 +256,31 @@ async function getStalkerAccountInfo(portalUrl, macAddress, token) {
 
     if (!response.ok) {
       logger.warn(`Failed to get Stalker account info: ${response.status}`);
-      return {
-        exp_date: null,
-        account_status: 'Active',
-        is_trial: false
-      };
+      return { exp_date: null, account_status: 'Active', is_trial: false };
     }
 
-    const data = await response.json();
-    logger.debug('Stalker account info:', data);
+    const data = await response.json().catch(() => null);
+    const js = (data && typeof data.js === 'object' && data.js) || {};
+    logger.debug(`Stalker account info js: ${JSON.stringify(js)}`);
+
+    // Priority: explicit date fields, then the "expiry in phone" convention.
+    const expRaw = js.end_date || js.exp_date || js.expire_billing_date || js.phone || null;
+    const expSeconds = parseExpiryToSeconds(expRaw);
+
+    if (expSeconds) {
+      logger.info(`Stalker account expiry: ${new Date(expSeconds * 1000).toISOString().slice(0, 10)} (from "${expRaw}")`);
+    } else if (expRaw) {
+      logger.warn(`Stalker expiry value present but not parseable: ${JSON.stringify(expRaw)}`);
+    }
 
     return {
-      exp_date: data.account_info?.end_date || null,
-      account_status: data.account_info?.status || 'Active',
-      is_trial: data.account_info?.is_trial === '1' || false
+      exp_date: expSeconds ? String(expSeconds) : null,
+      account_status: js.account_status || js.status || 'Active',
+      is_trial: js.is_trial === '1' || js.is_trial === true || false
     };
   } catch (error) {
     logger.error(`Error getting Stalker account info: ${error.message}`);
-    // Return default values if account info fails
-    return {
-      exp_date: null,
-      account_status: 'Active',
-      is_trial: false
-    };
+    return { exp_date: null, account_status: 'Active', is_trial: false };
   }
 }
 
@@ -488,6 +608,11 @@ async function loadStalkerEPG(portalUrl, macAddress, options = {}) {
     // Step 1: Authenticate and get token
     const { token, profileId, baseUrl } = await authenticateStalker(portalUrl, macAddress);
 
+    // Step 1.5: Register the STB profile. REQUIRED — without this many portals
+    // return an empty channel list (HTTP 200, zero-byte body), which surfaces
+    // as "No channels found from Stalker portal".
+    await getStalkerProfile(baseUrl, macAddress, token);
+
     // Step 2: Get account information
     const accountInfo = await getStalkerAccountInfo(baseUrl, macAddress, token);
 
@@ -522,8 +647,10 @@ async function loadStalkerEPG(portalUrl, macAddress, options = {}) {
 module.exports = {
   loadStalkerEPG,
   authenticateStalker,
+  getStalkerProfile,
   getStalkerAccountInfo,
   getStalkerCategories,
   getStalkerChannels,
-  normalizeMacAddress
+  normalizeMacAddress,
+  parseExpiryToSeconds
 };

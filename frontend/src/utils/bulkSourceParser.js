@@ -42,17 +42,21 @@ const BARE_HOST_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)+(?::\d{1,5})?
 // match here.
 const SERVER_LABEL_RE = /^\s*(?:host|server|portal|real[\s-]*url|url|dns|domain|line)\s*[:=]\s*(.+?)\s*$/i;
 
-// Extract a server URL from a labeled line. Returns a normalized
-// `http://host[:port]` (or the URL's origin) or null if the value
-// doesn't look like a host. A line carrying a full Xtream get.php URL
-// is left for the dedicated xtream parser, so we bail on those.
+// Extract a server URL from a labeled line. Returns the RAW server string —
+// a full `http(s)://host[:port]/path` is returned WITH its path, because the
+// path matters for Stalker portals: auth hits `${portal}/portal.php`, so a
+// portal of `http://host/c/` must keep the `/c/`. Callers normalize to an
+// origin themselves (via normalizeServer) for the Xtream server field. A bare
+// host becomes `http://host`. Returns null if the value doesn't look like a
+// host. A line carrying a full Xtream get.php URL is left for the dedicated
+// xtream parser, so we bail on those.
 const extractLabeledServer = (line) => {
   const m = line.match(SERVER_LABEL_RE);
   if (!m) return null;
   const value = stripTrailingPunctuation(m[1].trim());
   if (!value) return null;
   if (GET_PHP_RE.test(value)) return null; // full xtream URL — not just a server
-  if (/^https?:\/\//i.test(value)) return normalizeServer(value);
+  if (/^https?:\/\//i.test(value)) return value; // keep the path (Stalker /c/)
   // Bare host[:port] (possibly with a leading // or trailing path) — take
   // the authority and validate it looks like a real host.
   const authority = value.replace(/^\/\//, '').split('/')[0];
@@ -125,9 +129,17 @@ export const parseBulkSources = (rawText, options = {}) => {
     return { entries, errors };
   }
 
-  // Shared "last-seen server URL" context. A URL anywhere in the text updates
-  // it and subsequent MAC or Username/Password lines bind to it.
-  let currentServer = defaultPortal || null;
+  // Shared "last-seen portal/server" context. A portal line updates it and
+  // MAC / Username-Password lines bind to it. Two views of the same thing:
+  //   currentServerRaw — full URL incl. path, used for Stalker portals (/c/).
+  //   currentServer    — normalized origin, used for the Xtream server field.
+  let currentServerRaw = defaultPortal || null;
+  let currentServer = defaultPortal ? normalizeServer(defaultPortal) : null;
+  // MACs can appear ABOVE their portal in labeled-block dumps (MAC: …, some
+  // metadata, then Portal: …). The forward-only scan can't see that portal
+  // yet, so hold such MACs here and bind them when a portal shows up. Anything
+  // still pending at end-of-parse never found a portal and errors out.
+  let pendingMacs = []; // [{ macs: string[], line, text }]
   // Some pastes put Username and Password on separate lines (with metadata
   // between them). Hold the first-seen half until the matching half arrives.
   let pendingHalf = null; // { kind: 'username'|'password', value, line, text } | null
@@ -135,6 +147,22 @@ export const parseBulkSources = (rawText, options = {}) => {
   const orphanReason = (kind) => (
     kind === 'username' ? 'Username without matching Password' : 'Password without matching Username'
   );
+
+  const addStalker = (portal, mac, raw) => {
+    const entry = { type: 'stalker', server: portal, mac, raw };
+    const key = dedupeKey(entry);
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push(entry);
+  };
+
+  // A portal just became known — bind every MAC that was waiting for one.
+  const flushPendingMacs = (portal) => {
+    if (!pendingMacs.length || !portal) return;
+    const queued = pendingMacs;
+    pendingMacs = [];
+    queued.forEach(({ macs, text }) => macs.forEach((mac) => addStalker(portal, mac, text)));
+  };
 
   const lines = rawText.split(/\r?\n/);
   lines.forEach((originalLine, index) => {
@@ -172,7 +200,9 @@ export const parseBulkSources = (rawText, options = {}) => {
     if (!userPass) {
       const labeledServer = extractLabeledServer(line);
       if (labeledServer) {
-        currentServer = labeledServer;
+        currentServerRaw = labeledServer;               // full portal (keeps /c/) for Stalker MACs
+        currentServer = normalizeServer(labeledServer); // origin for Xtream creds
+        flushPendingMacs(currentServerRaw);             // bind any MAC seen earlier in this block
         return;
       }
     }
@@ -204,7 +234,7 @@ export const parseBulkSources = (rawText, options = {}) => {
     if (userPass && (userPass.username || userPass.password)) {
       const inlineServer = nonXtreamUrls[0] ? normalizeServer(nonXtreamUrls[0]) : null;
       const server = inlineServer || currentServer;
-      if (inlineServer) currentServer = inlineServer;
+      if (inlineServer) { currentServer = inlineServer; currentServerRaw = nonXtreamUrls[0]; }
 
       let { username, password } = userPass;
 
@@ -254,31 +284,39 @@ export const parseBulkSources = (rawText, options = {}) => {
     // Priority 3: a MAC on the line — Stalker entry bound to current or inline portal.
     if (macsInLine.length > 0) {
       const inlineServer = nonXtreamUrls[0] || null;
-      const portal = inlineServer || currentServer;
+      if (inlineServer) {
+        currentServerRaw = inlineServer;
+        currentServer = normalizeServer(inlineServer);
+      }
+      const portal = inlineServer || currentServerRaw || currentServer;
       if (!portal) {
-        errors.push({
-          line: index + 1,
-          text: originalLine,
-          reason: 'MAC found without a portal URL — set a default portal or include one on the line',
-        });
+        // No portal known yet — but in labeled-block dumps the Portal: line
+        // often sits a few lines BELOW the MAC. Defer and bind on flush; if the
+        // paste never yields a portal, this errors out at end-of-parse.
+        pendingMacs.push({ macs: macsInLine, line: index + 1, text: originalLine });
         return;
       }
-      if (inlineServer) currentServer = inlineServer;
-      macsInLine.forEach((mac) => {
-        const entry = { type: 'stalker', server: portal, mac, raw: originalLine };
-        const key = dedupeKey(entry);
-        if (seen.has(key)) return;
-        seen.add(key);
-        entries.push(entry);
-      });
+      macsInLine.forEach((mac) => addStalker(portal, mac, originalLine));
       return;
     }
 
-    // Priority 4: a URL alone — remember it as the server context for the next line.
+    // Priority 4: a URL alone — remember it as the server context for the next
+    // line, and bind any MAC that appeared before it in this block.
     if (nonXtreamUrls.length > 0) {
-      currentServer = nonXtreamUrls[0];
+      currentServerRaw = nonXtreamUrls[0];
+      currentServer = normalizeServer(nonXtreamUrls[0]);
+      flushPendingMacs(currentServerRaw);
       return;
     }
+  });
+
+  // Any MACs still waiting never found a portal anywhere in the paste.
+  pendingMacs.forEach(({ line, text }) => {
+    errors.push({
+      line,
+      text,
+      reason: 'MAC found without a portal URL — set a default portal or include one on the line',
+    });
   });
 
   // Any half-credential still waiting at the end never got matched.

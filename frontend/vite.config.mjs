@@ -35,5 +35,11 @@ export default defineConfig({
         proxyTimeout: 0,
       }
     }
+  },
+  // Vitest config (read by `npm test`). Logic/util tests run in plain Node;
+  // a component test can opt into a DOM with `// @vitest-environment jsdom`.
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.{js,jsx}'],
   }
 })
